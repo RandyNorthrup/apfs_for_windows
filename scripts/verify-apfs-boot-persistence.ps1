@@ -6,6 +6,8 @@ param(
     [string]$Mount = "Z:",
     [string]$ExpectedFile = "src.bin",
     [string]$ExpectedSha256 = "5DE304A213068C0F526D99253D0D4A18A4652E95D010A0E96D43CB5ED758A32B",
+    [switch]$ReadProbeOnly,
+    [int]$ReadProbeBytes = 4096,
     [string[]]$ExpectedEntries = @("clone.bin", "link.bin", "src.bin"),
     [string]$OutputPath = "artifacts\boot-persistence\apfs-persistence-verification.json",
     [switch]$ArmNextLogon,
@@ -68,10 +70,28 @@ function Invoke-Verification {
 
     $hash = $null
     $hashMatches = $false
+    $readProbeOk = $false
+    $readProbeBytesRead = 0
+    $readProbeMessage = $null
     $targetFile = Join-Path $mountRoot $ExpectedFile
     if (Test-Path -LiteralPath $targetFile -PathType Leaf) {
-        $hash = (Get-FileHash -LiteralPath $targetFile -Algorithm SHA256).Hash
-        $hashMatches = $hash -eq $ExpectedSha256
+        if ($ReadProbeOnly) {
+            try {
+                $buffer = New-Object byte[] ([Math]::Max(1, $ReadProbeBytes))
+                $stream = [IO.File]::Open($targetFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+                try {
+                    $readProbeBytesRead = $stream.Read($buffer, 0, $buffer.Length)
+                    $readProbeOk = $readProbeBytesRead -gt 0
+                } finally {
+                    $stream.Dispose()
+                }
+            } catch {
+                $readProbeMessage = $_.Exception.Message
+            }
+        } else {
+            $hash = (Get-FileHash -LiteralPath $targetFile -Algorithm SHA256).Hash
+            $hashMatches = $hash -eq $ExpectedSha256
+        }
     }
 
     $writeDenied = $false
@@ -94,7 +114,7 @@ function Invoke-Verification {
         $serviceCim.StartMode -eq "Auto" -and
         $mountExists -and
         $missingEntries.Count -eq 0 -and
-        $hashMatches -and
+        (($ReadProbeOnly -and $readProbeOk) -or ((-not $ReadProbeOnly) -and $hashMatches)) -and
         $writeDenied
 
     $result = [ordered]@{
@@ -117,10 +137,19 @@ function Invoke-Verification {
             missing_expected_entries = $missingEntries
         }
         file_hash = [ordered]@{
+            skipped = [bool]$ReadProbeOnly
             file = $ExpectedFile
             expected_sha256 = $ExpectedSha256
             actual_sha256 = $hash
             matches = $hashMatches
+        }
+        read_probe = [ordered]@{
+            enabled = [bool]$ReadProbeOnly
+            file = $ExpectedFile
+            requested_bytes = [int]$ReadProbeBytes
+            bytes_read = [int]$readProbeBytesRead
+            ok = [bool]$readProbeOk
+            message = $readProbeMessage
         }
         write_probe = [ordered]@{
             denied = $writeDenied

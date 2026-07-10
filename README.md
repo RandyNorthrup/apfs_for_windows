@@ -169,6 +169,15 @@ Arm a next-login persistence proof before reboot:
 .\scripts\verify-apfs-boot-persistence.ps1 -ArmNextLogon -OutputPath artifacts\boot-persistence\post-reboot-verification.json
 ```
 
+For no-reboot current-state proof on a large mounted USB file, use partial-read
+mode:
+
+```powershell
+$f = "Predator Badlands 2025 1080p WEB-DL HEVC x265 5.1 BONE.mkv"
+$entries = ".Spotlight-V100", ".fseventsd", "New folder", $f, "icons8-jester.svg"
+.\scripts\verify-apfs-boot-persistence.ps1 -VerifyNow -Mount Y: -ExpectedFile $f -ExpectedEntries $entries -ReadProbeOnly -ReadProbeBytes 4096
+```
+
 Uninstall:
 
 ```powershell
@@ -420,3 +429,12 @@ Verified copied-core mutation evidence:
   read-only with raw writes disabled. Actual post-reboot proof still requires a
   reboot or armed next-login verifier run; no reboot was performed in this
   session.
+- `artifacts\boot-persistence\apfs-persistence-y-verification.json` proves the
+  current no-reboot `Y:` persistence state: service Automatic/running, mounted
+  root entries visible, existing movie file read probe returns 4096 bytes, and a
+  read-only write probe is denied.
+- Current USB read gap: `Y:\icons8-jester.svg` opens and lists at 5509 bytes but
+  read fails. Raw `apfs_probe --read-file icons8-jester.svg` reports
+  `APFS block 1753640960 is outside container bounds`. Treat as a remaining
+  corruption/compression/resource-fork classification blocker before broad
+  "all existing APFS files read" claims.

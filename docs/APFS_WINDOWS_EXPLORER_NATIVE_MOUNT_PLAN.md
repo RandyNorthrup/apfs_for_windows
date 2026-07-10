@@ -720,6 +720,13 @@ Exit gate: release checklist passes with artifacts under this repo.
   `5DE304A213068C0F526D99253D0D4A18A4652E95D010A0E96D43CB5ED758A32B`, and denies
   a write probe. Current post-repair state separately confirms `Y:` is read-only
   with raw writes disabled.
+- Current no-reboot `Y:` persistence proof is saved at
+  `artifacts\boot-persistence\apfs-persistence-y-verification.json`. It uses
+  `scripts\verify-apfs-boot-persistence.ps1 -VerifyNow -Mount Y: -ReadProbeOnly`
+  against the existing movie file, proves service Automatic/running, root entries
+  visible, 4096 bytes readable from
+  `Predator Badlands 2025 1080p WEB-DL HEVC x265 5.1 BONE.mkv`, and read-only
+  write denial on `Y:`.
 - Earlier USB raw RW proof is saved at
   `artifacts\usb-rw\usb-raw-rw-proof.json`. Current USB verifiers pin Disk 1
   `USB DISK 3.0` serial `067D19C65080`, APFS GPT partition 2, target
@@ -780,11 +787,17 @@ Exit gate: release checklist passes with artifacts under this repo.
   deterministic target-loss cleanup are proven without reboot. The service now
   registers disk-device notifications for immediate resync, but M5 still needs
   real physical surprise-unplug proof.
-- No actual reboot proof has been run yet after installing the Automatic service.
-  Service start, normal-session mount visibility, and current persistence health
-  are proven now; use `scripts\verify-apfs-boot-persistence.ps1 -ArmNextLogon`
-  before reboot to capture post-reboot proof. No reboot was performed in this
-  session because user explicitly said not to restart this PC.
+- No actual reboot proof has been run because this machine must not be restarted.
+  Automatic service start mode, recovery policy, normal-session mount visibility,
+  and current `Y:` persistence/read-only proof are current; use
+  `scripts\verify-apfs-boot-persistence.ps1 -ArmNextLogon` before a future
+  user-approved reboot to capture post-reboot proof.
+- Existing USB file read blocker: `Y:\icons8-jester.svg` lists at 5509 bytes and
+  returns readable ACLs, but mounted read fails with Access denied. Raw
+  `apfs_probe --read-file icons8-jester.svg` reports
+  `APFS block 1753640960 is outside container bounds`. Classify as corrupted
+  test file vs compression/resource-fork reader gap before any broad claim that
+  every existing file on the current USB is readable.
 
 ## 2026-07-09 Current Implementation Update
 
@@ -831,6 +844,9 @@ Exit gate: release checklist passes with artifacts under this repo.
 - `scripts\verify-usb-normal-user-rw.ps1 -PreflightOnly` now treats the safe
   read-only/raw-disabled USB mount as the required baseline before destructive
   proof, instead of requiring the mount to already be writable.
+- `scripts\verify-apfs-boot-persistence.ps1` gained `-ReadProbeOnly` and
+  `-ReadProbeBytes` so no-reboot persistence checks can prove an existing large
+  file is readable without hashing gigabytes through the mounted filesystem.
 - `scripts\run-apfs-for-windows-certification.ps1 -RunUsbWriteProof` now uses
   compact USB proof mode and completed full no-reboot certification with
   `ok=true`, `local_code_gates_ok=true`, `installed_persistence_ok=true`,
