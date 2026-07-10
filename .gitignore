@@ -1,0 +1,15 @@
+build*/
+.vs/
+.vscode/
+.agents/
+.codex/
+*.user
+*.suo
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.dll
+*.lib
+*.log
+artifacts/

@@ -1,0 +1,422 @@
+# APFS for Windows
+
+Native Windows Explorer APFS mount utility.
+
+Current state:
+
+- Local APFS core fork lives under `third_party/sak_apfs_core`, imported from
+  source commit `2f1d9844fabb3e6e8190f906e5cf4906e5e5f281` and patched only
+  inside this repository.
+- Apple LZFSE/LZVN reference code is vendored under `third_party/lzfse` for
+  APFS compression paths.
+- WinFsp 2025 runtime/SDK is supported and detected by CMake.
+- `apfs_probe` can probe APFS images/raw devices, list the root directory, and
+  read files by APFS path with SHA-256 output.
+- `apfs_winfs_worker` implements a WinFsp APFS mount over the copied APFS
+  reader/writer. Read-only remains default; read/write requires `--read-write`,
+  and physical raw writes also require `--allow-raw-writes`.
+- File create/write/delete/rename/move now routes arbitrary parent paths into
+  the APFS writer instead of the old one-directory child APIs.
+- Directory create/delete/rename/move now routes parent paths through copied core
+  wrappers; empty directory delete and directory rename/move rebuild the APFS
+  tree with one copy-on-write checkpoint.
+- Large same-handle raw writes stage to a temp host file and stream through the
+  APFS raw writer on flush, avoiding the old 64 MiB memory cap for Explorer
+  copy-style writes. Image mounts keep the 64 MiB buffered guard.
+- `apfs_mount_service` installs as `ApfsForWindowsMountService` with Automatic
+  startup, reads mount mappings from `C:\ProgramData\APFS for Windows\mounts.json`,
+  discovers APFS physical disks/partitions at service start, periodically syncs
+  live config/device changes, supervises worker processes, and restarts failed
+  mount workers so mounts return to normal Explorer/user sessions. It also has a
+  local service IPC path so installed CLI/manager requests can update safe mount
+  policy through the service instead of writing ProgramData directly.
+- `apfs_mount_service --health` reports installed service state, startup type,
+  service recovery policy, configured mounts, visible root entries, and mount
+  availability as JSON.
+- `apfs_mount_manager` is now a Qt Widgets manager UI with an accessible mount
+  table, refresh/discover/open/change-letter/read-write-mode/enable-disable/unmount/copy
+  actions, raw health JSON view, and `--status`/`--self-test` verification
+  modes.
+- `apfs_mount_manager` creates a persistent tray icon using a stacked `AP` over
+  `FS` icon. Right-click menu includes `Open` and `Exit`; closing the window no
+  longer exits the app.
+- `apfs_core_selftest` verifies copied APFS writer/reader behavior against
+  temporary images and a file-backed raw target: format/list/read, root and
+  nested file write/rename/delete, directory create/delete/rename/move, raw
+  streaming nested file write, raw file rename/move/delete, and preservation of
+  an existing 16 MiB file.
+- Copied source license tags and copied source-app licensing notices were
+  removed from code/docs. Third-party notices remain for Qt, WinFsp, and Apple
+  LZFSE.
+- WinFsp file handles are owned by the mount state and reclaimed through a
+  deferred close quarantine, avoiding the earlier unbounded raw `FileContext`
+  allocation leak during repeated Explorer open/close cycles.
+- Raw-device writes are still blocked by default. They require explicit
+  read/write mount policy, `--allow-raw-writes`, and serial-pinned verifier
+  evidence before USB write/delete proof is considered current.
+
+Build:
+
+```powershell
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_PREFIX_PATH=C:\Qt\6.10.3\msvc2022_64
+cmake --build build --config Release --parallel
+ctest --test-dir build -C Release --output-on-failure
+```
+
+Developer install, from elevated PowerShell:
+
+```powershell
+.\scripts\install-apfs-for-windows.ps1
+```
+
+Repair current install and restore the pinned USB APFS mount to read-only, from
+elevated PowerShell:
+
+```powershell
+.\scripts\repair-apfs-for-windows-install.ps1
+```
+
+From a normal PowerShell, use the guarded launcher. It refuses to start a new
+UAC prompt if one is already pending:
+
+```powershell
+.\scripts\start-repair-elevated.ps1
+```
+
+The repair script redeploys the current build to `C:\Program Files\APFS for
+Windows`, stops any lingering installed APFS worker processes before copying,
+keeps `ApfsForWindowsMountService` Automatic/running, restores
+`\\?\GLOBALROOT\Device\Harddisk1\Partition2` at `Y:` as read-only, verifies
+installed binary hashes, and writes
+`artifacts\repair\install-repair-proof.json`. It does not reboot.
+
+Configure a persistent read-only APFS mount:
+
+```powershell
+& "$env:ProgramFiles\APFS for Windows\apfs_mount_service.exe" --add-mount --target "\\.\PhysicalDrive2" --mount Z:
+Start-Service ApfsForWindowsMountService
+```
+
+Verify installed service and APFS USB mount state:
+
+```powershell
+& "$env:ProgramFiles\APFS for Windows\apfs_mount_service.exe" --health
+& "$env:ProgramFiles\APFS for Windows\apfs_mount_service.exe" --discover-apfs --max-physical-drives 8
+& "$env:ProgramFiles\APFS for Windows\apfs_mount_manager.exe" --self-test
+.\scripts\verify-current-apfs-state.ps1
+.\scripts\verify-winfsp-prerequisite.ps1
+.\scripts\verify-local-worker-rw-smoke.ps1
+.\scripts\verify-local-worker-fileops.ps1
+.\scripts\verify-local-worker-robocopy-stress.ps1
+.\scripts\verify-local-worker-large-existing-fileops.ps1
+.\scripts\verify-service-control-ipc.ps1
+.\scripts\verify-sak-source-boundary.ps1
+.\scripts\verify-license-notices.ps1
+.\scripts\build-release-package.ps1
+.\scripts\verify-release-package.ps1
+.\scripts\verify-service-recovery-policy.ps1
+.\scripts\verify-start-menu-entries.ps1
+.\scripts\verify-installed-app-registration.ps1
+.\scripts\verify-installed-service-mode-policy.ps1 -PreflightOnly
+.\scripts\start-repair-elevated.ps1
+.\scripts\run-apfs-for-windows-certification.ps1 -RunUsbWriteProof
+.\scripts\verify-usb-mounted-file-actions.ps1 -CleanupStaleProofEntries
+.\scripts\verify-apfs-boot-persistence.ps1 -VerifyNow
+.\scripts\verify-service-worker-restart.ps1 -ExpectedSha256 5DE304A213068C0F526D99253D0D4A18A4652E95D010A0E96D43CB5ED758A32B
+.\scripts\verify-apfs-auto-discovery.ps1 -RestoreOriginalConfig
+.\scripts\verify-service-live-sync.ps1
+.\scripts\verify-service-remove-mount.ps1
+.\scripts\verify-service-drive-letter.ps1
+.\scripts\verify-service-policy.ps1
+.\scripts\verify-service-target-loss.ps1
+.\scripts\verify-service-device-notifications.ps1
+.\scripts\verify-usb-raw-rw.ps1
+.\scripts\verify-usb-normal-user-rw.ps1 -NoDiagnostics
+```
+
+Serial-pinned normal-user USB write/delete proof is current. The verifier keeps
+file actions in the non-admin parent process, uses service IPC only to switch
+the pinned mount policy temporarily, restores `Y:` read-only, and writes
+`artifacts\usb-rw\usb-normal-user-rw-proof.json`. Use the non-mutating state
+check first:
+
+```powershell
+.\scripts\verify-current-apfs-state.ps1
+.\scripts\verify-usb-normal-user-rw.ps1 -NoDiagnostics
+```
+
+`-NoDiagnostics` uses the same mutation path but skips large trace/log tails in
+the final JSON so the proof cannot stall after successful file operations.
+
+Normal Explorer-style file actions are expected to run as the current user once
+the APFS mount is configured. The current verifier proves a root proof directory
+plus one direct child file create/write/rename/overwrite/delete, then deletes the
+empty proof directory without elevation or service policy changes:
+
+```powershell
+.\scripts\verify-usb-mounted-file-actions.ps1 -PreflightOnly
+.\scripts\verify-usb-mounted-file-actions.ps1 -CleanupStaleProofEntries
+.\scripts\run-apfs-for-windows-certification.ps1 -RunUsbMountedFileActions
+```
+
+Service policy changes still touch ProgramData; the current machine rejected a
+non-admin read-only restore with
+`Unable to write C:/ProgramData/APFS for Windows/mounts.json`.
+
+Arm a next-login persistence proof before reboot:
+
+```powershell
+.\scripts\verify-apfs-boot-persistence.ps1 -ArmNextLogon -OutputPath artifacts\boot-persistence\post-reboot-verification.json
+```
+
+Uninstall:
+
+```powershell
+.\scripts\uninstall-apfs-for-windows.ps1 -RemoveFiles
+```
+
+The uninstaller stops the service, waits for worker/mount teardown through the
+service stop path, deletes the service, optionally removes installed files, and
+writes `artifacts\uninstall\uninstall-proof.json`.
+Install/repair also deploy Start Menu shortcuts for the manager and elevated
+uninstall flow; `scripts\verify-start-menu-entries.ps1` verifies those shortcuts
+and the installed uninstall script.
+Install/repair register `APFS for Windows` under Windows Apps & Features with an
+uninstall command; `scripts\verify-installed-app-registration.ps1` verifies that
+registration.
+
+Build a release ZIP without installing:
+
+```powershell
+.\scripts\build-release-package.ps1
+.\scripts\verify-release-package.ps1
+```
+
+This stages `artifacts\package\APFS-for-Windows-0.1.0`, creates
+`artifacts\package\APFS-for-Windows-0.1.0.zip`, and verifies the required
+binaries, Qt runtime files, install/repair/uninstall scripts, README, license
+notices, and APFS core provenance note are present.
+
+License notices:
+
+```powershell
+.\scripts\verify-license-notices.ps1
+```
+
+This verifies project license presence plus Qt, WinFsp, and Apple LZFSE notices.
+
+WinFsp prerequisite:
+
+```powershell
+.\scripts\verify-winfsp-prerequisite.ps1
+```
+
+This verifies WinFsp registry registration, SDK header/import library, runtime
+DLL/driver, and that the built worker reports WinFsp support enabled.
+
+Copied APFS core source boundary:
+
+Do not edit `C:\Users\Randy\Coding\S.A.K.-Utility` for this project. Copy or
+import code into this repository first, then modify the local copy only.
+`scripts\verify-sak-source-boundary.ps1` verifies the source checkout status,
+the recorded source commit, expected copied APFS files, and declared local fork
+deltas under `third_party\sak_apfs_core`.
+
+Verified USB evidence:
+
+- Disk 2, Seagate Expansion Desk, serial `NAAA3QVK`, USB, non-boot/non-system,
+  stayed Windows-offline/RAW for raw-device proof.
+- Service-launched `Z:` read-only APFS mount lists `clone.bin`, `link.bin`,
+  `src.bin` in normal shell.
+- Startup auto-discovery also found GPT APFS
+  `\\?\GLOBALROOT\Device\Harddisk1\Partition2` and mounted it read-only at `Y:`.
+- All three files read as `A7-RAW-CERT-SHARED-PAYLOAD-2026` with SHA-256
+  `5DE304A213068C0F526D99253D0D4A18A4652E95D010A0E96D43CB5ED758A32B`.
+- Normal write attempt to `Z:\normal-write-deny-test.txt` is denied.
+- Disk 1, `USB DISK 3.0`, serial `067D19C65080`, GPT APFS partition 2,
+  30,832,287,744-byte APFS partition, is pinned for destructive USB RW proof.
+  Earlier proof artifacts are historical; current USB RW verifiers use one root
+  proof directory plus one direct child file, then restore read-only config
+  without rebooting or restarting the service.
+- Serial-pinned normal-user USB RW proof is current. On
+  `2026-07-10T05:57:50Z`, `scripts\verify-usb-normal-user-rw.ps1 -NoDiagnostics`
+  passed against Disk 1 partition 2 at `Y:` as `MINI-DT\Randy` without reboot:
+  proof directory create passed, child file write hash matched
+  `1EE19198B078224E6A5FF08DB2264DE61A1AD46B89937F5EB654C0CD865EDEE2`, rename
+  passed, file delete passed, directory delete passed, service PID stayed
+  `48880`, and `Y:` was restored read-only with raw writes disabled. Artifact:
+  `artifacts\usb-rw\usb-normal-user-rw-proof.json`.
+- `scripts\verify-usb-mounted-file-actions.ps1` is the direct mounted-drive file
+  action proof. It never elevates, never edits service config, refuses a stale
+  installed worker by default, supports `-PreflightOnly` for a zero-mutation
+  readiness check, optionally removes stale root proof directories with the
+  `sak-user-rw-manual-proof-*` prefix, waits for final mount visibility, records
+  initial/final mount policy, reports any stale entries still visible after
+  cleanup, labels `-AllowStaleInstalledWorker` runs as
+  `current_installed_mount_only`, and only mutates its own
+  `sak-mounted-file-actions-proof-*` directory on `Y:` during full proof.
+- `scripts\verify-current-apfs-state.ps1` generated
+  `artifacts\state\current-apfs-state.json`. Current preflight is `ready=true`:
+  no UAC prompt is pending, installed binaries match the current build, stale
+  proof entries are gone, service is Automatic/running, and `Y:` is restored
+  read-only with `allow_raw_writes=false`.
+- `scripts\repair-apfs-for-windows-install.ps1` is ready for the required
+  elevated recovery step. It stops the service, reaps any lingering installed
+  APFS worker processes, redeploys current binaries, restores the pinned USB
+  mount to read-only, configures restart-on-failure service recovery, verifies
+  service/binary/mount state, records `worker_cleanup`, and writes
+  `artifacts\repair\install-repair-proof.json`.
+- `scripts\start-repair-elevated.ps1` is the normal-user guarded launcher for
+  repair. It writes `artifacts\repair\start-repair-elevated-proof.json`, refuses
+  to create another UAC prompt while `consent.exe` is already pending, and waits
+  for the elevated repair proof artifact when launched.
+- `scripts\verify-service-recovery-policy.ps1` checks the installed service is
+  Automatic with three SCM restart actions and non-crash failure recovery enabled.
+- `scripts\verify-service-control-ipc.ps1` generated
+  `artifacts\service-control\service-control-ipc-proof.json`. It runs without
+  admin or USB mutation and proves service-control request handlers, local socket
+  transport, safe read-only/read-write policy changes, raw-write denial, and
+  manager UI command surface are present in the current build.
+- `scripts\verify-local-worker-fileops.ps1` generates
+  `artifacts\local-fileops\worker-fileops-proof.json`. It runs without admin or
+  USB mutation and proves a generated APFS image mount accepts Robocopy direct
+  child-file copy into one root proof directory, all-file hash verification,
+  edit, `MoveFileEx` replace-existing rename, file rename, recursive delete, and
+  post-unmount probe.
+- `scripts\verify-local-worker-robocopy-stress.ps1` generated
+  `artifacts\local-robocopy-stress\worker-robocopy-stress-proof.json`. It runs
+  without admin or USB mutation and repeats the Explorer-style Robocopy
+  copy/hash/edit/`MoveFileEx` replace/recursive-delete flow 10 times against a
+  generated APFS image at `T:`.
+- `scripts\verify-local-worker-large-existing-fileops.ps1` generates
+  `artifacts\local-large-fileops\worker-large-existing-fileops-proof.json`. It
+  runs without admin or USB mutation and proves the current worker can mount an
+  APFS image containing existing 16 MiB `large.bin`, create one root proof
+  directory, write/rename/overwrite/delete one direct child file, remove the
+  proof directory, then probe `large.bin` after unmount with the same SHA-256.
+- `scripts\verify-installed-service-mode-policy.ps1` is ready for the post-repair
+  installed-service proof. It runs without admin or USB mutation, mounts a
+  generated APFS image through the installed service, proves read-only write
+  denial, flips to read/write through service policy, writes/deletes a file,
+  flips back to read-only, and removes the mapping. Current post-repair
+  preflight passes.
+- `scripts\run-apfs-for-windows-certification.ps1` writes
+  `artifacts\certification\apfs-for-windows-certification.json`. Current full
+  no-reboot run completed `2026-07-10T05:57:50Z` with `ok=true`,
+  `local_code_gates_ok=true`, `installed_persistence_ok=true`,
+  `usb_preflight_ready=true`, and `full_usb_rw_ok=true`. It runs build, CTest,
+  script parse, local worker, service IPC, package, license, WinFsp, copied-core,
+  installed-state, and serial-pinned USB RW proof gates. Direct mounted-drive USB
+  file actions remain opt-in with `-RunUsbMountedFileActions`; broader
+  public-certification gates still need crash/rollback, Apple/macOS validation,
+  surprise-unplug, and wider metadata coverage.
+
+Verified copied-core mutation evidence:
+
+- Current `ctest --test-dir build -C Release --output-on-failure` passes 10/10,
+  including `apfs_service_control_self_test` and `apfs_service_ipc_self_test`.
+  These exercise service-side safe config requests, set-enabled/remove behavior,
+  raw-write denial, and actual local socket transport against a temporary
+  ProgramData root.
+- The previous worker-side physical raw mutation guard has been removed after
+  importing the recertified APFS writer code. Physical raw writes remain
+  opt-in through read/write mount policy plus `--allow-raw-writes`.
+- `artifacts\service-control\service-control-ipc-proof.json` proves those same
+  service-control paths plus the manager self-test from a non-admin PowerShell
+  verifier, including the manager read/write mode control.
+- `apfs_core_selftest` proves temp APFS image format/list/read plus image-only
+  COW root-file insert, replace, rename, delete, root-directory create/delete,
+  direct directory-child write/rename, child move to root, nested directory
+  create, and file-backed raw directory create/delete while preserving a 16 MiB
+  existing file through the vendored `third_party\sak_apfs_core` code.
+- `artifacts\rw-mount\rw-mounted-y-smoke.json` proves a WinFsp APFS image mount
+  at `Y:` created, read, renamed, replaced, and deleted `renamed-mount.txt`.
+- `artifacts\rw-mount\rw-fixture-after-mount-probe.json` proves the final image
+  is readable after unmount and contains only the expected original `renamed.txt`.
+- `artifacts\rw-mount\rw-mounted-y-directory-smoke.json` proves a WinFsp APFS
+  image mount created `ProofFolder`, wrote and renamed a child file, moved it to
+  root, and deleted the empty directory.
+- `artifacts\rw-mount\rw-dir-fixture-after-mount-probe.json` and
+  `artifacts\rw-mount\rw-dir-fixture-read-moved-root.json` prove the final image
+  is readable after unmount and `/moved-root.txt` has the expected payload hash.
+- `scripts\verify-local-worker-rw-smoke.ps1` generates
+  `artifacts\local-mount-smoke\worker-rw-smoke-proof.json`, proving the freshly
+  built worker can mount a generated APFS image at `W:` without admin, create one
+  root proof directory, write/hash/rename/delete a direct child file, delete the
+  empty proof directory, unmount, and leave the APFS image probeable.
+- `artifacts\local-fileops\worker-fileops-proof.json` proves Explorer-style file
+  operations against a generated APFS image at `V:`: Robocopy copies direct child
+  files into one root proof directory; hashes match; a child file is edited;
+  `MoveFileEx` replaces an existing file through WinFsp rename; a file is
+  renamed; the proof directory is recursively deleted; and the image probes
+  cleanly after unmount with only `large.bin` and `seed.txt` at root.
+- `artifacts\local-robocopy-stress\worker-robocopy-stress-proof.json` proves
+  the same Explorer-style Robocopy mutation sequence over 10 repeated proof
+  directories at `T:`. Each iteration copies direct child files, verifies all
+  hashes, edits one child file, replaces an existing file through `MoveFileEx`,
+  removes the proof tree recursively, and the final APFS probe shows only
+  `large.bin` and `seed.txt` at root.
+- `artifacts\local-large-fileops\worker-large-existing-fileops-proof.json`
+  proves the current worker handles the USB-failure class locally: image has
+  existing 16 MiB `large.bin`, mounted at `U:` without admin, root proof
+  directory plus direct child-file create/rename/overwrite/delete pass,
+  `large.bin` SHA-256 stays
+  `35D355B6F8D7D459B5FC1E66B6C459238F330BCFAE7B291583DA5C528BE0ED5D`, and
+  post-unmount probe showed no `LargeExistingProof` residue.
+- `artifacts\handle-lifetime\handle-lifetime-stress.json` proves 250 repeated
+  directory/read/hash iterations on a mounted APFS image, with 4,010 close events
+  and no worker exit.
+- `artifacts\install-upgrade\install-upgrade.log` proves the installed Automatic
+  service was upgraded with the current binaries and restarted.
+- `artifacts\service-supervision\worker-restart-proof.json` proves the installed
+  Automatic service restarted a killed `apfs_winfs_worker.exe` child and restored
+  `Z:` with expected entries and SHA-256 intact.
+- `artifacts\auto-discovery\service-auto-discovery-proof.json` proves the
+  installed service can start from an empty mount config, discover both APFS
+  devices read-only, mount Disk 2 at a free drive letter, verify `src.bin`
+  SHA-256, deny writes, and restore the original config without rebooting.
+- `artifacts\live-sync\service-live-sync-proof.json` proves the already-running
+  service picked up a new APFS image mapping at `X:`, served
+  `moved-root.txt`, then removed the worker after config restore without service
+  restart or reboot.
+- `artifacts\remove-mount\service-remove-mount-proof.json` proves
+  `apfs_mount_service --remove-mount` removes a configured APFS image mount, live
+  sync stops the worker, `X:` disappears, and service PID stays unchanged.
+- `artifacts\drive-letter\service-drive-letter-proof.json` proves
+  `apfs_mount_service --set-mount` changes a configured APFS image from `X:` to
+  `W:`, live sync remounts it at the new letter, expected SHA-256 still matches,
+  the old letter disappears, cleanup removes the worker, and service PID stays
+  unchanged.
+- `artifacts\policy\service-policy-proof.json` proves
+  `apfs_mount_service --set-enabled --target ... --enabled false|true` retains a
+  disabled mapping in config, removes the worker while disabled, remounts after
+  enable, restores the original config, and keeps the service PID unchanged.
+- `artifacts\target-loss\service-target-loss-proof.json` proves live sync skips
+  unavailable APFS targets, removes the failed worker/mount while keeping the
+  saved config, remounts when the target returns, and keeps the service PID
+  unchanged.
+- `artifacts\device-notifications\service-device-notifications-proof.json`
+  proves the installed Automatic service registered Windows disk device
+  notifications for APFS resync after service start, with no registration
+  failures and both APFS mounts still present read-only.
+- `artifacts\manager\installed-manager-status.json` and
+  `artifacts\manager\installed-manager-self-test.json` prove the installed Qt
+  manager can load, read service health, see both APFS mounts, expose accessible
+  controls including automount policy, and use the deployed Qt
+  Widgets/Gui/qwindows runtime.
+- `artifacts\usb-probe\service-mounted-z-write-deny-after-dir-upgrade.json` proves
+  the physical USB mount at `Z:` still denies writes after the directory-RW worker
+  upgrade.
+- `artifacts\usb-probe\service-mounted-z-handle-stress.json` proves 200 repeated
+  normal-user reads from the physical USB mount after the handle-table upgrade,
+  with the service still running and hashes stable.
+- `artifacts\boot-persistence\service-health-installed.json` proves the installed
+  service binary reports Automatic/running state and sees `Z:` plus discovered
+  `Y:` APFS mounts with expected root entries.
+- `artifacts\boot-persistence\current-persistence-verification.json` proves the
+  earlier installed service/mount persistence state before the normal-user RW
+  diagnostic: service Automatic, `Z:` mounted, expected file hash matches, and
+  write probe is denied. Current post-repair state separately confirms `Y:` is
+  read-only with raw writes disabled. Actual post-reboot proof still requires a
+  reboot or armed next-login verifier run; no reboot was performed in this
+  session.
