@@ -259,11 +259,12 @@ Exit gate: release checklist passes with artifacts under this repo.
   read-only denial, raw image, and physical APFS partition mounts pass.
 - M2 complete for current file/directory transaction surface: arbitrary nested
   create/write/rename/move/delete, generation refresh, and rollback/crash lanes pass.
-- M3 file-content, namespace, basic-info, POSIX security metadata, symbolic-link,
-  and supported regular-file/named-directory/volume-root EA exit gates pass on
-  disposable image, physical USB, and native macOS round-trip media. Hard-link
-  creation plus zero-length EA values, non-ASCII-name EAs, and large stream-backed
-  xattr mutation remain outside the current Windows callback surface.
+- M3 file-content, namespace, file/named-directory basic-info and POSIX security
+  metadata, symbolic-link, and supported regular-file/named-directory/volume-root
+  EA exit gates pass on disposable image, physical USB, and native macOS
+  round-trip media. Hard-link creation, volume-root basic-info/security mutation,
+  zero-length EA values, non-ASCII-name EAs, and large stream-backed xattr
+  mutation remain outside the current Windows callback surface.
 - M4 exit gate passes in a clean Windows 11 VM. Package install, Automatic service,
   saved mount restoration across a reboot, Start Menu, Apps & Features, one
   interactive tray process, installed hashes, and complete uninstall cleanup pass.
@@ -822,8 +823,8 @@ Exit gate: release checklist passes with artifacts under this repo.
   security metadata writes, read-only enforcement, Windows symbolic-link
   creation/follow/delete, and supported regular-file/named-directory/volume-root EA
   create/read/update/delete now pass on that raw target. Remaining work before
-  public RW default: hard-link creation; zero-length, non-ASCII-name, and large
-  stream-backed xattr mutation;
+  public RW default: hard-link creation; volume-root basic-info/security
+  mutation; zero-length, non-ASCII-name, and large stream-backed xattr mutation;
   physical raw-media crash/power-loss recovery proof; and real surprise-unplug
   behavior. Apple-created xattr/symlink/hardlink preservation and supported EA
   mutation pass a native macOS round trip. Deterministic image worker crash
@@ -1067,8 +1068,8 @@ Exit gate: release checklist passes with artifacts under this repo.
   Repair was intentionally a separate passing elevated step before certification.
   Sanitized evidence: `docs\evidence\no-reboot-certification-2026-08-16.json`.
 - Exact release ZIP Windows 11 VM lifecycle passed from
-  `2026-08-16T23:49:10Z` through `2026-08-16T23:51:36Z`. Archive
-  `43CA8EC672CB3E504DA804AF7416C917F2CA7E412E33DF269F2C68D06106E5D3`
+  `2026-08-16T23:54:21Z` through `2026-08-16T23:56:38Z`. Archive
+  `9153DBFD2032487FD0A37508701B089D2F0947C89FFBAE05AD0C5A8F77A8435E`
   installed using package-local Qt, restored saved `R:` automatically after VM
   reboot, matched the expected file hash, denied writes in read-only mode, ran
   one interactive tray with `Open` and `Exit`, and matched installed binary

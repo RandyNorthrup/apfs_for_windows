@@ -71,7 +71,7 @@
   "release": {
     "version": "0.1.0",
     "file_count": 17,
-    "zip_sha256": "43CA8EC672CB3E504DA804AF7416C917F2CA7E412E33DF269F2C68D06106E5D3",
+    "zip_sha256": "9153DBFD2032487FD0A37508701B089D2F0947C89FFBAE05AD0C5A8F77A8435E",
     "package_verification_ok": true,
     "rebuilt_after_documentation_only_change": true,
     "exact_archive_windows_vm_lifecycle_ok": true
@@ -87,6 +87,7 @@
   },
   "remaining_scope": [
     "physical surprise-unplug and raw-media power-loss recovery",
+    "APFS volume-root basic-info and POSIX security metadata mutation",
     "empty Windows EA value as a distinct value because zero length requests deletion",
     "non-ASCII Windows EA names",
     "large APFS stream-backed xattr mutation",

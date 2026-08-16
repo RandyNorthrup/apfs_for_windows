@@ -124,6 +124,7 @@
     "apple_acl_blob_roundtrip": false
   },
   "unsupported_mutations": [
+    "APFS volume-root basic-info and POSIX security metadata mutation",
     "non-ASCII Windows EA names",
     "large APFS stream-backed xattr mutation",
     "empty Windows EA value as a distinct value because zero length requests deletion",

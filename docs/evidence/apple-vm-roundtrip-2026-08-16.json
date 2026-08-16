@@ -68,6 +68,7 @@
     "final_after": "D511DDBF6DE9F94A46B8DD4B46E76E2C1D9B7C631A8195C549AB5A1E51D4B581"
   },
   "remaining_scope": [
+    "APFS volume-root basic-info and POSIX security metadata mutation",
     "empty Windows EA value as a distinct value because zero length requests deletion",
     "non-ASCII Windows EA names",
     "large APFS stream-backed xattr mutation",

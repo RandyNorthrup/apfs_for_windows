@@ -63,10 +63,11 @@ Current state:
   an existing 16 MiB file. It also creates an Apple-compatible symbolic link and
   proves a later copy-on-write mutation preserves its directory type, inode mode,
   and `com.apple.fs.symlink` xattr.
-- Writable mounts commit Windows basic-info changes to APFS create/access/modify/
-  change times and BSD flags. Windows security changes persist APFS POSIX mode,
-  owner, and group while a compatibility ACL keeps the mounted drive usable by
-  the interactive user and service account.
+- Writable mounts commit Windows basic-info changes on files and named
+  directories to APFS create/access/modify/change times and BSD flags. Windows
+  security changes persist APFS POSIX mode, owner, and group while a
+  compatibility ACL keeps the mounted drive usable by the interactive user and
+  service account.
 - WinFsp reparse callbacks expose Apple symbolic links and create, follow,
   retarget, clear, or delete relative and same-volume absolute symbolic links.
   External absolute targets fail closed.
@@ -432,8 +433,8 @@ Verified USB evidence:
   volume-root EA mutation on both disposable images and the serial-pinned
   physical USB. Remaining public-RW
   gates are physical raw-media power-loss recovery, real surprise-unplug,
-  hard-link creation, zero-length EA values, and
-  non-ASCII-name/large stream-backed xattr mutation.
+  hard-link creation, volume-root basic-info/security mutation, zero-length EA
+  values, and non-ASCII-name/large stream-backed xattr mutation.
   Existing Apple hard links remain preserved across Windows mutations. WinFsp's
   current public protocol still marks hard-link support unimplemented, so native
   hard-link creation requires a WinFsp protocol/kernel fork or another filesystem
