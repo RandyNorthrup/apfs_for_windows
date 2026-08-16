@@ -30,6 +30,15 @@ function Get-MountRoot {
     return $Name
 }
 
+function Select-FreeMount {
+    foreach ($candidate in @("R:", "Q:", "P:", "O:", "N:", "M:", "L:", "K:", "J:", "I:", "H:", "G:", "F:", "E:", "D:")) {
+        if (-not (Test-Path -LiteralPath (Get-MountRoot -Name $candidate))) {
+            return $candidate
+        }
+    }
+    throw "No free installed-service test mount letter found."
+}
+
 function Add-PathFront {
     param([Parameter(Mandatory = $true)][string]$Path)
     if ((Test-Path -LiteralPath $Path -PathType Container) -and
@@ -168,6 +177,10 @@ $binaryMatches = (Get-HashOrNull $serviceExe) -and
     ((Get-HashOrNull $serviceExe) -eq (Get-HashOrNull $buildService)) -and
     ((Get-HashOrNull $installedWorker) -eq (Get-HashOrNull $buildWorker))
 $preflightBlockers = @()
+$mountExplicit = $PSBoundParameters.ContainsKey("Mount")
+if ((Test-Path -LiteralPath (Get-MountRoot -Name $Mount)) -and -not $mountExplicit) {
+    $Mount = Select-FreeMount
+}
 if (-not $service -or $service.State -ne "Running") {
     $preflightBlockers += "service is not running"
 }

@@ -2008,8 +2008,20 @@ NTSTATUS FsGetSecurity(FSP_FILE_SYSTEM* fileSystem,
     return stateOf(fileSystem)->copySecurity(descriptor, descriptorSize);
 }
 
-NTSTATUS FsSetSecurity(FSP_FILE_SYSTEM*, PVOID, SECURITY_INFORMATION, PSECURITY_DESCRIPTOR) {
-    return STATUS_MEDIA_WRITE_PROTECTED;
+NTSTATUS FsSetSecurity(FSP_FILE_SYSTEM* fileSystem,
+                       PVOID fileContext,
+                       SECURITY_INFORMATION,
+                       PSECURITY_DESCRIPTOR) {
+    auto* context = reinterpret_cast<FileContext*>(fileContext);
+    trace(QStringLiteral("SetSecurity %1")
+              .arg(context ? context->entry.path : QStringLiteral("<null>")));
+    if (stateOf(fileSystem)->readOnly()) {
+        return STATUS_MEDIA_WRITE_PROTECTED;
+    }
+    if (!context) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS FsReadDirectory(FSP_FILE_SYSTEM* fileSystem,

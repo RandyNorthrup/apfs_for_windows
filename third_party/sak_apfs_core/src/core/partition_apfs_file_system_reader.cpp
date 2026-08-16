@@ -563,6 +563,87 @@ public:
         return result;
     }
 
+    [[nodiscard]] PartitionApfsFileDebugResult debugFile(const QString& path) {
+        PartitionApfsFileDebugResult result;
+        result.file_system = QStringLiteral("APFS");
+        result.path = cleanPath(path);
+
+        PartitionApfsFileReadResult readResult;
+        readResult.file_system = QStringLiteral("APFS");
+        if (!mountAndScan(&readResult)) {
+            result.blockers = readResult.blockers;
+            result.warnings = readResult.warnings;
+            return result;
+        }
+
+        result.volume_name = volumeName_;
+        result.block_size = blockSize_;
+        result.block_count = blockCount_;
+
+        const auto record = resolveFile(path, &readResult);
+        if (!record.has_value()) {
+            result.blockers = readResult.blockers;
+            result.warnings = readResult.warnings;
+            return result;
+        }
+        result.directory_parent_id = record->parent_id;
+        result.directory_name = record->name;
+        result.file_id = record->file_id;
+        result.directory_type = record->directory_type;
+
+        const auto inode = inodeById_.constFind(record->file_id);
+        if (inode == inodeById_.cend()) {
+            result.blockers.append(
+                QStringLiteral("APFS inode %1 was not found").arg(record->file_id));
+            return result;
+        }
+
+        result.inode_object_id = inode->object_id;
+        result.inode_private_id = inode->private_id;
+        result.inode_size = inode->size;
+        result.inode_mode = inode->mode;
+        result.inode_sparse = inode->sparse;
+
+        const auto decmpfs = decmpfsByInode_.constFind(record->file_id);
+        if (decmpfs != decmpfsByInode_.cend()) {
+            result.has_decmpfs = true;
+            result.decmpfs_size_bytes = static_cast<uint64_t>(decmpfs->size());
+            if (const auto header = apfsParseDecmpfsHeader(*decmpfs)) {
+                result.decmpfs_algo = header->algo;
+                result.decmpfs_uncompressed_size = header->uncompressed_size;
+            } else {
+                result.warnings.append(QStringLiteral("APFS decmpfs attribute is malformed"));
+            }
+        }
+
+        result.resource_fork_object_id = resourceForkObjIdByInode_.value(record->file_id, 0);
+
+        for (const auto& xattr : xattrsByInode_.values(record->file_id)) {
+            result.xattrs.append(PartitionApfsFileXattrDebug{
+                .name = xattr.first,
+                .size_bytes = static_cast<uint64_t>(xattr.second.size()),
+                .embedded = true});
+        }
+        if (result.resource_fork_object_id != 0) {
+            result.xattrs.append(PartitionApfsFileXattrDebug{
+                .name = QString::fromLatin1(kApfsXattrNameResourceFork),
+                .size_bytes = 0,
+                .embedded = false});
+        }
+
+        appendDebugExtents(QStringLiteral("inode_private_id"), inode->private_id, &result);
+        appendDebugExtents(QStringLiteral("directory_file_id"), record->file_id, &result);
+        if (result.resource_fork_object_id != 0) {
+            appendDebugExtents(
+                QStringLiteral("resource_fork"), result.resource_fork_object_id, &result);
+        }
+
+        result.blockers = readResult.blockers;
+        result.warnings.append(readResult.warnings);
+        result.ok = result.blockers.isEmpty();
+        return result;
+    }
+
 private:
     [[nodiscard]] bool mountAndScan(PartitionApfsFileReadResult* result) {
         return mount(result) && scanFileSystem(result);
@@ -1003,6 +1084,31 @@ private:
             return left.logical_offset < right.logical_offset;
         });
         return extents;
+    }
+
+    void appendDebugExtents(const QString& role,
+                            uint64_t ownerId,
+                            PartitionApfsFileDebugResult* result) const {
+        if (!result || ownerId == 0) {
+            return;
+        }
+        const uint64_t containerBytes = blockSize_ == 0 ? 0 : blockCount_ * blockSize_;
+        for (const auto& extent : sortedExtents(ownerId)) {
+            const uint64_t blockByteOffset =
+                blockSize_ == 0 ? 0 : extent.physical_block * blockSize_;
+            result->extents.append(PartitionApfsFileExtentDebug{
+                .role = role,
+                .owner_id = extent.owner_id,
+                .logical_offset = extent.logical_offset,
+                .length = extent.length,
+                .physical_block = extent.physical_block,
+                .physical_byte_offset = blockByteOffset,
+                .flags = extent.flags,
+                .crypto_id = extent.crypto_id,
+                .physical_block_in_container = extent.physical_block < blockCount_,
+                .physical_byte_offset_in_container =
+                    containerBytes != 0 && blockByteOffset < containerBytes});
+        }
     }
 
     [[nodiscard]] bool appendFileData(const FileReadTarget& target,
@@ -2255,6 +2361,19 @@ PartitionApfsFileReadResult PartitionApfsFileSystemReader::readFileFromImage(
     return withOpenedApfsImage(image_path, [&](QIODevice* device) {
         return PartitionApfsFileSystemReader::readFile(device, path, max_bytes, credential);
     });
+}
+
+PartitionApfsFileDebugResult PartitionApfsFileSystemReader::debugFile(QIODevice* device,
+                                                                      const QString& path,
+                                                                      const QString& credential) {
+    if (!device) {
+        PartitionApfsFileDebugResult result;
+        result.file_system = QStringLiteral("APFS");
+        result.path = path;
+        result.blockers.append(QStringLiteral("APFS input is not open"));
+        return result;
+    }
+    return ApfsReader(device, credential).debugFile(path);
 }
 
 PartitionApfsDirectoryExportResult PartitionApfsFileSystemReader::exportDirectoryFromImage(

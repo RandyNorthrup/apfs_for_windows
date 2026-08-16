@@ -6,8 +6,9 @@ param(
     [string]$InstallRoot = "$env:ProgramFiles\APFS for Windows",
     [string]$QtBin = "C:\Qt\6.10.3\msvc2022_64\bin",
     [string]$ServiceName = "ApfsForWindowsMountService",
-    [string]$UsbTarget = "\\?\GLOBALROOT\Device\Harddisk1\Partition2",
-    [string]$UsbMount = "Y:",
+    [string]$UsbTarget = "",
+    [string]$UsbMount = "",
+    [int]$MaxPhysicalDrives = 32,
     [string]$StartMenuDir = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\APFS for Windows",
     [string]$AppVersion = "0.1.0",
     [int]$TimeoutSeconds = 60,
@@ -151,6 +152,46 @@ function Stop-InstalledWorkerProcesses {
     }
 }
 
+function Stop-InstalledManagerProcesses {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallPath,
+        [Parameter(Mandatory = $true)][int]$Timeout
+    )
+    $managerPath = Normalize-ComparablePath -Path (Join-Path $InstallPath "apfs_mount_manager.exe")
+    $before = @(Get-CimInstance Win32_Process -Filter "Name='apfs_mount_manager.exe'" -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.ExecutablePath -and
+            (Normalize-ComparablePath -Path ([string]$_.ExecutablePath)).Equals(
+                $managerPath,
+                [StringComparison]::OrdinalIgnoreCase)
+        } |
+        Select-Object @{n = "process_id"; e = { [int]$_.ProcessId } },
+                      @{n = "executable_path"; e = { [string]$_.ExecutablePath } })
+    foreach ($manager in $before) {
+        Stop-Process -Id $manager.process_id -Force -ErrorAction SilentlyContinue
+    }
+    $deadline = (Get-Date).AddSeconds($Timeout)
+    do {
+        $after = @(Get-CimInstance Win32_Process -Filter "Name='apfs_mount_manager.exe'" -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.ExecutablePath -and
+                (Normalize-ComparablePath -Path ([string]$_.ExecutablePath)).Equals(
+                    $managerPath,
+                    [StringComparison]::OrdinalIgnoreCase)
+            })
+        if ($after.Count -eq 0) {
+            break
+        }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+    [ordered]@{
+        attempted = [bool]($before.Count -gt 0)
+        before = $before
+        remaining_count = @($after).Count
+        all_stopped = [bool](@($after).Count -eq 0)
+    }
+}
+
 function Wait-ForReadOnlyUsbMount {
     param(
         [Parameter(Mandatory = $true)][string]$ServiceExe,
@@ -175,6 +216,35 @@ function Wait-ForReadOnlyUsbMount {
         }
     } while ((Get-Date) -lt $deadline)
     throw "USB APFS mount did not return read-only: $Target -> $Mount"
+}
+
+function Wait-ForDiscoveredMounts {
+    param(
+        [Parameter(Mandatory = $true)][string]$ServiceExe,
+        [Parameter(Mandatory = $true)]$Discovery,
+        [Parameter(Mandatory = $true)][int]$Timeout
+    )
+    $targets = @($Discovery.volumes | ForEach-Object { [string]$_.target } | Where-Object { $_ })
+    $deadline = (Get-Date).AddSeconds($Timeout)
+    do {
+        $health = Invoke-ServiceJson -ServiceExe $ServiceExe -Arguments @("--health")
+        $missing = @($targets | Where-Object {
+            $target = $_
+            -not (@($health.mounts) | Where-Object {
+                ([string]$_.target).Equals($target, [StringComparison]::OrdinalIgnoreCase) -and
+                $_.exists -eq $true
+            } | Select-Object -First 1)
+        })
+        if ($missing.Count -eq 0) {
+            return [ordered]@{
+                health = $health
+                discovered_targets = $targets
+                missing_targets = @()
+            }
+        }
+        Start-Sleep -Milliseconds 750
+    } while ((Get-Date) -lt $deadline)
+    throw "Discovered APFS mounts did not become ready: $($missing -join ', ')"
 }
 
 function Set-ServiceRecoveryPolicy {
@@ -279,6 +349,24 @@ function Install-UninstallRegistryEntry {
     }
 }
 
+function Install-ManagerStartupEntry {
+    param([Parameter(Mandatory = $true)][string]$InstallPath)
+    $keyPath = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run"
+    $valueName = "APFS for Windows Mount Manager"
+    $managerExe = Join-Path $InstallPath "apfs_mount_manager.exe"
+    $command = "`"$managerExe`" --tray"
+    New-Item -Path $keyPath -Force | Out-Null
+    New-ItemProperty -Path $keyPath -Name $valueName -Value $command -PropertyType String -Force | Out-Null
+    [ordered]@{
+        key_path = $keyPath
+        value_name = $valueName
+        command = $command
+        registered = ([string](Get-ItemPropertyValue -Path $keyPath -Name $valueName -ErrorAction SilentlyContinue)).Equals(
+            $command,
+            [StringComparison]::OrdinalIgnoreCase)
+    }
+}
+
 Assert-Admin
 
 $resolvedBuild = Resolve-Path -LiteralPath $BuildDir
@@ -321,6 +409,10 @@ $workerCleanup = Stop-InstalledWorkerProcesses -InstallPath $InstallRoot -Timeou
 if (-not $workerCleanup.all_stopped) {
     throw "Installed APFS worker processes are still running after service stop."
 }
+$managerCleanup = Stop-InstalledManagerProcesses -InstallPath $InstallRoot -Timeout $TimeoutSeconds
+if (-not $managerCleanup.all_stopped) {
+    throw "Installed APFS mount manager is still running after stop request."
+}
 
 $binaries = @(
     "apfs_mount_service.exe",
@@ -362,16 +454,48 @@ if ($existingService) {
 $recoveryPolicy = Set-ServiceRecoveryPolicy -Name $ServiceName
 $startMenuProof = Install-StartMenuEntries -Root $StartMenuDir -InstallPath $InstallRoot
 $registryProof = Install-UninstallRegistryEntry -InstallPath $InstallRoot -Version $AppVersion
-$restoreResult = Invoke-ServiceJson -ServiceExe $serviceExe -Arguments @(
-    "--add-mount",
-    "--target", $UsbTarget,
-    "--mount", $UsbMount,
-    "--read-only"
-)
+$managerStartupProof = Install-ManagerStartupEntry -InstallPath $InstallRoot
+
+if ([string]::IsNullOrWhiteSpace($UsbTarget) -xor [string]::IsNullOrWhiteSpace($UsbMount)) {
+    throw "-UsbTarget and -UsbMount must be supplied together."
+}
 
 Start-Service -Name $ServiceName
 Wait-ForServiceState -Name $ServiceName -Status "Running" -Timeout $TimeoutSeconds | Out-Null
-$readOnlyProof = Wait-ForReadOnlyUsbMount -ServiceExe $serviceExe -Target $UsbTarget -Mount $UsbMount -Timeout $TimeoutSeconds
+$discovery = Invoke-ServiceJson -ServiceExe $serviceExe -Arguments @(
+    "--discover-apfs",
+    "--max-physical-drives", [string]$MaxPhysicalDrives
+)
+$restoreResult = $null
+$readOnlyProof = $null
+$mountProof = $null
+if (-not [string]::IsNullOrWhiteSpace($UsbTarget)) {
+    $restoreResult = Invoke-ServiceJson -ServiceExe $serviceExe -Arguments @(
+        "--add-mount",
+        "--target", $UsbTarget,
+        "--mount", $UsbMount,
+        "--read-only"
+    )
+    $readOnlyProof = Wait-ForReadOnlyUsbMount -ServiceExe $serviceExe -Target $UsbTarget -Mount $UsbMount -Timeout $TimeoutSeconds
+    $mountProof = [ordered]@{
+        mode = "explicit_read_only_target"
+        requested = $restoreResult
+        target = $UsbTarget
+        mount = $UsbMount
+        read_only = [bool]$readOnlyProof.mount.read_only
+        allow_raw_writes = [bool]$readOnlyProof.mount.allow_raw_writes
+        exists = [bool]$readOnlyProof.mount.exists
+    }
+} else {
+    $discoveredProof = Wait-ForDiscoveredMounts -ServiceExe $serviceExe -Discovery $discovery -Timeout $TimeoutSeconds
+    $mountProof = [ordered]@{
+        mode = "automatic_discovery"
+        requested = $null
+        discovered_targets = @($discoveredProof.discovered_targets)
+        missing_targets = @($discoveredProof.missing_targets)
+        all_discovered_mounts_ready = $true
+    }
+}
 
 $serviceCimAfter = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'" -ErrorAction Stop
 $binaryReports = @()
@@ -394,8 +518,11 @@ $ok = $allBinariesMatch -and
     $serviceCimAfter.State -eq "Running" -and
     $serviceCimAfter.StartMode -eq "Auto" -and
     $recoveryPolicy.non_crash_failures_enabled -eq $true -and
-    $readOnlyProof.mount.read_only -eq $true -and
-    $readOnlyProof.mount.allow_raw_writes -eq $false
+    $managerCleanup.all_stopped -eq $true -and
+    $managerStartupProof.registered -eq $true -and
+    $mountProof -and
+    ($mountProof.mode -ne "explicit_read_only_target" -or
+        ($mountProof.read_only -eq $true -and $mountProof.allow_raw_writes -eq $false))
 
 $result = [ordered]@{
     component = "apfs_for_windows"
@@ -412,20 +539,16 @@ $result = [ordered]@{
         process_id_before = $servicePidBefore
         process_id_after = [int]$serviceCimAfter.ProcessId
     }
-    readonly_restore = [ordered]@{
-        requested = $restoreResult
-        target = $UsbTarget
-        mount = $UsbMount
-        read_only = [bool]$readOnlyProof.mount.read_only
-        allow_raw_writes = [bool]$readOnlyProof.mount.allow_raw_writes
-        exists = [bool]$readOnlyProof.mount.exists
-    }
+    mount_verification = $mountProof
+    discovery = $discovery
     service_recovery = $recoveryPolicy
     start_menu = $startMenuProof
     installed_app_registration = $registryProof
+    manager_startup = $managerStartupProof
     worker_cleanup = $workerCleanup
+    manager_cleanup = $managerCleanup
     binaries = $binaryReports
-    health = $readOnlyProof.health
+    health = if ($readOnlyProof) { $readOnlyProof.health } else { $discoveredProof.health }
 }
 
 $result | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $resolvedOutput -Encoding UTF8

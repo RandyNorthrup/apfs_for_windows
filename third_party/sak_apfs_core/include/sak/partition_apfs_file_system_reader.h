@@ -43,6 +43,52 @@ struct PartitionApfsFileReadResult {
     QVector<QPair<QString, QByteArray>> xattrs;
 };
 
+struct PartitionApfsFileExtentDebug {
+    QString role;
+    uint64_t owner_id{0};
+    uint64_t logical_offset{0};
+    uint64_t length{0};
+    uint64_t physical_block{0};
+    uint64_t physical_byte_offset{0};
+    uint64_t flags{0};
+    uint64_t crypto_id{0};
+    bool physical_block_in_container{false};
+    bool physical_byte_offset_in_container{false};
+};
+
+struct PartitionApfsFileXattrDebug {
+    QString name;
+    uint64_t size_bytes{0};
+    bool embedded{true};
+};
+
+struct PartitionApfsFileDebugResult {
+    bool ok{false};
+    QString file_system;
+    QString volume_name;
+    QString path;
+    QStringList blockers;
+    QStringList warnings;
+    uint64_t block_size{0};
+    uint64_t block_count{0};
+    uint64_t directory_parent_id{0};
+    QString directory_name;
+    uint64_t file_id{0};
+    uint16_t directory_type{0};
+    uint64_t inode_object_id{0};
+    uint64_t inode_private_id{0};
+    uint64_t inode_size{0};
+    uint16_t inode_mode{0};
+    bool inode_sparse{false};
+    bool has_decmpfs{false};
+    uint32_t decmpfs_algo{0};
+    uint64_t decmpfs_uncompressed_size{0};
+    uint64_t decmpfs_size_bytes{0};
+    uint64_t resource_fork_object_id{0};
+    QVector<PartitionApfsFileXattrDebug> xattrs;
+    QVector<PartitionApfsFileExtentDebug> extents;
+};
+
 struct PartitionApfsDirectoryExportResult {
     bool ok{false};
     QStringList blockers;
@@ -82,6 +128,10 @@ public:
         const QString& image_path,
         const QString& path,
         uint64_t max_bytes,
+        const QString& credential = {});
+    [[nodiscard]] static PartitionApfsFileDebugResult debugFile(
+        QIODevice* device,
+        const QString& path,
         const QString& credential = {});
     [[nodiscard]] static PartitionApfsDirectoryExportResult exportDirectoryFromImage(
         const QString& image_path,

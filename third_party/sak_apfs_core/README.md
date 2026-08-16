@@ -18,6 +18,9 @@ Local APFS for Windows deltas after import:
 - Added parent-path routing to image-only file write/delete/rename wrappers.
 - Added directory rename/move commit wrappers for image and raw targets.
 - Added parent-aware directory delete routing.
+- Added copied-reader debug metadata output for one APFS path so APFS for
+  Windows can inspect inode, xattr, decmpfs, resource-fork, and extent state
+  without modifying the source checkout.
 - Removed copied source license tags and source-app branding from code comments
   and messages per project-owner direction.
 - Kept the copied API namespace and include paths stable for build compatibility.

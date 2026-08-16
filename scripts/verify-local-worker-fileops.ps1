@@ -27,6 +27,15 @@ function Get-MountRoot {
     return $Name
 }
 
+function Select-FreeMount {
+    foreach ($candidate in @("R:", "Q:", "P:", "O:", "N:", "M:", "L:", "K:", "J:", "I:", "H:", "G:", "F:", "E:", "D:")) {
+        if (-not (Test-Path -LiteralPath (Get-MountRoot -Name $candidate))) {
+            return $candidate
+        }
+    }
+    throw "No free local file-op mount letter found."
+}
+
 function Add-PathFront {
     param([Parameter(Mandatory = $true)][string]$Path)
     if ((Test-Path -LiteralPath $Path -PathType Container) -and
@@ -157,9 +166,14 @@ foreach ($tool in @($worker, $selftest, $probe)) {
     }
 }
 
+$mountExplicit = $PSBoundParameters.ContainsKey("Mount")
 $mountRoot = Get-MountRoot -Name $Mount
 if (Test-Path -LiteralPath $mountRoot) {
-    throw "Requested file-op mount is already in use: $mountRoot"
+    if ($mountExplicit) {
+        throw "Requested file-op mount is already in use: $mountRoot"
+    }
+    $Mount = Select-FreeMount
+    $mountRoot = Get-MountRoot -Name $Mount
 }
 
 Add-PathFront -Path "C:\Qt\6.10.3\msvc2022_64\bin"

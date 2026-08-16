@@ -25,8 +25,6 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ApfsGptType = "{7c3457ef-0000-11aa-aa11-00306543ecac}"
-
 function Test-CurrentProcessAdmin {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
@@ -188,8 +186,24 @@ function Assert-PinnedUsbApfs {
         throw "Pinned disk serial mismatch: expected $Serial, got $actualSerial"
     }
     $partitionInfo = Get-Partition -DiskNumber $Disk -PartitionNumber $Partition -ErrorAction Stop
-    if (-not ([string]$partitionInfo.GptType).Equals($ApfsGptType, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "Pinned partition is not APFS GPT type: $($partitionInfo.GptType)"
+    $target = "\\?\GLOBALROOT\Device\Harddisk$Disk\Partition$Partition"
+    $probe = Join-Path $InstallRoot "apfs_probe.exe"
+    if (-not (Test-Path -LiteralPath $probe -PathType Leaf)) {
+        throw "Installed APFS probe not found: $probe"
+    }
+    $probeRaw = @(& $probe --target $target 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Pinned partition APFS probe failed ($LASTEXITCODE): $($probeRaw -join ' ')"
+    }
+    try {
+        $probeResult = $probeRaw | ConvertFrom-Json
+    } catch {
+        throw "Pinned partition APFS probe returned invalid JSON: $($_.Exception.Message)"
+    }
+    $detection = $probeResult.whole_device_detection
+    if (-not $detection -or
+        -not ([string]$detection.file_system).Equals("APFS", [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Pinned partition does not contain an APFS signature: $target"
     }
     [ordered]@{
         disk_number = $Disk
@@ -199,7 +213,32 @@ function Assert-PinnedUsbApfs {
         bus_type = [string]$diskInfo.BusType
         size_bytes = [UInt64]$diskInfo.Size
         partition_size_bytes = [UInt64]$partitionInfo.Size
-        target = "\\?\GLOBALROOT\Device\Harddisk$Disk\Partition$Partition"
+        partition_style = [string]$diskInfo.PartitionStyle
+        partition_type = [string]$partitionInfo.Type
+        gpt_type = [string]$partitionInfo.GptType
+        apfs_detection_source = [string]$detection.source
+        apfs_container_bytes = [UInt64]$detection.total_bytes
+        target = $target
+    }
+}
+
+function Test-MountAccessMode {
+    param(
+        [Parameter(Mandatory = $true)][string]$MountName,
+        [Parameter(Mandatory = $true)][bool]$ReadOnly
+    )
+    $mountRoot = Get-MountRoot -Name $MountName
+    try {
+        $item = Get-Item -LiteralPath $mountRoot -Force -ErrorAction Stop
+        $acl = Get-Acl -LiteralPath $mountRoot -ErrorAction Stop
+        $hasReadOnlyAttribute = (($item.Attributes -band [IO.FileAttributes]::ReadOnly) -ne 0)
+        $everyoneFullControl = ([string]$acl.Sddl).Contains("A;;FA;;;WD")
+        if ($ReadOnly) {
+            return $hasReadOnlyAttribute -and -not $everyoneFullControl
+        }
+        return -not $hasReadOnlyAttribute -and $everyoneFullControl
+    } catch {
+        return $false
     }
 }
 
@@ -223,7 +262,8 @@ function Wait-ForMountPolicy {
             ([string]$mountInfo.mount).Equals($MountName, [StringComparison]::OrdinalIgnoreCase) -and
             $mountInfo.exists -and
             $mountInfo.read_only -eq $ReadOnly -and
-            $mountInfo.allow_raw_writes -eq $AllowRawWrites) {
+            $mountInfo.allow_raw_writes -eq $AllowRawWrites -and
+            (Test-MountAccessMode -MountName $MountName -ReadOnly $ReadOnly)) {
             return [ordered]@{
                 health = $health
                 mount = $mountInfo
@@ -372,6 +412,13 @@ function Write-PreflightResultAndExit {
     $expectedTarget = "\\?\GLOBALROOT\Device\Harddisk$DiskNumber\Partition$PartitionNumber"
     $health = $null
     $healthError = $null
+    $pinned = $null
+    $pinError = $null
+    try {
+        $pinned = Assert-PinnedUsbApfs -Disk $DiskNumber -Partition $PartitionNumber -Serial $ExpectedSerial
+    } catch {
+        $pinError = $_.Exception.Message
+    }
     try {
         $health = Invoke-ServiceJson -ServiceExe $serviceExe -Arguments @("--health")
     } catch {
@@ -395,6 +442,9 @@ function Write-PreflightResultAndExit {
     if ($healthError) {
         $blockers += "service health failed"
     }
+    if ($pinError) {
+        $blockers += "USB identity/APFS signature pin failed"
+    }
     if (-not $mountInfo) {
         $blockers += "USB APFS target is not mounted at requested drive"
     } elseif ($mountInfo.read_only -ne $true -or $mountInfo.allow_raw_writes -ne $false) {
@@ -415,6 +465,8 @@ function Write-PreflightResultAndExit {
             elevated = [bool](Test-CurrentProcessAdmin)
         }
         pending_uac = $pending
+        pinned_usb = $pinned
+        pin_error = $pinError
         service_health_error = $healthError
         expected_target = $expectedTarget
         mount = $Mount

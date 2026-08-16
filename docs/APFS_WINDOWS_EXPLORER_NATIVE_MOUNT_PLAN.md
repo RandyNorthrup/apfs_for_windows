@@ -92,9 +92,11 @@ Dokan stays fallback if WinFsp blocks on licensing, installer, or callback model
 Do not fork WinBtrfs-style kernel driver for v1; keep that as a later performance
 or deep-shell-integration track after user-mode semantics are certified.
 
-Ownership note: copied APFS source is authored by Randy and may be carried in
-this repo without the previous source-app licensing notice. Third-party notices
-still apply to Qt, WinFsp, and Apple LZFSE.
+Ownership note: copied APFS source is Randy-authored project code imported into
+this repo, not third-party code with a separate outside owner. This repo can
+carry it under the APFS for Windows project license without the previous
+source-app branding/licensing notice. Third-party notices still apply to Qt,
+WinFsp, and Apple LZFSE.
 
 ## Architecture
 
@@ -222,8 +224,9 @@ launching the app; uninstall removes service and mount points cleanly.
 
 ### M5 - Partition Discovery And Native UX
 
-- Detect APFS GPT partitions automatically by GUID
-  `{7C3457EF-0000-11AA-AA11-00306543ECAC}` and APFS signatures.
+- Detect APFS whole devices plus GPT/MBR partitions automatically by APFS
+  signatures; use GPT GUID `{7C3457EF-0000-11AA-AA11-00306543ECAC}` as useful
+  metadata, not the sole admission rule.
 - Add tray/manager UI:
   mount/unmount, drive-letter selection, read-only/read-write mode, evidence link,
   credential prompt, safety status, and logs.
@@ -313,8 +316,8 @@ Exit gate: release checklist passes with artifacts under this repo.
   service recovery policy, configured mount mappings, mount availability, and
   visible root entries as JSON.
 - `apfs_mount_service --discover-apfs` scans `\\.\PhysicalDriveN` targets
-  read-only with the copied copied APFS detector/reader, reports whole-device and GPT
-  APFS candidates, and `--configure-discovered` persists missing read-only mount
+  read-only with the copied APFS detector/reader, reports whole-device plus
+  GPT/MBR partition APFS candidates, and `--configure-discovered` persists missing read-only mount
   mappings.
 - `apfs_mount_manager` is no longer a scaffold. It is a Qt Widgets manager UI
   with an accessible/responsive mount table,
@@ -333,12 +336,17 @@ Exit gate: release checklist passes with artifacts under this repo.
   (`HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\APFS for Windows`)
   with an uninstall command. `scripts\verify-installed-app-registration.ps1`
   verifies this without admin.
+- Install/repair register `APFS for Windows Mount Manager` under the machine Run
+  key with `--tray`, so each interactive user gets the stacked `AP` over `FS`
+  tray icon at logon. Manager uses a local single-instance channel; later
+  launches show the existing window instead of creating duplicate tray icons.
+  Uninstall removes the startup value and stops the installed manager process.
 - `scripts\build-release-package.ps1` creates a non-admin release ZIP under
   `artifacts\package\APFS-for-Windows-0.1.0.zip` with built binaries, Qt runtime
   DLLs, platform plugin, install/repair/uninstall scripts, README, and APFS
   core provenance note. `scripts\verify-release-package.ps1` verifies the staged
   package layout. Current verified ZIP SHA-256 is
-  `239FA503CB78DF7DD2BBCFC22870E52841CDC3EF6FD9FD381CE915348F220EC8`.
+  `69659F7905213782D21575BCB2920E405E7CC12C532945FAFD1075A9A8A6A0E5`.
 - `LICENSE`, `THIRD_PARTY_LICENSES.md`, and
   `scripts\verify-license-notices.ps1` now cover project license presence plus
   Qt, WinFsp, and Apple LZFSE notices required by the release package.
@@ -349,9 +357,9 @@ Exit gate: release checklist passes with artifacts under this repo.
 - `scripts\repair-apfs-for-windows-install.ps1` is the focused elevated recovery
   path for the current machine: it stops the service, reaps lingering installed
   APFS worker processes, redeploys current build binaries, keeps the Windows
-  service Automatic/running with restart-on-failure recovery, restores the pinned
-  USB APFS mount at `Y:` to read-only, verifies installed binary hashes, records
-  `worker_cleanup`, and writes
+  service Automatic/running with restart-on-failure recovery, verifies automatic
+  APFS discovery or an optional explicit read-only target/mount pair, verifies
+  installed binary hashes, records worker/manager cleanup, and writes
   `artifacts\repair\install-repair-proof.json` without rebooting.
 - `scripts\start-repair-elevated.ps1` is the normal-user guarded repair launcher.
   It writes `artifacts\repair\start-repair-elevated-proof.json`, refuses to spawn
@@ -436,9 +444,9 @@ Exit gate: release checklist passes with artifacts under this repo.
   cleanup, labels `-AllowStaleInstalledWorker` runs as
   `current_installed_mount_only`, and proves root proof-directory create plus
   direct child-file write/hash/rename/overwrite/delete inside its own
-  `sak-mounted-file-actions-proof-*` directory on `Y:`. This path is now
-  superseded for current USB certification by
-  `verify-usb-normal-user-rw.ps1 -NoDiagnostics`.
+  `sak-mounted-file-actions-proof-*` directory on the selected mount. Current
+  certification wraps this proof in an explicit temporary writable policy
+  window and restores that mount read-only afterward.
 - `scripts\run-apfs-for-windows-certification.ps1` is the no-reboot certification
   orchestrator. It runs build, CTest, script parse, local RW smoke, local
   Explorer-style fileops, local Robocopy stress, service-control IPC proof,
@@ -446,15 +454,18 @@ Exit gate: release checklist passes with artifacts under this repo.
   preflight. Direct mounted-drive USB file actions only run with explicit
   `-RunUsbMountedFileActions`; full USB mutation proof only runs with explicit
   `-RunUsbWriteProof` after preflight is ready. Current full no-reboot run
-  completed `2026-07-10T05:57:50Z` with `ok=true`,
+  completed on `2026-08-16` with `ok=true`,
   `local_code_gates_ok=true`, `installed_persistence_ok=true`,
-  `usb_preflight_ready=true`, and `full_usb_rw_ok=true`. It verified build,
-  CTest, script parse, WinFsp, copied-core boundary, license/package gates,
-  installed-state preflight, and serial-pinned USB normal-user RW proof through
-  `verify-usb-normal-user-rw.ps1 -NoDiagnostics`.
+  `mounted_usb_file_actions_ok=true`, `usb_preflight_ready=true`, and
+  `full_usb_rw_ok=true`. It verified build, CTest, script parse, WinFsp,
+  copied-core boundary, license/package gates, installed-state preflight,
+  direct mounted-drive USB file actions, and serial-pinned USB normal-user RW
+  proof through `verify-usb-normal-user-rw.ps1 -NoDiagnostics`. It used Disk 1
+  Partition 1 at `V:` and passed all gates.
 - `scripts\verify-usb-raw-rw.ps1` pins the 30 GB USB APFS test disk by disk
-  number, serial, size, USB bus, and APFS GPT type before temporarily enabling
-  raw writes, then proves create/write/hash/rename/delete through `Y:`.
+  number, serial, size, USB bus, partition number, and exact-target APFS
+  signature before temporarily enabling
+  raw writes, then proves create/write/hash/rename/delete through the selected mount.
 - `scripts\verify-usb-normal-user-rw.ps1` now detects pending UAC prompts before
   spawning elevated setup/restore helpers, uses a bounded elevated-helper wait,
   keeps file actions in the non-admin parent process, and supports
@@ -519,7 +530,7 @@ Exit gate: release checklist passes with artifacts under this repo.
 - Verified:
   `cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_PREFIX_PATH=C:\Qt\6.10.3\msvc2022_64`;
   `cmake --build build --config Release --parallel`;
-  `ctest --test-dir build -C Release --output-on-failure` passes 10/10;
+  `ctest --test-dir build -C Release --output-on-failure` passes 11/11;
   PowerShell installer/uninstaller/test-helper AST parse; service/worker/manager
   console smoke.
 - Current source keeps generated-image RW enabled and now allows physical raw
@@ -543,26 +554,25 @@ Exit gate: release checklist passes with artifacts under this repo.
   and generated-image service policy proof can run from a non-admin shell.
 - `scripts\start-repair-elevated.ps1` remains the preferred no-reboot repair
   entrypoint from a normal shell. The latest repair completed; no UAC prompt is
-  pending, service is Automatic/running, and `Y:` was restored read-only.
+  pending, service is Automatic/running, manager tray is running single-instance,
+  and current `V:` was restored read-only.
 - `scripts\verify-usb-mounted-file-actions.ps1 -CleanupStaleProofEntries` is the
-  no-admin file action path for the currently mounted `Y:` USB volume. It is
+  no-admin file action path for the selected mounted USB volume (`V:` in the
+  current media layout). It is
   intentionally separate from service policy repair, because normal file
   create/write/delete through a mounted drive should not need elevation. The
-  earlier `-AllowStaleInstalledWorker` run confirmed no elevation/service-policy
-  change was needed. Current serial-pinned USB proof is handled by
-  `verify-usb-normal-user-rw.ps1 -NoDiagnostics`, which passed after the copied
-  APFS foreign-IP-layout fix.
+  latest orchestrated run temporarily enabled writable policy outside this
+  verifier, proved write/hash/rename/overwrite/delete through the mounted drive,
+  then restored `V:` read-only.
 - `scripts\run-apfs-for-windows-certification.ps1` currently writes
   `artifacts\certification\apfs-for-windows-certification.json` with
   `local_code_gates_ok=true`, `release_package_ok=true`,
-  `installed_persistence_ok=true`, `usb_preflight_ready=true`, and
-  `full_usb_rw_ok=true` from the current `-RunUsbWriteProof` run. It always runs
-  a zero-mutation mounted USB file-action preflight; passing
-  `-RunUsbMountedFileActions` only runs the full mounted-drive proof if that
-  preflight is ready and then adds `mounted_usb_file_actions_ok`. The
-  orchestrated serial-pinned USB RW lane now passes; broader public-claim lanes
-  still need crash/rollback, Apple/macOS validation, surprise-unplug, and wider
-  metadata coverage.
+  `installed_persistence_ok=true`, `mounted_usb_file_actions_ok=true`,
+  `usb_preflight_ready=true`, and `full_usb_rw_ok=true` from the current
+  `-RunUsbWriteProof -RunUsbMountedFileActions` run. The orchestrated direct
+  mounted-file lane and serial-pinned USB RW lane now pass; broader
+  public-claim lanes still need crash/rollback, Apple/macOS validation,
+  surprise-unplug, and wider metadata coverage.
 - Current self-test proof is saved at
   `artifacts\core-selftest\apfs-core-selftest-large-raw-run.log`. It records
   successful XID
@@ -735,37 +745,37 @@ Exit gate: release checklist passes with artifacts under this repo.
   direct child file, restore read-only config, avoid service restart, and do not
   reboot.
 - Serial-pinned normal-user USB RW proof is current. On
-  `2026-07-10T05:57:50Z`, `scripts\verify-usb-normal-user-rw.ps1 -NoDiagnostics`
+  `2026-07-10T06:51:00Z`, `scripts\verify-usb-normal-user-rw.ps1 -NoDiagnostics`
   passed against Disk 1 partition 2 at `Y:` as `MINI-DT\Randy` without reboot:
   proof directory create passed, child file write hash matched
-  `1EE19198B078224E6A5FF08DB2264DE61A1AD46B89937F5EB654C0CD865EDEE2`, rename
+  `84430AC23FB71E125BF33F1D9A1DE3E30676F8EE776CB4B790BCDCD4905F2FC1`, rename
   passed, file delete passed, directory delete passed, service PID stayed
-  `48880`, and `Y:` was restored read-only with raw writes disabled. Artifact:
+  `128168`, and `Y:` was restored read-only with raw writes disabled. Artifact:
   `artifacts\usb-rw\usb-normal-user-rw-proof.json`.
 - Current-state preflight proof is saved at
   `artifacts\state\current-apfs-state.json`. It reports
   `ready_for_usb_normal_user_rw_test=true`: no UAC prompt is pending, installed
   binaries match the current build, stale proof entries are gone, service is
-  Automatic/running, and `Y:` is currently restored read-only with
+  Automatic/running, and `V:` is currently restored read-only with
   `allow_raw_writes=false`.
 - Non-mutating USB file-action preflight is saved at
   `artifacts\usb-rw\usb-normal-user-rw-preflight.json`. It exits quickly with
-  no elevation and no USB writes, reports readiness blockers, and leaves `Y:`
+  no elevation and no USB writes, reports readiness blockers, and leaves `V:`
   unchanged.
 
 ## Blockers
 
 - Source checkout remains off-limits for edits; APFS core changes for this
   project are made only in the copied tree under `third_party\sak_apfs_core`.
-- Basic serial-pinned physical USB RW now passes as normal user on the 30 GB APFS
-  GPT partition at `Y:`. Remaining work before public RW default: repeat/soak
+- Basic serial/signature-pinned physical USB RW now passes as normal user on the
+  current hybrid MBR Partition 1 APFS target at `V:`. Remaining work before public RW default: repeat/soak
   the USB mutation lane, add broader metadata/xattr/symlink/hardlink mutation
   coverage, richer cache invalidation, crash/rollback proof, real physical
   surprise-unplug behavior, and Apple/macOS validation.
   `\\.\PhysicalDrive2` remains read-only.
 - Current local state is safe to pause: no UAC prompt is pending, no USB verifier
   process remains, service is Automatic/running, installed binaries match the
-  current build, and `Y:` is read-only with raw writes disabled.
+  current build, one tray manager is running, and `V:` is read-only with raw writes disabled.
 - Normal Explorer-style file actions remain a non-admin requirement, but service
   policy restore/install is admin-gated on this machine: a non-admin
   `--add-mount ... --read-only` restore attempt failed with
@@ -782,22 +792,22 @@ Exit gate: release checklist passes with artifacts under this repo.
 - The handle table is now bounded by a deferred-retirement quarantine and has
   local handle-lifetime plus 10-iteration Robocopy stress proof. Longer
   Explorer/Robocopy soak still remains before public RW claim.
-- Service-start APFS GPT/signature discovery, live config/device resync,
+- Service-start APFS whole-device/GPT/MBR signature discovery, live config/device resync,
   drive-letter changes, remove-mount, automount enable/disable policy, and
   deterministic target-loss cleanup are proven without reboot. The service now
   registers disk-device notifications for immediate resync, but M5 still needs
   real physical surprise-unplug proof.
 - No actual reboot proof has been run because this machine must not be restarted.
   Automatic service start mode, recovery policy, normal-session mount visibility,
-  and current `Y:` persistence/read-only proof are current; use
+  and current `V:` persistence/read-only proof are current; use
   `scripts\verify-apfs-boot-persistence.ps1 -ArmNextLogon` before a future
   user-approved reboot to capture post-reboot proof.
-- Existing USB file read blocker: `Y:\icons8-jester.svg` lists at 5509 bytes and
-  returns readable ACLs, but mounted read fails with Access denied. Raw
-  `apfs_probe --read-file icons8-jester.svg` reports
-  `APFS block 1753640960 is outside container bounds`. Classify as corrupted
-  test file vs compression/resource-fork reader gap before any broad claim that
-  every existing file on the current USB is readable.
+- The previous USB read blocker was classified and removed. `apfs_probe
+  --debug-file icons8-jester.svg` showed no decmpfs/resource-fork data and an
+  impossible extent physical block `1753640960` outside the 30 GB container.
+  `artifacts\usb-rw\delete-corrupt-icons8-svg-ready-wait.json` proves the
+  corrupt entry was deleted through the mounted `Y:` drive after the live
+  writable worker was ready, and `Y:` was restored read-only without reboot.
 
 ## 2026-07-09 Current Implementation Update
 
@@ -841,6 +851,10 @@ Exit gate: release checklist passes with artifacts under this repo.
 - `scripts\verify-local-worker-rw-smoke.ps1` now auto-selects a free smoke-test
   drive letter when its default is already in use, while still honoring an
   explicit `-Mount` conflict as a hard failure.
+- Local file-op, large-existing-file, and installed-service mode-policy
+  verifiers now apply the same free-letter fallback. This keeps certification
+  valid while real APFS volumes occupy former fixture defaults such as `U:` and
+  `V:`; explicit conflicting `-Mount` values still fail.
 - `scripts\verify-usb-normal-user-rw.ps1 -PreflightOnly` now treats the safe
   read-only/raw-disabled USB mount as the required baseline before destructive
   proof, instead of requiring the mount to already be writable.
@@ -850,7 +864,23 @@ Exit gate: release checklist passes with artifacts under this repo.
 - `scripts\run-apfs-for-windows-certification.ps1 -RunUsbWriteProof` now uses
   compact USB proof mode and completed full no-reboot certification with
   `ok=true`, `local_code_gates_ok=true`, `installed_persistence_ok=true`,
-  `usb_preflight_ready=true`, and `full_usb_rw_ok=true`.
+  `mounted_usb_file_actions_ok=true`, `usb_preflight_ready=true`, and
+  `full_usb_rw_ok=true`.
+- `apfs_probe --debug-file` now exposes copied-reader inode/xattr/extent
+  diagnostics for one APFS path, which was used to classify the stale USB
+  `icons8-jester.svg` entry as corrupt metadata rather than a compression or
+  resource-fork reader gap.
+- `apfs_winfs_worker` writable mounts now accept `SetSecurity` as a no-op,
+  matching the existing `SetBasicInfo` behavior. This prevents normal Windows
+  delete flows from failing before `CanDelete`/`CleanupDelete` on writable APFS
+  mounts when Explorer or PowerShell touches security metadata.
+- `scripts\verify-usb-normal-user-rw.ps1` now waits for live mounted root
+  ACL/attribute mode to match the requested read-only/read-write policy instead
+  of trusting config health before the service has restarted the worker.
+- `artifacts\usb-rw\delete-corrupt-icons8-svg-ready-wait.json` proves the
+  corrupt USB SVG entry was removed through the mounted drive and `Y:` returned
+  to read-only/raw-disabled state. The active USB root no longer contains that
+  stale read blocker.
 - Verification run:
   `cmake --build build --config Release --parallel`,
   `ctest --test-dir build -C Release --output-on-failure` (10/10),
@@ -860,3 +890,32 @@ Exit gate: release checklist passes with artifacts under this repo.
   `scripts\verify-current-apfs-state.ps1` (ready=true, `Y:` read-only), and
   `scripts\run-apfs-for-windows-certification.ps1 -RunUsbWriteProof`
   (`ok=true`).
+
+## 2026-08-16 Current Implementation Update
+
+- Current SAK recertification media changed from the earlier GPT Partition 2
+  layout to a hybrid Windows MBR Partition 1 view. Disk 1 remains pinned by USB
+  bus, non-boot/system status, serial `067D19C65080`, and 31,042,043,904-byte
+  physical size; exact target `\\?\GLOBALROOT\Device\Harddisk1\Partition1`
+  probes as a 536,870,912-byte APFS `RawSignature` container and mounts at `V:`.
+- Service discovery now parses MBR primary partitions in addition to GPT and
+  whole-device APFS. `apfs_service_partition_parser` adds synthetic regular and
+  zero-offset hybrid MBR coverage; CTest passes 11/11.
+- Raw-write policy no longer trusts only a discovery target-name match. Service
+  opens and APFS-probes the exact requested raw target before enabling writes,
+  which safely supports equivalent whole-device/Partition 1 hybrid aliases.
+- USB verifiers retain disk-number/serial/size/bus/non-system pinning and now
+  require exact-target APFS signature proof instead of rejecting valid APFS
+  solely because Windows labels the hybrid partition `FAT16`.
+- Current normal-user physical proof completed `2026-08-16T17:22:33Z` on `V:`:
+  create/write/hash/rename/delete all passed, service PID stayed `24356`, proof
+  directory was removed, and read-only/raw-disabled policy was restored. No
+  reboot occurred. Artifact: `artifacts\usb-rw\usb-normal-user-rw-proof.json`.
+- Repair is no longer hardcoded to `Y:/Partition2`; default mode verifies
+  automatic discovery, optional `-UsbTarget/-UsbMount` pins one read-only mount,
+  and guarded normal-user repair relaunches manager tray after deployment.
+- Installer/repair add machine-wide manager `--tray` logon startup. Manager is
+  single-instance and retains right-click `Open`/`Exit` with stacked `AP` over
+  `FS` icon. Uninstaller removes startup registration and stops manager.
+- No reboot was performed. Actual post-reboot/logon proof remains blocked by
+  explicit instruction not to restart this PC.

@@ -17,8 +17,6 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ApfsGptType = "{7c3457ef-0000-11aa-aa11-00306543ecac}"
-
 function Assert-Admin {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
@@ -94,8 +92,24 @@ function Assert-PinnedUsbApfs {
         throw "Pinned disk serial mismatch: expected $Serial, got $actualSerial"
     }
     $partitionInfo = Get-Partition -DiskNumber $Disk -PartitionNumber $Partition -ErrorAction Stop
-    if (-not ([string]$partitionInfo.GptType).Equals($ApfsGptType, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "Pinned partition is not APFS GPT type: $($partitionInfo.GptType)"
+    $target = "\\?\GLOBALROOT\Device\Harddisk$Disk\Partition$Partition"
+    $probe = Join-Path $InstallRoot "apfs_probe.exe"
+    if (-not (Test-Path -LiteralPath $probe -PathType Leaf)) {
+        throw "Installed APFS probe not found: $probe"
+    }
+    $probeRaw = @(& $probe --target $target 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Pinned partition APFS probe failed ($LASTEXITCODE): $($probeRaw -join ' ')"
+    }
+    try {
+        $probeResult = $probeRaw | ConvertFrom-Json
+    } catch {
+        throw "Pinned partition APFS probe returned invalid JSON: $($_.Exception.Message)"
+    }
+    $detection = $probeResult.whole_device_detection
+    if (-not $detection -or
+        -not ([string]$detection.file_system).Equals("APFS", [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Pinned partition does not contain an APFS signature: $target"
     }
     [ordered]@{
         disk_number = $Disk
@@ -105,7 +119,12 @@ function Assert-PinnedUsbApfs {
         bus_type = [string]$diskInfo.BusType
         size_bytes = [UInt64]$diskInfo.Size
         partition_size_bytes = [UInt64]$partitionInfo.Size
-        target = "\\?\GLOBALROOT\Device\Harddisk$Disk\Partition$Partition"
+        partition_style = [string]$diskInfo.PartitionStyle
+        partition_type = [string]$partitionInfo.Type
+        gpt_type = [string]$partitionInfo.GptType
+        apfs_detection_source = [string]$detection.source
+        apfs_container_bytes = [UInt64]$detection.total_bytes
+        target = $target
     }
 }
 

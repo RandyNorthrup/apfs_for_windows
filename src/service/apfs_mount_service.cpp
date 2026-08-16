@@ -5,6 +5,7 @@
 #include "sak/partition_raw_device_io.h"
 
 #include <QCoreApplication>
+#include <QBuffer>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -88,7 +89,9 @@ struct WorkerHandle {
 
 struct PartitionCandidate {
     int index{0};
+    QString scheme;
     QString type_guid;
+    uint8_t mbr_type{0};
     QString unique_guid;
     QString name;
     uint64_t offset_bytes{0};
@@ -346,6 +349,7 @@ QVector<PartitionCandidate> readGpt(QIODevice* device) {
             continue;
         }
         partitions.append(PartitionCandidate{.index = static_cast<int>(i + 1),
+                                             .scheme = QStringLiteral("GPT"),
                                              .type_guid = typeGuid,
                                              .unique_guid = guidString(entry, 16),
                                              .name = utf16Name(entry, 56, 72),
@@ -354,6 +358,52 @@ QVector<PartitionCandidate> readGpt(QIODevice* device) {
                                                            kSectorBytes});
     }
     return partitions;
+}
+
+QVector<PartitionCandidate> readMbr(QIODevice* device) {
+    QVector<PartitionCandidate> partitions;
+    const QByteArray sector = readAt(device, 0, static_cast<qsizetype>(kSectorBytes));
+    if (sector.size() < static_cast<qsizetype>(kSectorBytes) ||
+        static_cast<uchar>(sector.at(510)) != 0x55 ||
+        static_cast<uchar>(sector.at(511)) != 0xaa) {
+        return partitions;
+    }
+
+    constexpr qsizetype kPartitionTableOffset = 446;
+    constexpr qsizetype kPartitionEntryBytes = 16;
+    for (int i = 0; i < 4; ++i) {
+        const qsizetype base = kPartitionTableOffset + i * kPartitionEntryBytes;
+        const uint8_t type = static_cast<uint8_t>(sector.at(base + 4));
+        const quint32 firstLba = le32(sector, base + 8);
+        const quint32 sectorCount = le32(sector, base + 12);
+        if (type == 0 || type == 0xee || sectorCount == 0) {
+            continue;
+        }
+
+        const quint64 offsetBytes = static_cast<quint64>(firstLba) * kSectorBytes;
+        const quint64 sizeBytes = static_cast<quint64>(sectorCount) * kSectorBytes;
+        const qint64 deviceBytes = device ? device->size() : 0;
+        if (deviceBytes > 0 &&
+            (offsetBytes >= static_cast<quint64>(deviceBytes) ||
+             sizeBytes > static_cast<quint64>(deviceBytes) - offsetBytes)) {
+            continue;
+        }
+
+        partitions.append(PartitionCandidate{.index = i + 1,
+                                             .scheme = QStringLiteral("MBR"),
+                                             .mbr_type = type,
+                                             .offset_bytes = offsetBytes,
+                                             .size_bytes = sizeBytes});
+    }
+    return partitions;
+}
+
+QVector<PartitionCandidate> readPartitions(QIODevice* device) {
+    QVector<PartitionCandidate> partitions = readGpt(device);
+    if (!partitions.isEmpty()) {
+        return partitions;
+    }
+    return readMbr(device);
 }
 
 class WindowDevice final : public QIODevice {
@@ -660,13 +710,19 @@ QJsonArray listRootEntries(QIODevice* device, int maxEntries) {
 }
 
 QJsonObject partitionToJson(const PartitionCandidate& partition) {
-    return QJsonObject{{QStringLiteral("index"), partition.index},
-                       {QStringLiteral("type_guid"), partition.type_guid},
-                       {QStringLiteral("unique_guid"), partition.unique_guid},
-                       {QStringLiteral("name"), partition.name},
-                       {QStringLiteral("offset_bytes"),
-                        QString::number(partition.offset_bytes)},
-                       {QStringLiteral("size_bytes"), QString::number(partition.size_bytes)}};
+    QJsonObject out{{QStringLiteral("index"), partition.index},
+                    {QStringLiteral("scheme"), partition.scheme},
+                    {QStringLiteral("offset_bytes"), QString::number(partition.offset_bytes)},
+                    {QStringLiteral("size_bytes"), QString::number(partition.size_bytes)}};
+    if (partition.scheme.compare(QStringLiteral("GPT"), Qt::CaseInsensitive) == 0) {
+        out.insert(QStringLiteral("type_guid"), partition.type_guid);
+        out.insert(QStringLiteral("unique_guid"), partition.unique_guid);
+        out.insert(QStringLiteral("name"), partition.name);
+    } else if (partition.scheme.compare(QStringLiteral("MBR"), Qt::CaseInsensitive) == 0) {
+        out.insert(QStringLiteral("mbr_type"),
+                   QStringLiteral("0x%1").arg(partition.mbr_type, 2, 16, QLatin1Char('0')));
+    }
+    return out;
 }
 
 QJsonObject discoveredVolumeToJson(const DiscoveredApfsVolume& volume) {
@@ -714,6 +770,7 @@ DiscoveryScan discoverApfsVolumes(int maxPhysicalDrives, bool includeRootEntries
         diskJson.insert(QStringLiteral("size_bytes"), QString::number(deviceSize));
 
         QString wholeError;
+        std::optional<DiscoveredApfsVolume> wholeVolume;
         const auto wholeDetection =
             sak::PartitionFileSystemDetector::detectFromDevice(device.get(),
                                                                0,
@@ -732,14 +789,16 @@ DiscoveryScan discoverApfsVolumes(int maxPhysicalDrives, bool includeRootEntries
                     device->seek(0);
                     volume.root_entries = listRootEntries(device.get(), 100);
                 }
-                scan.volumes.append(volume);
+                wholeVolume = std::move(volume);
             }
         } else if (!wholeError.isEmpty()) {
             diskJson.insert(QStringLiteral("whole_device_detection_error"), wholeError);
         }
 
         QJsonArray partitionArray;
-        const QVector<PartitionCandidate> partitions = readGpt(device.get());
+        QJsonArray gptPartitionArray;
+        bool apfsPartitionAtDeviceStart = false;
+        const QVector<PartitionCandidate> partitions = readPartitions(device.get());
         for (const auto& partition : partitions) {
             QJsonObject partitionJson = partitionToJson(partition);
             QString partitionError;
@@ -752,10 +811,15 @@ DiscoveryScan discoverApfsVolumes(int maxPhysicalDrives, bool includeRootEntries
                 partitionJson.insert(QStringLiteral("detection"),
                                      detectionToJson(*partitionDetection));
                 if (isApfsDetection(*partitionDetection)) {
+                    apfsPartitionAtDeviceStart = apfsPartitionAtDeviceStart ||
+                                                 partition.offset_bytes == 0;
                     DiscoveredApfsVolume volume;
                     volume.disk_index = disk;
                     volume.target = partitionDevicePath(disk, partition.index);
-                    volume.kind = QStringLiteral("gpt_partition");
+                    volume.kind = partition.scheme.compare(QStringLiteral("GPT"),
+                                                           Qt::CaseInsensitive) == 0
+                                      ? QStringLiteral("gpt_partition")
+                                      : QStringLiteral("mbr_partition");
                     volume.partition = partition;
                     volume.detection = *partitionDetection;
                     if (includeRootEntries) {
@@ -774,8 +838,15 @@ DiscoveryScan discoverApfsVolumes(int maxPhysicalDrives, bool includeRootEntries
                 partitionJson.insert(QStringLiteral("detection_error"), partitionError);
             }
             partitionArray.append(partitionJson);
+            if (partition.scheme.compare(QStringLiteral("GPT"), Qt::CaseInsensitive) == 0) {
+                gptPartitionArray.append(partitionJson);
+            }
         }
-        diskJson.insert(QStringLiteral("gpt_partitions"), partitionArray);
+        diskJson.insert(QStringLiteral("partitions"), partitionArray);
+        diskJson.insert(QStringLiteral("gpt_partitions"), gptPartitionArray);
+        if (wholeVolume.has_value() && !apfsPartitionAtDeviceStart) {
+            scan.volumes.append(std::move(*wholeVolume));
+        }
         scan.disks.append(diskJson);
     }
     return scan;
@@ -937,18 +1008,29 @@ bool serviceMayEnableRawWritesForTarget(const QString& target, QString* error = 
         return true;
     }
 
-    const DiscoveryScan scan = discoverApfsVolumes(kDefaultMaxPhysicalDrives, false);
-    const bool discoveredApfs = std::any_of(scan.volumes.begin(),
-                                            scan.volumes.end(),
-                                            [&](const DiscoveredApfsVolume& volume) {
-                                                return volume.target.compare(
-                                                           target,
-                                                           Qt::CaseInsensitive) == 0;
-                                            });
-    if (!discoveredApfs) {
+    QString openError;
+    auto device = sak::openFileOrRawDeviceReadOnly(target, &openError);
+    if (!device) {
         if (error) {
-            *error = QStringLiteral("Raw write target is not a currently discovered APFS volume: %1")
-                         .arg(target);
+            *error = QStringLiteral("Raw write target cannot be opened for APFS verification: %1 (%2)")
+                         .arg(target, openError);
+        }
+        return false;
+    }
+
+    const uint64_t deviceSize =
+        device->size() > 0 ? static_cast<uint64_t>(device->size()) : kFallbackProbeBytes;
+    QString detectionError;
+    const auto detection = sak::PartitionFileSystemDetector::detectFromDevice(device.get(),
+                                                                               0,
+                                                                               deviceSize,
+                                                                               &detectionError);
+    if (!detection.has_value() || !isApfsDetection(*detection)) {
+        if (error) {
+            *error = QStringLiteral("Raw write target does not contain a verified APFS signature: %1 (%2)")
+                         .arg(target,
+                              detectionError.isEmpty() ? QStringLiteral("not APFS")
+                                                       : detectionError);
         }
         return false;
     }
@@ -1844,6 +1926,55 @@ int discoverApfs(const QStringList& args) {
     return 0;
 }
 
+int partitionParserSelfTest() {
+    QByteArray image(2 * 1024 * 1024, '\0');
+    image[510] = static_cast<char>(0x55);
+    image[511] = static_cast<char>(0xaa);
+    constexpr qsizetype entry = 446;
+    image[entry + 4] = static_cast<char>(0x06);
+    const auto writeLe32 = [&](qsizetype offset, quint32 value) {
+        for (int i = 0; i < 4; ++i) {
+            image[offset + i] = static_cast<char>((value >> (i * 8)) & 0xff);
+        }
+    };
+    writeLe32(entry + 8, 2048);
+    writeLe32(entry + 12, 1024);
+
+    QBuffer device(&image);
+    const bool opened = device.open(QIODevice::ReadOnly);
+    const QVector<PartitionCandidate> partitions = opened ? readPartitions(&device)
+                                                           : QVector<PartitionCandidate>{};
+    const bool regularOk = partitions.size() == 1 && partitions.first().index == 1 &&
+                           partitions.first().scheme == QStringLiteral("MBR") &&
+                           partitions.first().mbr_type == 0x06 &&
+                           partitions.first().offset_bytes == 1024ULL * 1024ULL &&
+                           partitions.first().size_bytes == 512ULL * 1024ULL;
+
+    QByteArray hybridImage = image;
+    for (int i = 0; i < 4; ++i) {
+        hybridImage[entry + 8 + i] = 0;
+    }
+    QBuffer hybridDevice(&hybridImage);
+    const bool hybridOpened = hybridDevice.open(QIODevice::ReadOnly);
+    const QVector<PartitionCandidate> hybridPartitions =
+        hybridOpened ? readPartitions(&hybridDevice) : QVector<PartitionCandidate>{};
+    const bool hybridOk = hybridPartitions.size() == 1 &&
+                          hybridPartitions.first().index == 1 &&
+                          hybridPartitions.first().scheme == QStringLiteral("MBR") &&
+                          hybridPartitions.first().offset_bytes == 0 &&
+                          hybridPartitions.first().size_bytes == 512ULL * 1024ULL;
+    const bool ok = regularOk && hybridOk;
+    printJson(QJsonObject{{QStringLiteral("component"), QStringLiteral("apfs_mount_service")},
+                          {QStringLiteral("check"), QStringLiteral("partition_parser_self_test")},
+                          {QStringLiteral("ok"), ok},
+                          {QStringLiteral("partition_count"), partitions.size()},
+                          {QStringLiteral("hybrid_partition_count"), hybridPartitions.size()},
+                          {QStringLiteral("partition"),
+                           partitions.isEmpty() ? QJsonObject{}
+                                                : partitionToJson(partitions.first())}});
+    return ok ? 0 : 1;
+}
+
 int configureDiscoveredMounts(const QStringList& args) {
     const int maxDrives =
         argumentIntValue(args, QStringLiteral("--max-physical-drives"), kDefaultMaxPhysicalDrives);
@@ -2516,6 +2647,9 @@ int main(int argc, char* argv[]) {
     }
     if (args.contains(QStringLiteral("--discover-apfs"), Qt::CaseInsensitive)) {
         return discoverApfs(args);
+    }
+    if (args.contains(QStringLiteral("--self-test-partitions"), Qt::CaseInsensitive)) {
+        return partitionParserSelfTest();
     }
     if (args.contains(QStringLiteral("--configure-discovered"), Qt::CaseInsensitive)) {
         return configureDiscoveredMounts(args);

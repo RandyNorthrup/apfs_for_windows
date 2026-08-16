@@ -215,13 +215,8 @@ QJsonObject detectionToJson(const sak::PartitionFileSystemDetection& detection) 
 
 QJsonArray listRoot(QIODevice* device, int maxEntries) {
     QJsonArray entries;
-    WindowDevice root(device, 0, static_cast<uint64_t>(std::max<qint64>(0, device->size())));
-    if (!root.open(QIODevice::ReadOnly)) {
-        return entries;
-    }
-    const auto listing = sak::PartitionApfsFileSystemReader::listDirectory(&root,
-                                                                           QStringLiteral("/"),
-                                                                           maxEntries);
+    const auto listing =
+        sak::PartitionApfsFileSystemReader::listDirectory(device, QStringLiteral("/"), maxEntries);
     for (const auto& entry : listing.entries) {
         entries.append(QJsonObject{{QStringLiteral("name"), entry.name},
                                    {QStringLiteral("path"), entry.path},
@@ -236,16 +231,16 @@ QJsonArray listRoot(QIODevice* device, int maxEntries) {
     return entries;
 }
 
+QJsonArray stringListToJson(const QStringList& values) {
+    QJsonArray out;
+    for (const auto& value : values) {
+        out.append(value);
+    }
+    return out;
+}
+
 QJsonObject readFileJson(QIODevice* device, const QString& path, uint64_t maxBytes) {
     const auto file = sak::PartitionApfsFileSystemReader::readFile(device, path, maxBytes);
-    QJsonArray blockers;
-    for (const auto& blocker : file.blockers) {
-        blockers.append(blocker);
-    }
-    QJsonArray warnings;
-    for (const auto& warning : file.warnings) {
-        warnings.append(warning);
-    }
     QJsonArray xattrs;
     for (const auto& xattr : file.xattrs) {
         xattrs.append(QJsonObject{{QStringLiteral("name"), xattr.first},
@@ -256,13 +251,72 @@ QJsonObject readFileJson(QIODevice* device, const QString& path, uint64_t maxByt
         {QStringLiteral("path"), path},
         {QStringLiteral("ok"), file.ok},
         {QStringLiteral("volume_name"), file.volume_name},
-        {QStringLiteral("blockers"), blockers},
-        {QStringLiteral("warnings"), warnings},
+        {QStringLiteral("blockers"), stringListToJson(file.blockers)},
+        {QStringLiteral("warnings"), stringListToJson(file.warnings)},
         {QStringLiteral("size_bytes"), QString::number(file.data.size())},
         {QStringLiteral("sha256"),
          QString::fromLatin1(QCryptographicHash::hash(file.data, QCryptographicHash::Sha256)
                                  .toHex())},
         {QStringLiteral("xattrs"), xattrs}};
+}
+
+QJsonObject debugFileJson(QIODevice* device, const QString& path) {
+    const auto debug = sak::PartitionApfsFileSystemReader::debugFile(device, path);
+    QJsonArray xattrs;
+    for (const auto& xattr : debug.xattrs) {
+        xattrs.append(QJsonObject{{QStringLiteral("name"), xattr.name},
+                                  {QStringLiteral("size_bytes"),
+                                   QString::number(xattr.size_bytes)},
+                                  {QStringLiteral("embedded"), xattr.embedded}});
+    }
+    QJsonArray extents;
+    for (const auto& extent : debug.extents) {
+        extents.append(QJsonObject{
+            {QStringLiteral("role"), extent.role},
+            {QStringLiteral("owner_id"), QString::number(extent.owner_id)},
+            {QStringLiteral("logical_offset"), QString::number(extent.logical_offset)},
+            {QStringLiteral("length"), QString::number(extent.length)},
+            {QStringLiteral("physical_block"), QString::number(extent.physical_block)},
+            {QStringLiteral("physical_byte_offset"),
+             QString::number(extent.physical_byte_offset)},
+            {QStringLiteral("flags"), QString::number(extent.flags)},
+            {QStringLiteral("crypto_id"), QString::number(extent.crypto_id)},
+            {QStringLiteral("physical_block_in_container"),
+             extent.physical_block_in_container},
+            {QStringLiteral("physical_byte_offset_in_container"),
+             extent.physical_byte_offset_in_container}});
+    }
+    return QJsonObject{{QStringLiteral("path"), debug.path},
+                       {QStringLiteral("ok"), debug.ok},
+                       {QStringLiteral("file_system"), debug.file_system},
+                       {QStringLiteral("volume_name"), debug.volume_name},
+                       {QStringLiteral("blockers"), stringListToJson(debug.blockers)},
+                       {QStringLiteral("warnings"), stringListToJson(debug.warnings)},
+                       {QStringLiteral("block_size"), QString::number(debug.block_size)},
+                       {QStringLiteral("block_count"), QString::number(debug.block_count)},
+                       {QStringLiteral("directory_parent_id"),
+                        QString::number(debug.directory_parent_id)},
+                       {QStringLiteral("directory_name"), debug.directory_name},
+                       {QStringLiteral("file_id"), QString::number(debug.file_id)},
+                       {QStringLiteral("directory_type"), debug.directory_type},
+                       {QStringLiteral("inode_object_id"),
+                        QString::number(debug.inode_object_id)},
+                       {QStringLiteral("inode_private_id"),
+                        QString::number(debug.inode_private_id)},
+                       {QStringLiteral("inode_size"), QString::number(debug.inode_size)},
+                       {QStringLiteral("inode_mode"), debug.inode_mode},
+                       {QStringLiteral("inode_sparse"), debug.inode_sparse},
+                       {QStringLiteral("has_decmpfs"), debug.has_decmpfs},
+                       {QStringLiteral("decmpfs_algo"),
+                        static_cast<int>(debug.decmpfs_algo)},
+                       {QStringLiteral("decmpfs_uncompressed_size"),
+                        QString::number(debug.decmpfs_uncompressed_size)},
+                       {QStringLiteral("decmpfs_size_bytes"),
+                        QString::number(debug.decmpfs_size_bytes)},
+                       {QStringLiteral("resource_fork_object_id"),
+                        QString::number(debug.resource_fork_object_id)},
+                       {QStringLiteral("xattrs"), xattrs},
+                       {QStringLiteral("extents"), extents}};
 }
 
 QJsonObject partitionToJson(QIODevice* device,
@@ -314,16 +368,20 @@ int main(int argc, char* argv[]) {
                                         QStringLiteral("count"),
                                         QStringLiteral("200")};
     QCommandLineOption readFileOption{{QStringLiteral("read-file")},
-                                      QStringLiteral("Read APFS file and report SHA-256."),
-                                      QStringLiteral("path")};
+                                       QStringLiteral("Read APFS file and report SHA-256."),
+                                       QStringLiteral("path")};
+    QCommandLineOption debugFileOption{{QStringLiteral("debug-file")},
+                                       QStringLiteral("Report APFS file inode/xattr/extent metadata."),
+                                       QStringLiteral("path")};
     QCommandLineOption maxReadBytesOption{{QStringLiteral("max-read-bytes")},
-                                          QStringLiteral("Maximum file bytes to read."),
-                                          QStringLiteral("bytes"),
+                                           QStringLiteral("Maximum file bytes to read."),
+                                           QStringLiteral("bytes"),
                                           QStringLiteral("536870912")};
     parser.addOption(targetOption);
     parser.addOption(listRootOption);
     parser.addOption(maxEntriesOption);
     parser.addOption(readFileOption);
+    parser.addOption(debugFileOption);
     parser.addOption(maxReadBytesOption);
     parser.process(app);
 
@@ -373,6 +431,11 @@ int main(int argc, char* argv[]) {
                           readFileJson(device.get(),
                                        parser.value(readFileOption),
                                        parser.value(maxReadBytesOption).toULongLong()));
+        }
+        if (parser.isSet(debugFileOption) &&
+            wholeDetection->file_system.compare(QStringLiteral("APFS"), Qt::CaseInsensitive) == 0) {
+            report.insert(QStringLiteral("whole_device_debug_file"),
+                          debugFileJson(device.get(), parser.value(debugFileOption)));
         }
     } else if (!detectError.isEmpty()) {
         report.insert(QStringLiteral("whole_device_detection_error"), detectError);

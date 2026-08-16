@@ -61,6 +61,25 @@ if (Test-Path -LiteralPath $serviceExe -PathType Leaf) {
 }
 
 $serviceAfter = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'" -ErrorAction SilentlyContinue
+$managerPath = [IO.Path]::GetFullPath((Join-Path $InstallRoot "apfs_mount_manager.exe"))
+$managerProcessesBefore = @(Get-CimInstance Win32_Process -Filter "Name='apfs_mount_manager.exe'" -ErrorAction SilentlyContinue |
+    Where-Object {
+        $_.ExecutablePath -and
+        [IO.Path]::GetFullPath([string]$_.ExecutablePath).Equals(
+            $managerPath,
+            [StringComparison]::OrdinalIgnoreCase)
+    } |
+    Select-Object ProcessId, ExecutablePath)
+foreach ($manager in $managerProcessesBefore) {
+    Stop-Process -Id $manager.ProcessId -Force -ErrorAction SilentlyContinue
+}
+$managerProcessesAfter = @(Get-CimInstance Win32_Process -Filter "Name='apfs_mount_manager.exe'" -ErrorAction SilentlyContinue |
+    Where-Object {
+        $_.ExecutablePath -and
+        [IO.Path]::GetFullPath([string]$_.ExecutablePath).Equals(
+            $managerPath,
+            [StringComparison]::OrdinalIgnoreCase)
+    })
 $startMenuRemoved = $false
 if (Test-Path -LiteralPath $StartMenuDir) {
     Remove-Item -LiteralPath $StartMenuDir -Recurse -Force
@@ -76,13 +95,19 @@ if (Test-Path -LiteralPath $registryKeyPath) {
 } else {
     $registryRemoved = $true
 }
+$startupKeyPath = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run"
+$startupValueName = "APFS for Windows Mount Manager"
+Remove-ItemProperty -Path $startupKeyPath -Name $startupValueName -Force -ErrorAction SilentlyContinue
+$startupEntryRemoved = $null -eq (Get-ItemPropertyValue -Path $startupKeyPath -Name $startupValueName -ErrorAction SilentlyContinue)
 $installRootRemoved = $false
 if ($RemoveFiles -and (Test-Path -LiteralPath $InstallRoot)) {
     Remove-Item -LiteralPath $InstallRoot -Recurse -Force
     $installRootRemoved = -not (Test-Path -LiteralPath $InstallRoot)
 }
 
-$ok = $null -eq $serviceAfter -and $startMenuRemoved -and $registryRemoved -and ((-not $RemoveFiles) -or $installRootRemoved)
+$ok = $null -eq $serviceAfter -and $startMenuRemoved -and $registryRemoved -and
+    $startupEntryRemoved -and $managerProcessesAfter.Count -eq 0 -and
+    ((-not $RemoveFiles) -or $installRootRemoved)
 $result = [ordered]@{
     component = "apfs_for_windows"
     check = "uninstall"
@@ -94,6 +119,10 @@ $result = [ordered]@{
     start_menu_removed = [bool]$startMenuRemoved
     uninstall_registry_key = $registryKeyPath
     uninstall_registry_removed = [bool]$registryRemoved
+    manager_startup_value = $startupValueName
+    manager_startup_removed = [bool]$startupEntryRemoved
+    manager_processes_stopped = [bool]($managerProcessesAfter.Count -eq 0)
+    manager_processes_before = $managerProcessesBefore
     service_before = if ($serviceBefore) {
         [ordered]@{
             name = $serviceBefore.Name

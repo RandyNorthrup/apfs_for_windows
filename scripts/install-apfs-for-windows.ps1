@@ -121,6 +121,16 @@ function Install-UninstallRegistryEntry {
     New-ItemProperty -Path $keyPath -Name EstimatedSize -Value $estimatedSizeKb -PropertyType DWord -Force | Out-Null
 }
 
+function Install-ManagerStartupEntry {
+    param([Parameter(Mandatory = $true)][string]$InstallPath)
+    $keyPath = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run"
+    $valueName = "APFS for Windows Mount Manager"
+    $managerExe = Join-Path $InstallPath "apfs_mount_manager.exe"
+    $command = "`"$managerExe`" --tray"
+    New-Item -Path $keyPath -Force | Out-Null
+    New-ItemProperty -Path $keyPath -Name $valueName -Value $command -PropertyType String -Force | Out-Null
+}
+
 Assert-Admin
 
 if (-not $SkipWinFspCheck) {
@@ -192,9 +202,11 @@ if ($existingService) {
 Set-ServiceRecoveryPolicy -Name $ServiceName
 Install-StartMenuEntries -Root $StartMenuDir -InstallPath $InstallRoot
 Install-UninstallRegistryEntry -InstallPath $InstallRoot -Version $AppVersion
+Install-ManagerStartupEntry -InstallPath $InstallRoot
 Start-Service -Name $ServiceName
 
 Write-Host "APFS for Windows installed at $InstallRoot"
 Write-Host "Service: $ServiceName (Automatic, restart-on-failure)"
 Write-Host "Start Menu: $StartMenuDir"
 Write-Host "Apps & Features entry: APFS for Windows $AppVersion"
+Write-Host "Tray manager: starts at user logon"

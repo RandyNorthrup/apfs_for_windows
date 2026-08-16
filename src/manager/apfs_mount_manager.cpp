@@ -26,6 +26,8 @@
 #include <QPen>
 #include <QPlainTextEdit>
 #include <QLineEdit>
+#include <QLocalServer>
+#include <QLocalSocket>
 #include <QPixmap>
 #include <QProcess>
 #include <QPushButton>
@@ -43,6 +45,8 @@
 #include <QVBoxLayout>
 
 namespace {
+
+constexpr char kManagerInstanceServer[] = "ApfsForWindowsMountManager.Instance";
 
 void printJson(const QJsonObject& object) {
     QTextStream(stdout) << QJsonDocument(object).toJson(QJsonDocument::Indented);
@@ -674,6 +678,44 @@ int main(int argc, char* argv[]) {
         return window.selfTestResult().value(QStringLiteral("health_ok")).toBool(false) ? 0 : 1;
     }
 
+    QLocalSocket existingInstance;
+    existingInstance.connectToServer(QString::fromLatin1(kManagerInstanceServer));
+    if (existingInstance.waitForConnected(1000)) {
+        existingInstance.write(
+            rawArgs.contains(QStringLiteral("--tray"), Qt::CaseInsensitive) ? "ping" : "show");
+        existingInstance.flush();
+        existingInstance.waitForBytesWritten(1000);
+        return 0;
+    }
+
+    QLocalServer instanceServer;
+    if (!instanceServer.listen(QString::fromLatin1(kManagerInstanceServer))) {
+        QLocalServer::removeServer(QString::fromLatin1(kManagerInstanceServer));
+        if (!instanceServer.listen(QString::fromLatin1(kManagerInstanceServer))) {
+            QMessageBox::critical(nullptr,
+                                  QStringLiteral("APFS for Windows"),
+                                  QStringLiteral("Unable to start the mount manager instance."));
+            return 1;
+        }
+    }
+    QObject::connect(&instanceServer, &QLocalServer::newConnection, [&instanceServer, &window]() {
+        while (instanceServer.hasPendingConnections()) {
+            QLocalSocket* socket = instanceServer.nextPendingConnection();
+            if (socket->bytesAvailable() == 0) {
+                socket->waitForReadyRead(250);
+            }
+            const QByteArray command = socket->readAll().trimmed();
+            socket->disconnectFromServer();
+            socket->deleteLater();
+            if (command != QByteArrayLiteral("show")) {
+                continue;
+            }
+            window.showNormal();
+            window.raise();
+            window.activateWindow();
+        }
+    });
+
     QMenu trayMenu;
     QAction openAction(QStringLiteral("Open"), &trayMenu);
     QAction exitAction(QStringLiteral("Exit"), &trayMenu);
@@ -706,6 +748,8 @@ int main(int argc, char* argv[]) {
                      });
     trayIcon.show();
 
-    window.show();
+    if (!rawArgs.contains(QStringLiteral("--tray"), Qt::CaseInsensitive)) {
+        window.show();
+    }
     return app.exec();
 }

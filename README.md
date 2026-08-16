@@ -11,7 +11,8 @@ Current state:
   APFS compression paths.
 - WinFsp 2025 runtime/SDK is supported and detected by CMake.
 - `apfs_probe` can probe APFS images/raw devices, list the root directory, and
-  read files by APFS path with SHA-256 output.
+  read files by APFS path with SHA-256 output. It also has `--debug-file` for
+  APFS inode/xattr/extent diagnostics on one path.
 - `apfs_winfs_worker` implements a WinFsp APFS mount over the copied APFS
   reader/writer. Read-only remains default; read/write requires `--read-write`,
   and physical raw writes also require `--allow-raw-writes`.
@@ -25,7 +26,8 @@ Current state:
   copy-style writes. Image mounts keep the 64 MiB buffered guard.
 - `apfs_mount_service` installs as `ApfsForWindowsMountService` with Automatic
   startup, reads mount mappings from `C:\ProgramData\APFS for Windows\mounts.json`,
-  discovers APFS physical disks/partitions at service start, periodically syncs
+  discovers APFS whole devices plus GPT/MBR partitions by on-disk signature at
+  service start, periodically syncs
   live config/device changes, supervises worker processes, and restarts failed
   mount workers so mounts return to normal Explorer/user sessions. It also has a
   local service IPC path so installed CLI/manager requests can update safe mount
@@ -39,21 +41,24 @@ Current state:
   modes.
 - `apfs_mount_manager` creates a persistent tray icon using a stacked `AP` over
   `FS` icon. Right-click menu includes `Open` and `Exit`; closing the window no
-  longer exits the app.
+  longer exits the app. Install/repair registers hidden `--tray` launch for each
+  Windows logon, and a local single-instance channel prevents duplicate icons.
 - `apfs_core_selftest` verifies copied APFS writer/reader behavior against
   temporary images and a file-backed raw target: format/list/read, root and
   nested file write/rename/delete, directory create/delete/rename/move, raw
   streaming nested file write, raw file rename/move/delete, and preservation of
   an existing 16 MiB file.
-- Copied source license tags and copied source-app licensing notices were
-  removed from code/docs. Third-party notices remain for Qt, WinFsp, and Apple
-  LZFSE.
+- Copied SAK APFS source is Randy-authored project code imported into this
+  repo. Copied source-app license tags and branding notices were removed from
+  code/docs per owner direction. Third-party notices remain for Qt, WinFsp, and
+  Apple LZFSE.
 - WinFsp file handles are owned by the mount state and reclaimed through a
   deferred close quarantine, avoiding the earlier unbounded raw `FileContext`
   allocation leak during repeated Explorer open/close cycles.
 - Raw-device writes are still blocked by default. They require explicit
-  read/write mount policy, `--allow-raw-writes`, and serial-pinned verifier
-  evidence before USB write/delete proof is considered current.
+  read/write mount policy, `--allow-raw-writes`, exact-target APFS signature
+  verification inside the service, and serial-pinned verifier evidence before
+  USB write/delete proof is considered current.
 
 Build:
 
@@ -69,7 +74,7 @@ Developer install, from elevated PowerShell:
 .\scripts\install-apfs-for-windows.ps1
 ```
 
-Repair current install and restore the pinned USB APFS mount to read-only, from
+Repair current install and verify automatically discovered APFS mounts, from
 elevated PowerShell:
 
 ```powershell
@@ -85,10 +90,16 @@ UAC prompt if one is already pending:
 
 The repair script redeploys the current build to `C:\Program Files\APFS for
 Windows`, stops any lingering installed APFS worker processes before copying,
-keeps `ApfsForWindowsMountService` Automatic/running, restores
-`\\?\GLOBALROOT\Device\Harddisk1\Partition2` at `Y:` as read-only, verifies
-installed binary hashes, and writes
+stops/relaunches the tray manager when run through the guarded launcher, keeps
+`ApfsForWindowsMountService` Automatic/running, verifies auto-discovered mounts
+and installed binary hashes, and writes
 `artifacts\repair\install-repair-proof.json`. It does not reboot.
+
+To pin one known mount to read-only during repair, pass both values:
+
+```powershell
+.\scripts\start-repair-elevated.ps1 -UsbTarget '\\?\GLOBALROOT\Device\Harddisk1\Partition1' -UsbMount V:
+```
 
 Configure a persistent read-only APFS mount:
 
@@ -136,13 +147,13 @@ Verify installed service and APFS USB mount state:
 
 Serial-pinned normal-user USB write/delete proof is current. The verifier keeps
 file actions in the non-admin parent process, uses service IPC only to switch
-the pinned mount policy temporarily, restores `Y:` read-only, and writes
+the pinned mount policy temporarily, restores the selected mount read-only, and writes
 `artifacts\usb-rw\usb-normal-user-rw-proof.json`. Use the non-mutating state
 check first:
 
 ```powershell
-.\scripts\verify-current-apfs-state.ps1
-.\scripts\verify-usb-normal-user-rw.ps1 -NoDiagnostics
+.\scripts\verify-current-apfs-state.ps1 -UsbTarget '\\?\GLOBALROOT\Device\Harddisk1\Partition1'
+.\scripts\verify-usb-normal-user-rw.ps1 -DiskNumber 1 -PartitionNumber 1 -Mount V: -NoDiagnostics
 ```
 
 `-NoDiagnostics` uses the same mutation path but skips large trace/log tails in
@@ -174,7 +185,7 @@ mode:
 
 ```powershell
 $f = "Predator Badlands 2025 1080p WEB-DL HEVC x265 5.1 BONE.mkv"
-$entries = ".Spotlight-V100", ".fseventsd", "New folder", $f, "icons8-jester.svg"
+$entries = ".Spotlight-V100", ".fseventsd", "New folder", $f
 .\scripts\verify-apfs-boot-persistence.ps1 -VerifyNow -Mount Y: -ExpectedFile $f -ExpectedEntries $entries -ReadProbeOnly -ReadProbeBytes 4096
 ```
 
@@ -237,23 +248,23 @@ Verified USB evidence:
   stayed Windows-offline/RAW for raw-device proof.
 - Service-launched `Z:` read-only APFS mount lists `clone.bin`, `link.bin`,
   `src.bin` in normal shell.
-- Startup auto-discovery also found GPT APFS
+- Earlier startup auto-discovery found GPT APFS
   `\\?\GLOBALROOT\Device\Harddisk1\Partition2` and mounted it read-only at `Y:`.
 - All three files read as `A7-RAW-CERT-SHARED-PAYLOAD-2026` with SHA-256
   `5DE304A213068C0F526D99253D0D4A18A4652E95D010A0E96D43CB5ED758A32B`.
 - Normal write attempt to `Z:\normal-write-deny-test.txt` is denied.
-- Disk 1, `USB DISK 3.0`, serial `067D19C65080`, GPT APFS partition 2,
+- In the July media layout, Disk 1, `USB DISK 3.0`, serial `067D19C65080`, GPT APFS partition 2,
   30,832,287,744-byte APFS partition, is pinned for destructive USB RW proof.
   Earlier proof artifacts are historical; current USB RW verifiers use one root
   proof directory plus one direct child file, then restore read-only config
   without rebooting or restarting the service.
-- Serial-pinned normal-user USB RW proof is current. On
-  `2026-07-10T05:57:50Z`, `scripts\verify-usb-normal-user-rw.ps1 -NoDiagnostics`
+- Historical serial-pinned normal-user USB RW proof: on
+  `2026-07-10T06:51:00Z`, `scripts\verify-usb-normal-user-rw.ps1 -NoDiagnostics`
   passed against Disk 1 partition 2 at `Y:` as `MINI-DT\Randy` without reboot:
   proof directory create passed, child file write hash matched
-  `1EE19198B078224E6A5FF08DB2264DE61A1AD46B89937F5EB654C0CD865EDEE2`, rename
+  `84430AC23FB71E125BF33F1D9A1DE3E30676F8EE776CB4B790BCDCD4905F2FC1`, rename
   passed, file delete passed, directory delete passed, service PID stayed
-  `48880`, and `Y:` was restored read-only with raw writes disabled. Artifact:
+  `128168`, and `Y:` was restored read-only with raw writes disabled. Artifact:
   `artifacts\usb-rw\usb-normal-user-rw-proof.json`.
 - `scripts\verify-usb-mounted-file-actions.ps1` is the direct mounted-drive file
   action proof. It never elevates, never edits service config, refuses a stale
@@ -264,15 +275,35 @@ Verified USB evidence:
   cleanup, labels `-AllowStaleInstalledWorker` runs as
   `current_installed_mount_only`, and only mutates its own
   `sak-mounted-file-actions-proof-*` directory on `Y:` during full proof.
+  Current certification wraps this proof in an explicit temporary writable
+  policy window, then restores `Y:` read-only afterward.
+- Current media layout changed during SAK recertification. On
+  `2026-08-16T17:22:33Z`, the same pinned 31,042,043,904-byte USB disk exposed
+  Windows MBR Partition 1 at `V:` while the exact target probe identified a
+  536,870,912-byte APFS container by `RawSignature`. Normal-user proof passed:
+  directory create, file write/hash, rename/hash, file delete, directory delete,
+  no service restart, no reboot, and automatic restore to read-only/raw-disabled.
+  Hash: `89BB2ED96A9521257813B3E5FF3AD25466F6FEEB71AE04D1C1EF1D0A9E0AEA8B`.
+  Artifact: `artifacts\usb-rw\usb-normal-user-rw-proof.json`.
 - `scripts\verify-current-apfs-state.ps1` generated
   `artifacts\state\current-apfs-state.json`. Current preflight is `ready=true`:
   no UAC prompt is pending, installed binaries match the current build, stale
-  proof entries are gone, service is Automatic/running, and `Y:` is restored
+  proof entries are gone, service is Automatic/running, and selected USB mount is restored
   read-only with `allow_raw_writes=false`.
+- `artifacts\usb-rw\icons8-jester-debug-before-delete.json` captured the stale
+  `icons8-jester.svg` inode before cleanup. `apfs_probe --debug-file` showed no
+  decmpfs/resource-fork payload and an impossible APFS extent block
+  `1753640960` outside the 30 GB container, so the file was classified as
+  corrupt test-media metadata rather than a compression reader gap.
+- `artifacts\usb-rw\delete-corrupt-icons8-svg-ready-wait.json` proves the
+  corrupt `Y:\icons8-jester.svg` entry was deleted through the mounted WinFsp
+  drive after waiting for the live writable worker ACL/attributes, then `Y:` was
+  restored read-only without reboot.
 - `scripts\repair-apfs-for-windows-install.ps1` is ready for the required
   elevated recovery step. It stops the service, reaps any lingering installed
-  APFS worker processes, redeploys current binaries, restores the pinned USB
-  mount to read-only, configures restart-on-failure service recovery, verifies
+  APFS worker/manager processes, redeploys current binaries, optionally restores
+  an explicitly pinned USB mount to read-only, otherwise verifies automatic
+  discovery, configures restart-on-failure service recovery, verifies
   service/binary/mount state, records `worker_cleanup`, and writes
   `artifacts\repair\install-repair-proof.json`.
 - `scripts\start-repair-elevated.ps1` is the normal-user guarded launcher for
@@ -292,6 +323,9 @@ Verified USB evidence:
   child-file copy into one root proof directory, all-file hash verification,
   edit, `MoveFileEx` replace-existing rename, file rename, recursive delete, and
   post-unmount probe.
+  Default mount selection falls back to a free drive letter when its preferred
+  letter is occupied; an explicitly requested conflicting letter remains a hard
+  failure.
 - `scripts\verify-local-worker-robocopy-stress.ps1` generated
   `artifacts\local-robocopy-stress\worker-robocopy-stress-proof.json`. It runs
   without admin or USB mutation and repeats the Explorer-style Robocopy
@@ -303,6 +337,8 @@ Verified USB evidence:
   APFS image containing existing 16 MiB `large.bin`, create one root proof
   directory, write/rename/overwrite/delete one direct child file, remove the
   proof directory, then probe `large.bin` after unmount with the same SHA-256.
+  It also auto-selects a free default mount when physical APFS mounts occupy its
+  preferred letter.
 - `scripts\verify-installed-service-mode-policy.ps1` is ready for the post-repair
   installed-service proof. It runs without admin or USB mutation, mounts a
   generated APFS image through the installed service, proves read-only write
@@ -311,19 +347,20 @@ Verified USB evidence:
   preflight passes.
 - `scripts\run-apfs-for-windows-certification.ps1` writes
   `artifacts\certification\apfs-for-windows-certification.json`. Current full
-  no-reboot run completed `2026-07-10T05:57:50Z` with `ok=true`,
+  no-reboot run completed on `2026-08-16` against current Partition 1/`V:` with `ok=true`,
   `local_code_gates_ok=true`, `installed_persistence_ok=true`,
-  `usb_preflight_ready=true`, and `full_usb_rw_ok=true`. It runs build, CTest,
-  script parse, local worker, service IPC, package, license, WinFsp, copied-core,
-  installed-state, and serial-pinned USB RW proof gates. Direct mounted-drive USB
-  file actions remain opt-in with `-RunUsbMountedFileActions`; broader
+  `mounted_usb_file_actions_ok=true`, `usb_preflight_ready=true`, and
+  `full_usb_rw_ok=true`. It runs build, CTest, script parse, local worker,
+  service IPC, package, license, WinFsp, copied-core, installed-state, direct
+  mounted-drive USB file actions, and serial-pinned USB RW proof gates. Broader
   public-certification gates still need crash/rollback, Apple/macOS validation,
   surprise-unplug, and wider metadata coverage.
 
 Verified copied-core mutation evidence:
 
-- Current `ctest --test-dir build -C Release --output-on-failure` passes 10/10,
-  including `apfs_service_control_self_test` and `apfs_service_ipc_self_test`.
+- Current `ctest --test-dir build -C Release --output-on-failure` passes 11/11,
+  including `apfs_service_partition_parser`, `apfs_service_control_self_test`,
+  and `apfs_service_ipc_self_test`.
   These exercise service-side safe config requests, set-enabled/remove behavior,
   raw-write denial, and actual local socket transport against a temporary
   ProgramData root.
@@ -433,8 +470,7 @@ Verified copied-core mutation evidence:
   current no-reboot `Y:` persistence state: service Automatic/running, mounted
   root entries visible, existing movie file read probe returns 4096 bytes, and a
   read-only write probe is denied.
-- Current USB read gap: `Y:\icons8-jester.svg` opens and lists at 5509 bytes but
-  read fails. Raw `apfs_probe --read-file icons8-jester.svg` reports
-  `APFS block 1753640960 is outside container bounds`. Treat as a remaining
-  corruption/compression/resource-fork classification blocker before broad
-  "all existing APFS files read" claims.
+- The July USB read gap was closed by deleting the
+  corrupt `icons8-jester.svg` entry. The remaining July `Y:` root entries were
+  `.Spotlight-V100`, `.fseventsd`, `New folder`, and the existing movie file.
+  Broad public claims still need larger-media read coverage beyond this one USB.

@@ -5,6 +5,9 @@ param(
     [string]$RepairScript = "scripts\repair-apfs-for-windows-install.ps1",
     [string]$RepairOutputPath = "artifacts\repair\install-repair-proof.json",
     [string]$OutputPath = "artifacts\repair\start-repair-elevated-proof.json",
+    [string]$UsbTarget = "",
+    [string]$UsbMount = "",
+    [int]$MaxPhysicalDrives = 32,
     [int]$TimeoutSeconds = 300
 )
 
@@ -86,6 +89,7 @@ $baseResult = [ordered]@{
     blockers = @()
     elevated_process = $null
     repair_result = $null
+    manager_launch = $null
     error = $null
 }
 
@@ -106,7 +110,17 @@ if (Test-Path -LiteralPath $resolvedRepairOutput -PathType Leaf) {
 
 if (Test-CurrentProcessAdmin) {
     try {
-        & powershell -NoProfile -ExecutionPolicy Bypass -File $resolvedRepairScript -OutputPath $resolvedRepairOutput
+        $repairArgs = @(
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-File", $resolvedRepairScript,
+            "-OutputPath", $resolvedRepairOutput,
+            "-MaxPhysicalDrives", [string]$MaxPhysicalDrives
+        )
+        if (-not [string]::IsNullOrWhiteSpace($UsbTarget)) {
+            $repairArgs += @("-UsbTarget", $UsbTarget, "-UsbMount", $UsbMount)
+        }
+        & powershell @repairArgs
         $repairExit = $LASTEXITCODE
     } catch {
         $repairExit = 1
@@ -122,8 +136,12 @@ if (Test-CurrentProcessAdmin) {
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
         "-File", $resolvedRepairScript,
-        "-OutputPath", $resolvedRepairOutput
+        "-OutputPath", $resolvedRepairOutput,
+        "-MaxPhysicalDrives", [string]$MaxPhysicalDrives
     )
+    if (-not [string]::IsNullOrWhiteSpace($UsbTarget)) {
+        $args += @("-UsbTarget", $UsbTarget, "-UsbMount", $UsbMount)
+    }
     try {
         $process = Start-Process -FilePath powershell -ArgumentList $args -Verb RunAs -PassThru -Wait
         $baseResult.elevated_process = [ordered]@{
@@ -147,6 +165,24 @@ if (Test-Path -LiteralPath $resolvedRepairOutput -PathType Leaf) {
     try {
         $baseResult.repair_result = Get-Content -LiteralPath $resolvedRepairOutput -Raw | ConvertFrom-Json
         $baseResult.ok = [bool]$baseResult.repair_result.ok
+        if ($baseResult.ok -and -not (Test-CurrentProcessAdmin)) {
+            $managerExe = Join-Path ([string]$baseResult.repair_result.install_root) "apfs_mount_manager.exe"
+            if (Test-Path -LiteralPath $managerExe -PathType Leaf) {
+                $managerProcess = Start-Process -FilePath $managerExe `
+                    -ArgumentList @("--tray") `
+                    -WindowStyle Hidden `
+                    -PassThru
+                $baseResult.manager_launch = [ordered]@{
+                    requested = $true
+                    process_id = [int]$managerProcess.Id
+                    executable = $managerExe
+                    tray_mode = $true
+                }
+            } else {
+                $baseResult.ok = $false
+                $baseResult.blockers = @("installed mount manager not found after repair")
+            }
+        }
     } catch {
         $baseResult.error = $_.Exception.Message
         $baseResult.blockers = @("repair output JSON parse failed")

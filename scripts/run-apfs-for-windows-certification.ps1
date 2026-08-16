@@ -7,7 +7,13 @@ param(
     [switch]$SkipBuild,
     [switch]$RunRepair,
     [switch]$RunUsbMountedFileActions,
-    [switch]$RunUsbWriteProof
+    [switch]$RunUsbWriteProof,
+    [int]$UsbDiskNumber = 1,
+    [int]$UsbPartitionNumber = 2,
+    [string]$UsbExpectedSerial = "067D19C65080",
+    [UInt64]$UsbMinimumDiskBytes = 30000000000,
+    [UInt64]$UsbMaximumDiskBytes = 33000000000,
+    [string]$UsbMount = "Y:"
 )
 
 $ErrorActionPreference = "Stop"
@@ -83,12 +89,69 @@ function Invoke-CertificationStep {
     }
 }
 
+function Get-MountRoot {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    if ($Name.Length -eq 2 -and $Name.EndsWith(":")) {
+        return "$Name\"
+    }
+    return $Name
+}
+
+function Test-MountAccessMode {
+    param(
+        [Parameter(Mandatory = $true)][string]$MountName,
+        [Parameter(Mandatory = $true)][bool]$ReadOnly
+    )
+    $mountRoot = Get-MountRoot -Name $MountName
+    try {
+        $item = Get-Item -LiteralPath $mountRoot -Force -ErrorAction Stop
+        $acl = Get-Acl -LiteralPath $mountRoot -ErrorAction Stop
+        $hasReadOnlyAttribute = (($item.Attributes -band [IO.FileAttributes]::ReadOnly) -ne 0)
+        $everyoneFullControl = ([string]$acl.Sddl).Contains("A;;FA;;;WD")
+        if ($ReadOnly) {
+            return $hasReadOnlyAttribute -and -not $everyoneFullControl
+        }
+        return -not $hasReadOnlyAttribute -and $everyoneFullControl
+    } catch {
+        return $false
+    }
+}
+
+function Wait-CertMountPolicy {
+    param(
+        [Parameter(Mandatory = $true)][string]$ServiceExe,
+        [Parameter(Mandatory = $true)][string]$Target,
+        [Parameter(Mandatory = $true)][string]$MountName,
+        [Parameter(Mandatory = $true)][bool]$ReadOnly,
+        [Parameter(Mandatory = $true)][bool]$AllowRawWrites,
+        [int]$TimeoutSeconds = 90
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        Start-Sleep -Milliseconds 750
+        $health = & $ServiceExe --health | ConvertFrom-Json
+        $mountInfo = @($health.mounts) | Where-Object {
+            ([string]$_.target).Equals($Target, [StringComparison]::OrdinalIgnoreCase)
+        } | Select-Object -First 1
+        if ($mountInfo -and
+            ([string]$mountInfo.mount).Equals($MountName, [StringComparison]::OrdinalIgnoreCase) -and
+            $mountInfo.exists -and
+            $mountInfo.read_only -eq $ReadOnly -and
+            $mountInfo.allow_raw_writes -eq $AllowRawWrites -and
+            (Test-MountAccessMode -MountName $MountName -ReadOnly $ReadOnly)) {
+            return $mountInfo
+        }
+    } while ((Get-Date) -lt $deadline)
+    throw "Mount policy did not become live: $Target -> $MountName read_only=$ReadOnly allow_raw_writes=$AllowRawWrites"
+}
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $resolvedOutput = Resolve-RepoPath $OutputPath
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $resolvedOutput) | Out-Null
 
 $steps = @()
 $startedUtc = (Get-Date).ToUniversalTime()
+$usbTarget = "\\?\GLOBALROOT\Device\Harddisk$UsbDiskNumber\Partition$UsbPartitionNumber"
 
 if (-not $SkipBuild) {
     $steps += Invoke-CertificationStep -Name "build_release" -Script {
@@ -170,9 +233,11 @@ $steps += Invoke-CertificationStep -Name "installed_app_registration" -AllowedEx
 if ($RunRepair) {
     $steps += Invoke-CertificationStep -Name "repair_install" -Script {
         if (Test-CurrentProcessAdmin) {
-            powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\repair-apfs-for-windows-install.ps1
+            powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\repair-apfs-for-windows-install.ps1 `
+                -UsbTarget $usbTarget -UsbMount $UsbMount
         } else {
-            powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-repair-elevated.ps1
+            powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-repair-elevated.ps1 `
+                -UsbTarget $usbTarget -UsbMount $UsbMount
         }
     }
 } else {
@@ -180,7 +245,7 @@ if ($RunRepair) {
         name = "repair_install"
         ok = $false
         skipped = $true
-        reason = "Run with -RunRepair from elevated PowerShell to deploy current binaries and restore Y: read-only."
+        reason = "Run with -RunRepair to deploy current binaries and restore the selected USB mount read-only."
     }
 }
 
@@ -188,16 +253,46 @@ $steps += Invoke-CertificationStep -Name "installed_service_mode_policy_prefligh
     powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-installed-service-mode-policy.ps1 -PreflightOnly
 }
 
-$mountedUsbPreflight = Invoke-CertificationStep -Name "usb_mounted_file_actions_preflight" -AllowedExitCodes @(0, 1) -Script {
-    powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-usb-mounted-file-actions.ps1 -PreflightOnly
-}
-$steps += $mountedUsbPreflight
-
 if ($RunUsbMountedFileActions) {
+    $steps += Invoke-CertificationStep -Name "usb_mounted_file_actions_set_writable" -Script {
+        $identityRaw = @(powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-usb-normal-user-rw.ps1 `
+            -DiskNumber $UsbDiskNumber -PartitionNumber $UsbPartitionNumber `
+            -ExpectedSerial $UsbExpectedSerial -MinimumDiskBytes $UsbMinimumDiskBytes `
+            -MaximumDiskBytes $UsbMaximumDiskBytes -Mount $UsbMount -PreflightOnly)
+        $identityExit = $LASTEXITCODE
+        $identity = $identityRaw | ConvertFrom-Json
+        if ($identityExit -ne 0 -or -not $identity.ok) {
+            throw "USB identity/APFS signature preflight failed before writable policy."
+        }
+        $serviceExe = Join-Path $env:ProgramFiles "APFS for Windows\apfs_mount_service.exe"
+        $setPolicy = & $serviceExe --set-policy --target $usbTarget --read-write --allow-raw-writes | ConvertFrom-Json
+        $mountInfo = Wait-CertMountPolicy -ServiceExe $serviceExe `
+            -Target $usbTarget `
+            -MountName $UsbMount `
+            -ReadOnly $false `
+            -AllowRawWrites $true
+        [ordered]@{
+            component = "apfs_for_windows"
+            check = "usb_mounted_file_actions_set_writable"
+            ok = [bool]($setPolicy.ok -and $mountInfo)
+            no_reboot_performed = $true
+            identity_preflight = $identity
+            set_policy = $setPolicy
+            mount = $mountInfo
+        } | ConvertTo-Json -Depth 8
+    }
+
+    $mountedUsbPreflight = Invoke-CertificationStep -Name "usb_mounted_file_actions_preflight" -AllowedExitCodes @(0, 1) -Script {
+        powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-usb-mounted-file-actions.ps1 `
+            -Mount $UsbMount -ExpectedTarget $usbTarget -PreflightOnly
+    }
+    $steps += $mountedUsbPreflight
+
     $mountedReady = $mountedUsbPreflight.parsed_json -and $mountedUsbPreflight.json.ok -eq $true
     if ($mountedReady) {
         $steps += Invoke-CertificationStep -Name "usb_mounted_file_actions" -Script {
-            powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-usb-mounted-file-actions.ps1 -CleanupStaleProofEntries
+            powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-usb-mounted-file-actions.ps1 `
+                -Mount $UsbMount -ExpectedTarget $usbTarget -CleanupStaleProofEntries
         }
     } else {
         $steps += [pscustomobject][ordered]@{
@@ -207,7 +302,31 @@ if ($RunUsbMountedFileActions) {
             reason = "Mounted USB file-action proof requested but preflight is not ready."
         }
     }
+
+    $steps += Invoke-CertificationStep -Name "usb_mounted_file_actions_restore_readonly" -Script {
+        $serviceExe = Join-Path $env:ProgramFiles "APFS for Windows\apfs_mount_service.exe"
+        $setPolicy = & $serviceExe --set-policy --target $usbTarget --read-only | ConvertFrom-Json
+        $mountInfo = Wait-CertMountPolicy -ServiceExe $serviceExe `
+            -Target $usbTarget `
+            -MountName $UsbMount `
+            -ReadOnly $true `
+            -AllowRawWrites $false
+        [ordered]@{
+            component = "apfs_for_windows"
+            check = "usb_mounted_file_actions_restore_readonly"
+            ok = [bool]($setPolicy.ok -and $mountInfo)
+            no_reboot_performed = $true
+            set_policy = $setPolicy
+            mount = $mountInfo
+        } | ConvertTo-Json -Depth 8
+    }
 } else {
+    $mountedUsbPreflight = Invoke-CertificationStep -Name "usb_mounted_file_actions_preflight" -AllowedExitCodes @(0, 1) -Script {
+        powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-usb-mounted-file-actions.ps1 `
+            -Mount $UsbMount -ExpectedTarget $usbTarget -PreflightOnly
+    }
+    $steps += $mountedUsbPreflight
+
     $steps += [pscustomobject][ordered]@{
         name = "usb_mounted_file_actions"
         ok = $false
@@ -217,17 +336,25 @@ if ($RunUsbMountedFileActions) {
 }
 
 $steps += Invoke-CertificationStep -Name "current_state_preflight" -Script {
-    powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-current-apfs-state.ps1
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-current-apfs-state.ps1 `
+        -UsbTarget $usbTarget
 }
 
 $usbPreflight = Invoke-CertificationStep -Name "usb_normal_user_rw_preflight" -AllowedExitCodes @(0, 2) -Script {
-    powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-usb-normal-user-rw.ps1 -PreflightOnly
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-usb-normal-user-rw.ps1 `
+        -DiskNumber $UsbDiskNumber -PartitionNumber $UsbPartitionNumber `
+        -ExpectedSerial $UsbExpectedSerial -MinimumDiskBytes $UsbMinimumDiskBytes `
+        -MaximumDiskBytes $UsbMaximumDiskBytes -Mount $UsbMount -PreflightOnly
 }
 $steps += $usbPreflight
 
 if ($RunUsbWriteProof) {
     $steps += Invoke-CertificationStep -Name "usb_normal_user_rw" -Script {
-        powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-usb-normal-user-rw.ps1 -CleanupStaleProofEntries -NoDiagnostics
+        powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-usb-normal-user-rw.ps1 `
+            -DiskNumber $UsbDiskNumber -PartitionNumber $UsbPartitionNumber `
+            -ExpectedSerial $UsbExpectedSerial -MinimumDiskBytes $UsbMinimumDiskBytes `
+            -MaximumDiskBytes $UsbMaximumDiskBytes -Mount $UsbMount `
+            -CleanupStaleProofEntries -NoDiagnostics
     }
 } else {
     $steps += [pscustomobject][ordered]@{
@@ -268,15 +395,16 @@ $startMenuEntriesOk = @($steps | Where-Object { $_.name -eq "start_menu_entries"
 $installedAppRegistrationOk = @($steps | Where-Object { $_.name -eq "installed_app_registration" -and $_.payload_ok -eq $true }).Count -gt 0
 $installedPersistenceOk = $serviceRecoveryPolicyOk -and $startMenuEntriesOk -and $installedAppRegistrationOk
 $mountedUsbFileActionsPreflightReady = $mountedUsbPreflight.parsed_json -and $mountedUsbPreflight.json.ok -eq $true
-$mountedUsbFileActionsOk = @($steps | Where-Object { $_.name -eq "usb_mounted_file_actions" -and $_.ok }).Count -gt 0
+$mountedUsbFileActionsOk = @($steps | Where-Object { $_.name -eq "usb_mounted_file_actions" -and $_.payload_ok -eq $true }).Count -gt 0
 $usbPreflightReady = $usbPreflight.parsed_json -and $usbPreflight.json.ok -eq $true
-$fullUsbOk = @($steps | Where-Object { $_.name -eq "usb_normal_user_rw" -and $_.ok }).Count -gt 0
+$fullUsbOk = @($steps | Where-Object { $_.name -eq "usb_normal_user_rw" -and $_.payload_ok -eq $true }).Count -gt 0
 $usbRequirementOk = if ($RunUsbWriteProof) { $fullUsbOk } else { $usbPreflightReady -and $fullUsbOk }
+$mountedUsbRequirementOk = if ($RunUsbMountedFileActions) { $mountedUsbFileActionsOk } else { $true }
 
 $result = [ordered]@{
     component = "apfs_for_windows"
     check = "certification_orchestrator"
-    ok = [bool]($localOk -and $installedPersistenceOk -and $usbRequirementOk)
+    ok = [bool]($localOk -and $installedPersistenceOk -and $usbRequirementOk -and $mountedUsbRequirementOk)
     local_code_gates_ok = [bool]$localOk
     winfsp_prerequisite_ok = [bool]$winfspPrerequisiteOk
     sak_source_boundary_ok = [bool]$sakSourceBoundaryOk

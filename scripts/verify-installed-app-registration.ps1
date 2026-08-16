@@ -42,6 +42,10 @@ $values = if ($item) {
 
 $uninstallScript = Join-Path $InstallRoot "uninstall-apfs-for-windows.ps1"
 $managerExe = Join-Path $InstallRoot "apfs_mount_manager.exe"
+$startupKeyPath = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run"
+$startupValueName = "APFS for Windows Mount Manager"
+$expectedStartupCommand = "`"$managerExe`" --tray"
+$actualStartupCommand = [string](Get-ItemPropertyValue -Path $startupKeyPath -Name $startupValueName -ErrorAction SilentlyContinue)
 $ok = $item -and
     $values.DisplayName -eq "APFS for Windows" -and
     $values.DisplayVersion -eq $ExpectedVersion -and
@@ -51,7 +55,8 @@ $ok = $item -and
     ([string]$values.UninstallString).Contains($uninstallScript) -and
     ([string]$values.UninstallString).Contains("-RemoveFiles") -and
     $values.NoModify -eq 1 -and
-    $values.NoRepair -eq 1
+    $values.NoRepair -eq 1 -and
+    $actualStartupCommand.Equals($expectedStartupCommand, [StringComparison]::OrdinalIgnoreCase)
 
 $result = [ordered]@{
     component = "apfs_for_windows"
@@ -66,8 +71,10 @@ $result = [ordered]@{
         install_location = $InstallRoot
         display_icon = $managerExe
         uninstall_script = $uninstallScript
+        manager_startup_command = $expectedStartupCommand
     }
     actual = $values
+    actual_manager_startup_command = $actualStartupCommand
     completed_utc = (Get-Date).ToUniversalTime().ToString("o")
 }
 
