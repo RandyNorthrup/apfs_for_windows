@@ -2,13 +2,13 @@
   "component": "apfs_for_windows",
   "check": "certification_orchestrator",
   "ok": true,
-  "started_utc": "2026-08-16T22:10:16.2980691Z",
-  "completed_utc": "2026-08-16T22:13:07.7063430Z",
+  "started_utc": "2026-08-16T22:54:19.6395124Z",
+  "completed_utc": "2026-08-16T22:57:36.7689576Z",
   "step_count": 28,
   "failed_steps": [],
   "skipped_steps": [
-    "build_release via -SkipBuild; same current build had already passed",
-    "repair_install"
+    "build_release via -SkipBuild; current Release build and CTest passed before this run",
+    "repair_install; current binaries were repaired and verified separately at 2026-08-16T22:54:03.7081907Z"
   ],
   "repair_completed_separately": true,
   "repair_ok": true,
@@ -21,12 +21,12 @@
     "copied_source_boundary": true,
     "release_package": true,
     "local_worker_content_namespace": true,
-    "local_worker_metadata_acl_symbolic_links_and_extended_attributes": true,
+    "local_worker_metadata_acl_symbolic_links_file_and_directory_extended_attributes": true,
     "local_worker_crash_recovery": true,
-    "apple_vm_roundtrip_extended_attributes_and_four_fsck": true,
+    "apple_vm_roundtrip_file_and_directory_extended_attributes_and_four_fsck": true,
     "installed_service_state": true,
     "raw_alias_deduplication": true,
-    "mounted_usb_metadata_acl_symbolic_links_and_extended_attributes": true,
+    "mounted_usb_metadata_acl_symbolic_links_file_and_directory_extended_attributes": true,
     "serial_pinned_usb_rw": true,
     "extended_usb_file_actions": true,
     "separate_100_iteration_robocopy_soak": true
@@ -43,8 +43,10 @@
     "readonly_write_blocked": true,
     "security_callback": true,
     "relative_symbolic_link_create_follow_delete": true,
-    "extended_attribute_create_read_update_delete": true,
-    "extended_attribute_name": "user.apfswin_usb",
+    "file_extended_attribute_create_read_update_delete": true,
+    "file_extended_attribute_name": "user.apfswin_usb",
+    "directory_extended_attribute_create_read_update_delete": true,
+    "directory_extended_attribute_name": "user.apfswin_usb_directory",
     "unicode_names": true,
     "long_path_characters": 394,
     "robocopy_payload_bytes": 1048576,
@@ -59,25 +61,34 @@
     "installed_binaries_match_build": true,
     "tray_process_count": 1,
     "pending_uac_count": 0,
-    "test_worker_count": 0,
     "usb_mount_exists": true,
+    "usb_mount_target": "\\\\?\\GLOBALROOT\\Device\\Harddisk1\\Partition1",
     "usb_mount_read_only": true,
     "usb_mount_allow_raw_writes": false
   },
   "release": {
     "version": "0.1.0",
     "file_count": 17,
-    "zip_size_bytes": 12860048,
-    "zip_sha256": "DBC359604FE7DA66866966B702520914885C3FE32320F279BD9FD7F41DC16445",
+    "zip_sha256": "201BBCBB701F90695556566ECA00E89F6DC7C34B532D52E3162D3282B702D365",
     "package_verification_ok": true,
     "exact_archive_windows_vm_lifecycle_ok": true
   },
+  "stress": {
+    "robocopy_iterations_requested": 100,
+    "robocopy_iterations_completed": 100,
+    "failed_iterations": 0,
+    "post_unmount_root_entries": [
+      "large.bin",
+      "seed.txt"
+    ]
+  },
   "remaining_scope": [
     "physical surprise-unplug and raw-media power-loss recovery",
-    "directory extended-attribute mutation",
+    "APFS volume-root directory extended-attribute mutation",
+    "empty Windows EA value as a distinct value because zero length requests deletion",
     "non-ASCII Windows EA names",
     "large APFS stream-backed xattr mutation",
     "content-critical filesystem-owned xattrs through the generic Windows EA callback",
-    "hard-link creation through the installed WinFsp high-level interface"
+    "hard-link creation requires a WinFsp protocol/kernel fork or another filesystem driver transport"
   ]
 }

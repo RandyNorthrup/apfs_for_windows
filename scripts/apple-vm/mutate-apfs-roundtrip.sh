@@ -63,6 +63,7 @@ windows_birth_epoch=$(stat -f '%B' "$windows_file")
 windows_mtime_epoch=$(stat -f '%m' "$windows_file")
 windows_bsd_flags=$(stat -f '%f' "$windows_file")
 windows_xattr=$(xattr -p user.apfswin_windows "$windows_file")
+windows_directory_xattr=$(xattr -p user.apfswin_windows_directory "$mount_point/WinProof")
 assert_equal "$windows_hash" "B58EE1D8BF6C0FF48A5D0AB28DCC938E941CE9AC9091E9C103D85C3784C1E4FC" "Windows origin hash"
 assert_equal "$unicode_hash" "D15C89BA02965E34B5E292AEB8D7B7D0A12B538FB6DC623DD998327D3F118DBC" "Unicode origin hash"
 assert_equal "$windows_link_target" "Nested/windows.txt" "Windows-created symlink target"
@@ -71,7 +72,9 @@ assert_equal "$windows_birth_epoch" "1612325106" "Windows-created birth time"
 assert_equal "$windows_mtime_epoch" "1680674828" "Windows-created mtime"
 assert_equal "$windows_bsd_flags" "98304" "Windows-created BSD flags"
 assert_equal "$windows_xattr" "Windows EA payload" "Windows-created xattr"
+assert_equal "$windows_directory_xattr" "Windows directory EA payload" "Windows-created directory xattr"
 xattr -w user.apfswin_windows 'macOS updated Windows EA payload' "$windows_file"
+xattr -w user.apfswin_windows_directory 'macOS updated Windows directory EA payload' "$mount_point/WinProof"
 
 mac_dir="$mount_point/MacProof"
 mac_file="$mac_dir/Nested/mac.txt"
@@ -80,6 +83,8 @@ xattr_file="$mac_dir/xattr-roundtrip.txt"
 symlink="$mac_dir/windows-symlink"
 renamed_windows="$mount_point/WinProof/Nested/windows-renamed-by-macos.txt"
 mkdir -p "$mac_dir/Nested"
+xattr -w user.apfswin_directory_rw 'macOS directory xattr payload' "$mac_dir"
+xattr -w user.apfswin_directory_delete 'delete this directory xattr in Windows' "$mac_dir"
 printf '%s' 'macOS native APFS round-trip payload' >"$mac_file"
 printf '%s' 'macOS xattr carrier' >"$xattr_file"
 ln "$mac_file" "$hardlink"
@@ -97,6 +102,7 @@ mac_hash=$(shasum -a 256 "$mac_file" | awk '{print toupper($1)}')
 hardlink_hash=$(shasum -a 256 "$hardlink" | awk '{print toupper($1)}')
 symlink_target=$(readlink "$symlink")
 xattr_value=$(xattr -p user.apfswin_roundtrip "$hardlink")
+directory_xattr_value=$(xattr -p user.apfswin_directory_rw "$mac_dir")
 link_count=$(stat -f '%l' "$hardlink")
 file_mode=$(stat -f '%Sp' "$hardlink")
 mtime=$(stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%S%z' "$hardlink")
@@ -104,6 +110,7 @@ assert_equal "$mac_hash" "76FD91615F8B856AB498A543707EE1BAC16AD6F56E597584538A03
 assert_equal "$hardlink_hash" "$mac_hash" "hard-link hash"
 assert_equal "$symlink_target" "../WinProof/Nested/windows-renamed-by-macos.txt" "symlink target"
 assert_equal "$xattr_value" "macOS xattr payload" "xattr value"
+assert_equal "$directory_xattr_value" "macOS directory xattr payload" "directory xattr value"
 assert_equal "$link_count" "2" "hard-link count"
 assert_equal "$file_mode" "-rw-r--r--" "file mode"
 assert_equal "$mtime" "2020-01-02T03:04:05-0800" "mtime"
@@ -125,9 +132,11 @@ WINDOWS_BIRTH_EPOCH=$windows_birth_epoch
 WINDOWS_MTIME_EPOCH=$windows_mtime_epoch
 WINDOWS_BSD_FLAGS=$windows_bsd_flags
 WINDOWS_XATTR=$windows_xattr
+WINDOWS_DIRECTORY_XATTR=$windows_directory_xattr
 MAC_SHA256=$mac_hash
 SYMLINK_TARGET=$symlink_target
 XATTR_VALUE=$xattr_value
+DIRECTORY_XATTR_VALUE=$directory_xattr_value
 LINK_COUNT=$link_count
 FILE_MODE=$file_mode
 MTIME=$mtime

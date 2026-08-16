@@ -868,10 +868,40 @@ int main(int argc, char* argv[]) {
                 {{QStringLiteral("previous_xid"), QString::number(directoryCreate.previous_xid)},
                  {QStringLiteral("new_xid"), QString::number(directoryCreate.new_xid)}});
 
+    const QString directoryXattrImage =
+        tempDir.filePath(QStringLiteral("directory-xattr.apfs"));
+    sak::PartitionApfsInodeMetadataUpdate directoryXattrUpdate;
+    directoryXattrUpdate.xattr_mutations.append(
+        {.name = QStringLiteral("user.apfswin_directory"),
+         .value = QByteArray("directory EA payload")});
+    const auto directoryXattrSet = sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
+        {.source_image_path = directoryImage,
+         .written_image_path = directoryXattrImage,
+         .target_name = QStringLiteral("Proof Folder"),
+         .target_is_directory = true,
+         .metadata = directoryXattrUpdate,
+         .options = options});
+    const auto directoryXattrRead =
+        sak::PartitionApfsFileSystemReader::readXattrsFromImage(
+            directoryXattrImage, QStringLiteral("/Proof Folder"));
+    const auto hasDirectoryXattr = [](const auto& read) {
+        return std::any_of(read.xattrs.cbegin(), read.xattrs.cend(), [](const auto& xattr) {
+            return xattr.first == QStringLiteral("user.apfswin_directory") &&
+                   xattr.second == QByteArray("directory EA payload");
+        });
+    };
+    if (!directoryXattrSet.ok || !directoryXattrRead.ok ||
+        !hasDirectoryXattr(directoryXattrRead)) {
+        return fail(QStringLiteral("commit directory embedded xattr"),
+                    QStringLiteral("directory xattr set or read failed"),
+                    directoryXattrSet.blockers + directoryXattrRead.blockers);
+    }
+    appendProof(&proofs, QStringLiteral("commit directory embedded xattr"));
+
     const QByteArray childData("APFS for Windows copied-core child write proof");
     const QString childImage = tempDir.filePath(QStringLiteral("child.apfs"));
     const auto childWrite = sak::PartitionApfsWriter::commitImageOnlyDirectoryChildWrite(
-        {.source_image_path = directoryImage,
+        {.source_image_path = directoryXattrImage,
          .written_image_path = childImage,
          .directory_name = QStringLiteral("Proof Folder"),
          .file_name = QStringLiteral("child.txt"),
@@ -891,10 +921,48 @@ int main(int argc, char* argv[]) {
         rc != 0) {
         return rc;
     }
+    const auto directoryXattrAfterChild =
+        sak::PartitionApfsFileSystemReader::readXattrsFromImage(
+            childImage, QStringLiteral("/Proof Folder"));
+    if (!directoryXattrAfterChild.ok || !hasDirectoryXattr(directoryXattrAfterChild)) {
+        return fail(QStringLiteral("preserve directory xattr across child write"),
+                    QStringLiteral("directory xattr was not preserved"),
+                    directoryXattrAfterChild.blockers);
+    }
+
+    const QString directoryXattrRemovedImage =
+        tempDir.filePath(QStringLiteral("directory-xattr-removed.apfs"));
+    sak::PartitionApfsInodeMetadataUpdate directoryXattrRemove;
+    directoryXattrRemove.xattr_mutations.append(
+        {.name = QStringLiteral("user.apfswin_directory"), .remove = true});
+    const auto directoryXattrDelete = sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
+        {.source_image_path = childImage,
+         .written_image_path = directoryXattrRemovedImage,
+         .target_name = QStringLiteral("Proof Folder"),
+         .target_is_directory = true,
+         .metadata = directoryXattrRemove,
+         .options = options});
+    const auto directoryXattrAfterDelete =
+        sak::PartitionApfsFileSystemReader::readXattrsFromImage(
+            directoryXattrRemovedImage, QStringLiteral("/Proof Folder"));
+    if (!directoryXattrDelete.ok || !directoryXattrAfterDelete.ok ||
+        hasDirectoryXattr(directoryXattrAfterDelete)) {
+        return fail(QStringLiteral("delete directory embedded xattr"),
+                    QStringLiteral("directory xattr delete failed"),
+                    directoryXattrDelete.blockers + directoryXattrAfterDelete.blockers);
+    }
+    if (const int rc = verifyRead(directoryXattrRemovedImage,
+                                  QStringLiteral("/Proof Folder/child.txt"),
+                                  childData,
+                                  &proofs);
+        rc != 0) {
+        return rc;
+    }
+    appendProof(&proofs, QStringLiteral("preserve and delete directory embedded xattr"));
 
     const QString childRenamedImage = tempDir.filePath(QStringLiteral("child-renamed.apfs"));
     const auto childRename = sak::PartitionApfsWriter::commitImageOnlyDirectoryChildRename(
-        {.source_image_path = childImage,
+        {.source_image_path = directoryXattrRemovedImage,
          .written_image_path = childRenamedImage,
          .directory_name = QStringLiteral("Proof Folder"),
          .file_name = QStringLiteral("child.txt"),

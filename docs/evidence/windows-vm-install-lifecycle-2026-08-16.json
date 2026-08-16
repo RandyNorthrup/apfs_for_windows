@@ -2,8 +2,8 @@
   "component": "apfs_for_windows",
   "check": "windows_vm_install_reboot_uninstall_lifecycle",
   "ok": true,
-  "started_utc": "2026-08-16T22:23:24.8161478Z",
-  "completed_utc": "2026-08-16T22:26:21.3207649Z",
+  "started_utc": "2026-08-16T23:06:31.6756524Z",
+  "completed_utc": "2026-08-16T23:09:27.6599659Z",
   "environment": {
     "os": "Microsoft Windows 11 Pro",
     "version": "10.0.26200",
@@ -13,14 +13,14 @@
   },
   "release_package": {
     "version": "0.1.0",
-    "sha256": "DBC359604FE7DA66866966B702520914885C3FE32320F279BD9FD7F41DC16445",
+    "sha256": "201BBCBB701F90695556566ECA00E89F6DC7C34B532D52E3162D3282B702D365",
     "exact_archive_installed": true,
     "package_local_qt_payload_used": true
   },
   "pre_reboot": {
     "ok": true,
-    "checked_utc": "2026-08-16T22:24:46.8343544Z",
-    "boot_utc": "2026-08-16T22:20:48.5Z",
+    "checked_utc": "2026-08-16T23:07:49.4884106Z",
+    "boot_utc": "2026-08-16T22:52:29.5000000Z",
     "service_state": "Running",
     "service_start_mode": "Auto",
     "mount": "R:",
@@ -33,8 +33,8 @@
   },
   "post_reboot": {
     "ok": true,
-    "checked_utc": "2026-08-16T22:26:05.7114184Z",
-    "boot_utc": "2026-08-16T22:25:09.5Z",
+    "checked_utc": "2026-08-16T23:09:13.3124736Z",
+    "boot_utc": "2026-08-16T23:08:12.5000000Z",
     "service_state": "Running",
     "service_start_mode": "Auto",
     "saved_mount_restored": true,
@@ -56,7 +56,7 @@
   },
   "uninstall": {
     "ok": true,
-    "completed_utc": "2026-08-16T22:26:18.5194867Z",
+    "completed_utc": "2026-08-16T23:09:25.1803372Z",
     "service_removed": true,
     "mount_removed": true,
     "manager_processes_stopped": true,

@@ -199,6 +199,9 @@ $expectedText = "APFS metadata and symbolic-link proof"
 $eaName = "user.apfswin_windows"
 $eaFirstText = "Windows EA first payload"
 $eaUpdatedText = "Windows EA updated payload"
+$directoryEaName = "user.apfswin_directory"
+$directoryEaFirstText = "Windows directory EA first payload"
+$directoryEaUpdatedText = "Windows directory EA updated payload"
 $first = $null
 $second = $null
 $errorText = $null
@@ -215,6 +218,9 @@ $readonlyWriteBlocked = $false
 $eaFirstState = $null
 $eaSecondState = $null
 $eaDeleteState = $null
+$directoryEaFirstState = $null
+$directoryEaSecondState = $null
+$directoryEaDeleteState = $null
 try {
     $env:APFS_WORKER_TRACE = $trace
     $first = Start-TestMount -Worker $worker -Image $image -Stdout $stdout1 -Stderr $stderr1
@@ -224,6 +230,13 @@ try {
     $absoluteLink = Join-Path $dir "target-absolute-link"
     $deleteReparseLink = Join-Path $dir "delete-reparse-link"
     New-Item -ItemType Directory -Path $dir | Out-Null
+    Set-NativeExtendedAttribute -Path $dir -Name $directoryEaName `
+        -Value ([Text.Encoding]::UTF8.GetBytes($directoryEaFirstText))
+    $directoryEaFirstRead = Get-NativeExtendedAttribute -Path $dir -Name $directoryEaName
+    $directoryEaFirstState = [pscustomobject][ordered]@{
+        name = $directoryEaName
+        value = [Text.Encoding]::UTF8.GetString([byte[]]$directoryEaFirstRead)
+    }
     Set-Content -LiteralPath $file -Value $expectedText -NoNewline -Encoding ASCII
     [IO.File]::SetCreationTimeUtc($file, $creation)
     [IO.File]::SetLastAccessTimeUtc($file, $access)
@@ -295,6 +308,19 @@ try {
     $debugRaw | Set-Content -LiteralPath $debugPath -Encoding UTF8
 
     $second = Start-TestMount -Worker $worker -Image $image -Stdout $stdout2 -Stderr $stderr2
+    $directoryEaPersistentRead =
+        Get-NativeExtendedAttribute -Path $dir -Name $directoryEaName
+    Set-NativeExtendedAttribute -Path $dir -Name $directoryEaName `
+        -Value ([Text.Encoding]::UTF8.GetBytes($directoryEaUpdatedText))
+    $directoryEaUpdatedRead = Get-NativeExtendedAttribute -Path $dir -Name $directoryEaName
+    $directoryEaSecondState = [pscustomobject][ordered]@{
+        persisted_value = [Text.Encoding]::UTF8.GetString([byte[]]$directoryEaPersistentRead)
+        updated_value = [Text.Encoding]::UTF8.GetString([byte[]]$directoryEaUpdatedRead)
+    }
+    Remove-NativeExtendedAttribute -Path $dir -Name $directoryEaName
+    $directoryEaDeleteState = [pscustomobject][ordered]@{
+        absent = [bool](-not (Test-NativeExtendedAttribute -Path $dir -Name $directoryEaName))
+    }
     $eaPersistentRead = Get-NativeExtendedAttribute -Path $file -Name $eaName
     Set-NativeExtendedAttribute -Path $file -Name $eaName `
         -Value ([Text.Encoding]::UTF8.GetBytes($eaUpdatedText))
@@ -390,6 +416,10 @@ $ok = -not $errorText -and $firstState.hidden -and $firstState.archive -and
     ($eaSecondState.persisted_value -eq $eaFirstText) -and
     ($eaSecondState.updated_value -eq $eaUpdatedText) -and
     $eaDeleteState.absent -and
+    ($directoryEaFirstState.value -eq $directoryEaFirstText) -and
+    ($directoryEaSecondState.persisted_value -eq $directoryEaFirstText) -and
+    ($directoryEaSecondState.updated_value -eq $directoryEaUpdatedText) -and
+    $directoryEaDeleteState.absent -and
     ($debugEa.Count -eq 1) -and
     (Test-TimeNear ([datetime]$secondState.creation_utc) $creation) -and
     (Test-TimeNear ([datetime]$secondState.access_utc) $access) -and
@@ -429,6 +459,9 @@ $result = [pscustomobject][ordered]@{
     extended_attribute_first_mount = $eaFirstState
     extended_attribute_second_mount = $eaSecondState
     extended_attribute_delete = $eaDeleteState
+    directory_extended_attribute_first_mount = $directoryEaFirstState
+    directory_extended_attribute_second_mount = $directoryEaSecondState
+    directory_extended_attribute_delete = $directoryEaDeleteState
     delete_reparse = $deleteReparseState
     apfs_inode = $debugSummary
     root_entries_after_cleanup = $rootNames

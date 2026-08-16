@@ -226,6 +226,7 @@ $symbolicLinkState = $null
 $readonlyWriteBlocked = $false
 $aclExitCode = $null
 $eaState = $null
+$directoryEaState = $null
 
 $normalIdentity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $serviceHealth = $null
@@ -297,6 +298,23 @@ try {
         $proofMutationAttempted = $true
         Invoke-FsMutationWithRetry -Name "create proof directory" -Timeout $TimeoutSeconds -Operation {
             [IO.Directory]::CreateDirectory($testDir) | Out-Null
+        }
+        $directoryEaName = "user.apfswin_usb_directory"
+        Set-NativeExtendedAttribute -Path $testDir -Name $directoryEaName `
+            -Value ([Text.Encoding]::UTF8.GetBytes("USB Windows directory EA payload"))
+        $directoryEaFirst = [Text.Encoding]::UTF8.GetString([byte[]](
+            Get-NativeExtendedAttribute -Path $testDir -Name $directoryEaName))
+        Set-NativeExtendedAttribute -Path $testDir -Name $directoryEaName `
+            -Value ([Text.Encoding]::UTF8.GetBytes("USB updated directory EA payload"))
+        $directoryEaUpdated = [Text.Encoding]::UTF8.GetString([byte[]](
+            Get-NativeExtendedAttribute -Path $testDir -Name $directoryEaName))
+        Remove-NativeExtendedAttribute -Path $testDir -Name $directoryEaName
+        $directoryEaState = [ordered]@{
+            name = $directoryEaName
+            first_value = $directoryEaFirst
+            updated_value = $directoryEaUpdated
+            absent_after_delete = [bool](-not (Test-NativeExtendedAttribute `
+                -Path $testDir -Name $directoryEaName))
         }
         Invoke-FsMutationWithRetry -Name "write proof file" -Timeout $TimeoutSeconds -Operation {
             [IO.File]::WriteAllBytes($filePath, $payload)
@@ -444,6 +462,9 @@ $ok = ($preflightOk -or ($rootReady -and
     ($eaState.first_value -eq "USB Windows EA payload") -and
     ($eaState.updated_value -eq "USB updated EA payload") -and
     $eaState.absent_after_delete -and
+    ($directoryEaState.first_value -eq "USB Windows directory EA payload") -and
+    ($directoryEaState.updated_value -eq "USB updated directory EA payload") -and
+    $directoryEaState.absent_after_delete -and
     $metadataState.hidden -and
     $metadataState.archive -and
     ($metadataState.length -eq $metadataPayload.Length) -and
@@ -500,6 +521,7 @@ $result = [ordered]@{
     metadata = $metadataState
     acl_exit_code = $aclExitCode
     extended_attribute = $eaState
+    directory_extended_attribute = $directoryEaState
     readonly_write_blocked = [bool]$readonlyWriteBlocked
     symbolic_link = $symbolicLinkState
     service_health_error = $serviceHealthError

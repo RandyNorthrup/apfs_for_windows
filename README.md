@@ -70,11 +70,12 @@ Current state:
 - WinFsp reparse callbacks expose Apple symbolic links and create, follow,
   retarget, clear, or delete relative and same-volume absolute symbolic links.
   External absolute targets fail closed.
-- WinFsp `GetEa`/`SetEa` callbacks expose regular-file APFS extended attributes
-  with printable ASCII names from 1 through 127 bytes and embedded values up to
-  3,804 bytes. Create, read, restart persistence, update, and delete pass on
-  local images, the physical USB target, and native macOS round trips. Content-
-  critical filesystem attributes remain hidden from this generic interface.
+- WinFsp `GetEa`/`SetEa` callbacks expose APFS extended attributes on regular
+  files and named directories, with printable ASCII names from 1 through 127
+  bytes and embedded values up to 3,804 bytes. Create, read, restart
+  persistence, update, and delete pass on local images, the physical USB target,
+  and native macOS round trips. Content-critical filesystem attributes remain
+  hidden from this generic interface.
 - Copied SAK APFS source is Randy-authored project code imported into this
   repo. Copied source-app license tags and branding notices were removed from
   code/docs per owner direction. Third-party notices remain for Qt, WinFsp, and
@@ -180,7 +181,8 @@ Apple VM round-trip verification accepts connection data only as runtime
 parameters. No password, key, or password-file content is copied into source or
 proof JSON. It creates a Windows APFS image, mutates and checks it with the macOS
 kernel plus `fsck_apfs`, mutates it again through WinFsp on Windows, then runs a
-second native macOS mount and `fsck_apfs` pair. The latest sanitized evidence is
+second native macOS mount and `fsck_apfs` pair. File and directory xattrs are
+mutated in both directions. The latest sanitized evidence is
 `docs/evidence/apple-vm-roundtrip-2026-08-16.json`.
 
 Serial-pinned normal-user USB write/delete proof is current. The verifier keeps
@@ -322,9 +324,11 @@ Verified USB evidence:
   initial/final mount policy, reports any stale entries still visible after
   cleanup, labels `-AllowStaleInstalledWorker` runs as
   `current_installed_mount_only`, and only mutates its own
-  `sak-mounted-file-actions-proof-*` directory on `Y:` during full proof.
+  `sak-mounted-file-actions-proof-*` directory on the selected mount during full
+  proof. It verifies file and directory EA create/read/update/delete in addition
+  to file namespace, metadata, ACL, and symbolic-link operations.
   Current certification wraps this proof in an explicit temporary writable
-  policy window, then restores `Y:` read-only afterward.
+  policy window, then restores the selected mount read-only afterward.
 - Current media layout changed during SAK recertification. On
   `2026-08-16T17:22:33Z`, the same pinned 31,042,043,904-byte USB disk exposed
   Windows MBR Partition 1 at `V:` while the exact target probe identified a
@@ -421,9 +425,12 @@ Verified USB evidence:
   basic-info/security, symbolic-link, and supported file-EA mutation on both
   disposable images and the serial-pinned physical USB. Remaining public-RW
   gates are physical raw-media power-loss recovery, real surprise-unplug,
-  hard-link creation, and directory/non-ASCII-name/large stream-backed xattr
-  mutation. Existing Apple hard links remain preserved across Windows
-  mutations.
+  hard-link creation, volume-root directory EAs, zero-length EA values, and
+  non-ASCII-name/large stream-backed xattr mutation.
+  Existing Apple hard links remain preserved across Windows mutations. WinFsp's
+  current public protocol still marks hard-link support unimplemented, so native
+  hard-link creation requires a WinFsp protocol/kernel fork or another filesystem
+  driver path rather than another user-mode callback.
 
 Verified copied-core mutation evidence:
 

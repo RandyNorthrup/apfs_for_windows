@@ -2,8 +2,8 @@
   "component": "apfs_for_windows",
   "check": "apple_vm_roundtrip",
   "ok": true,
-  "completed_utc": "2026-08-16T22:11:45.8540768Z",
-  "duration_seconds": 37.134,
+  "completed_utc": "2026-08-16T22:56:00.5768732Z",
+  "duration_seconds": 33.289,
   "credential_material_recorded": false,
   "no_host_reboot_performed": true,
   "native_macos_operations": {
@@ -22,14 +22,17 @@
     "symbolic_link_retargeted_after_rename": true,
     "extended_attribute_created": "Windows EA payload",
     "extended_attribute_read_and_updated_by_macos": "macOS updated Windows EA payload",
-    "final_extended_attribute_written_by_windows": "Windows final EA payload"
+    "final_extended_attribute_written_by_windows": "Windows final EA payload",
+    "directory_extended_attribute_created": "Windows directory EA payload",
+    "directory_extended_attribute_read_and_updated_by_macos": "macOS updated Windows directory EA payload",
+    "final_directory_extended_attribute_written_by_windows": "Windows final directory EA payload"
   },
   "content_sha256": {
     "windows_file": "B58EE1D8BF6C0FF48A5D0AB28DCC938E941CE9AC9091E9C103D85C3784C1E4FC",
     "unicode_file": "D15C89BA02965E34B5E292AEB8D7B7D0A12B538FB6DC623DD998327D3F118DBC",
     "macos_hardlink_file": "76FD91615F8B856AB498A543707EE1BAC16AD6F56E597584538A0356389281DB",
     "windows_return_file": "A4DDBF29B458AABD9FA5E69BDDF059C7C61A3E1779E6B1E6954CEFEECF580964",
-    "windows_return_image": "1FAACA888FDCE373A01B54D7D0DF97C90181F2303971134E7C78EAB669A8F374"
+    "windows_return_image": "9D4D1FA9D3ABB8F2E2904DE931D5A50365C0560CC41F68D3C167B89C81BA1729"
   },
   "preserved_apple_state": {
     "symlink_target": "../WinProof/Nested/windows-renamed-by-macos.txt",
@@ -37,6 +40,9 @@
     "windows_read_macos_xattr": true,
     "windows_updated_macos_xattr": "Windows updated xattr payload",
     "windows_deleted_second_macos_xattr": true,
+    "windows_read_macos_directory_xattr": true,
+    "windows_updated_macos_directory_xattr": "Windows updated directory xattr payload",
+    "windows_deleted_second_macos_directory_xattr": true,
     "remaining_hardlink_count": 1,
     "file_mode": "-rw-r--r--",
     "mtime": "2020-01-02T03:04:05-0800",
@@ -50,17 +56,18 @@
     "symlink_has_data_extents": false
   },
   "fsck_log_sha256": {
-    "first_before": "DBF3C9B564C68336216E4ECA9520F805D2A798A2AB2F61570F9007D82B965FE8",
-    "first_after": "990C9C856F982FA7954A021FD0E46181806A0BFE35A98FCEAEFBE95C91031AC1",
-    "final_before": "266174CA592AB488768F8146084737E19E53CC43F6CDACAA5037D81BC1AC747B",
-    "final_after": "0AC7FB5AF0A01F802904F3364E58AD12FE61EE2BE55D4AA3F12FC932B7BC3946"
+    "first_before": "FF291E790383044CDE8AE004D8B3D7EECEC17065DEE20EFB3DF3D1E0B03A336B",
+    "first_after": "8B9C828EBBA8A2C9A7A8799B2C893D11312277C13AD545644DA91DB51C4B66C2",
+    "final_before": "B0C47F82BAFF6C1521AA562E70FA5DCF28B7E3273FB22F6FB39D49AF3D4347FB",
+    "final_after": "1A20557A01E3919C96FE2AECBCF706C3C6EFB5C954BD582F36C8441499FFB083"
   },
   "remaining_scope": [
-    "directory extended-attribute mutation",
+    "APFS volume-root directory extended-attribute mutation",
+    "empty Windows EA value as a distinct value because zero length requests deletion",
     "non-ASCII Windows EA names",
     "large APFS stream-backed xattr mutation",
     "content-critical filesystem-owned xattrs through the generic Windows EA callback",
-    "hard-link creation through the installed WinFsp high-level interface",
+    "hard-link creation requires a WinFsp protocol/kernel fork or another filesystem driver transport",
     "physical surprise-unplug and raw-media power-loss recovery",
     "host post-reboot was not run because host restart is prohibited; clean Windows VM lifecycle proof covers reboot persistence"
   ]

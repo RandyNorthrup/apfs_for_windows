@@ -2164,9 +2164,6 @@ private:
         if (!context || !fileInfo || (eaLength != 0 && !ea)) {
             return STATUS_INVALID_PARAMETER;
         }
-        if (context->entry.directory) {
-            return STATUS_NOT_SUPPORTED;
-        }
         EaMutationCollectContext collected;
         const NTSTATUS parseStatus =
             FspFileSystemEnumerateEa(fileSystem, collectEaMutation, &collected, ea, eaLength);
@@ -2179,7 +2176,7 @@ private:
             update.changed_time_ns = unixNsFromFileTime(currentFileTime());
             update.xattr_mutations = std::move(collected.mutations);
             const NTSTATUS status = commitInodeMetadata(
-                context->entry.path, false, update, &context->entry);
+                context->entry.path, context->entry.directory, update, &context->entry);
             if (!NT_SUCCESS(status)) {
                 return status;
             }

@@ -187,6 +187,14 @@ public:
         const QString& path,
         uint64_t max_bytes,
         const QString& credential = {});
+    [[nodiscard]] static PartitionApfsFileReadResult readXattrs(
+        QIODevice* device,
+        const QString& path,
+        const QString& credential = {});
+    [[nodiscard]] static PartitionApfsFileReadResult readXattrsFromImage(
+        const QString& image_path,
+        const QString& path,
+        const QString& credential = {});
     [[nodiscard]] static PartitionApfsFileDebugResult debugFile(
         QIODevice* device,
         const QString& path,

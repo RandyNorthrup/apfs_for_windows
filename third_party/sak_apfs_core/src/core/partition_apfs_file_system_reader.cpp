@@ -2572,6 +2572,18 @@ PartitionApfsFileReadResult PartitionApfsFileSystemReader::readFileFromImage(
     });
 }
 
+PartitionApfsFileReadResult PartitionApfsFileSystemReader::readXattrs(
+    QIODevice* device, const QString& path, const QString& credential) {
+    return ApfsReader(device, credential).readXattrs(path);
+}
+
+PartitionApfsFileReadResult PartitionApfsFileSystemReader::readXattrsFromImage(
+    const QString& image_path, const QString& path, const QString& credential) {
+    return withOpenedApfsImage(image_path, [&](QIODevice* device) {
+        return PartitionApfsFileSystemReader::readXattrs(device, path, credential);
+    });
+}
+
 PartitionApfsFileDebugResult PartitionApfsFileSystemReader::debugFile(QIODevice* device,
                                                                       const QString& path,
                                                                       const QString& credential) {

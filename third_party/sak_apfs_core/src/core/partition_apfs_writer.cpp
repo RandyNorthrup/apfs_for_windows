@@ -19,7 +19,9 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QIODevice>
+#include <QSet>
 #include <QStringView>
 #include <QtEndian>
 #include <QUuid>
@@ -1327,6 +1329,22 @@ struct ApfsDataStreamXattr {
     QVector<ApfsDataExtent> extents;
 };
 
+// One recovered extended attribute: its name (trailing NUL stripped), original
+// j_xattr_val flags, and embedded value or data-stream descriptor. Directory
+// payloads retain these flags so unrelated COW commits do not weaken an
+// Apple-owned attribute while rebuilding the fs tree.
+struct ApfsRecoveredXattr {
+    QByteArray name;
+    uint16_t flags{0};
+    QByteArray xdata;
+};
+
+struct ApfsRecoveredInodeState {
+    QVector<ApfsRecoveredXattr> xattrs;
+    uint64_t internalFlags{0};
+    uint64_t dstreamLogicalSize{0};
+};
+
 // A7 (A-h) hard link: one additional name (beyond a file's primary name) resolving to
 // the same inode. parentId is the directory holding the name; siblingId is the unique
 // sibling-record id assigned to it.
@@ -1456,6 +1474,10 @@ struct ApfsRootDirectoryPayload {
     uint32_t bsdFlags{0};
     uint32_t ownerId{0};
     uint32_t groupId{0};
+    // Directories can carry Finder metadata, ACLs, and user xattrs. Preserve
+    // original flags for unrelated attributes; Windows EA mutations create
+    // ordinary embedded attributes.
+    QVector<ApfsRecoveredXattr> xattrs;
 };
 
 uint32_t crc32cWord(uint32_t crc, uint32_t word) {
@@ -2187,6 +2209,12 @@ void appendRootDirectoryRecords(QVector<ApfsBtreeKeyValue>* records,
                                  .groupId = directory.groupId})});
     records->append({directoryEntryKey(directory.parentDirectoryId, directory.directoryName),
                      directoryEntryValue(directory.directoryId, kApfsDirTypeDirectory)});
+    for (const ApfsRecoveredXattr& xattr : directory.xattrs) {
+        records->append(
+            {xattrKey(directory.directoryId, xattr.name),
+             xattrEmbeddedValue(static_cast<uint16_t>(xattr.flags | kApfsXattrDataEmbedded),
+                                xattr.xdata)});
+    }
 }
 
 qsizetype btreeRecordsByteSize(const QVector<ApfsBtreeKeyValue>& records) {
@@ -6814,24 +6842,6 @@ struct ApfsLiveTreeSource {
     ApfsLiveFsChain chain;
 };
 
-// One recovered extended attribute: its name (trailing NUL stripped), the j_xattr_val flags, and
-// the embedded xdata (the attribute value, or a j_xattr_dstream for a data-stream xattr).
-struct ApfsRecoveredXattr {
-    QByteArray name;
-    uint16_t flags{0};
-    QByteArray xdata;
-};
-
-// The special-inode state a preserved file must carry forward so an in-place mutation reproduces it
-// byte-for-byte instead of rebuilding it as a plain inode: its extended attributes (compression +
-// user attrs) and, for a sparse file, its internal_flags + dstream logical size (the hole reaches
-// up to it).
-struct ApfsRecoveredInodeState {
-    QVector<ApfsRecoveredXattr> xattrs;
-    uint64_t internalFlags{0};
-    uint64_t dstreamLogicalSize{0};
-};
-
 // The DSTREAM (type 8) xfield's logical size within an inode value at `base`, or 0 if absent (a
 // compressed inode carries no dstream). Mirrors writeInodeXfields: the xf header, then the TOC
 // entries, then each xfield's 8-byte-aligned value in TOC order.
@@ -6866,17 +6876,22 @@ void recoverLeafXattr(const QByteArray& node,
     out->append({name, le16(node, valuePos), node.mid(valuePos + 2 * kUint16Size, xdataLen)});
 }
 
-// Recover an inode's xattrs + internal_flags + dstream size from the live fsroot in one leaf walk
-// (the inode record and its xattr records share the inode id as their key object id).
-ApfsRecoveredInodeState recoverInodeState(QIODevice* image,
-                                          const ApfsRepairGeometry& geometry,
-                                          const ApfsLiveFsChain& chain,
-                                          uint64_t inodeId,
-                                          QStringList* blockers) {
-    ApfsRecoveredInodeState state;
+// Recover several inode states in one fs-tree walk. Directory preservation uses
+// this batch form so a tree with many folders does not rescan every B-tree node
+// once per directory.
+QHash<uint64_t, ApfsRecoveredInodeState> recoverInodeStates(
+    QIODevice* image,
+    const ApfsRepairGeometry& geometry,
+    const ApfsLiveFsChain& chain,
+    const QSet<uint64_t>& inodeIds,
+    QStringList* blockers) {
+    QHash<uint64_t, ApfsRecoveredInodeState> states;
+    if (inodeIds.isEmpty()) {
+        return states;
+    }
     QVector<uint64_t> nodes;
     if (!collectOldFsTreeNodePaddrs(image, geometry, chain, &nodes, blockers)) {
-        return state;
+        return states;
     }
     const uint64_t oidMask = (1ULL << kApfsObjTypeShift) - 1;
     for (uint64_t nodeBlock : nodes) {
@@ -6897,9 +6912,11 @@ ApfsRecoveredInodeState recoverInodeState(QIODevice* image,
             const qsizetype toc = kApfsBtreeNodeHeaderBytes +
                                   static_cast<qsizetype>(index) * kApfsBtreeVariableTocEntryBytes;
             const uint64_t keyHeader = le64(node, keyAreaStart + le16(node, toc));
-            if ((keyHeader & oidMask) != inodeId) {
+            const uint64_t inodeId = keyHeader & oidMask;
+            if (!inodeIds.contains(inodeId)) {
                 continue;
             }
+            auto& state = states[inodeId];
             const qsizetype keyPos = keyAreaStart + le16(node, toc);
             const qsizetype valuePos = valueAreaEnd -
                                        le16(node, toc + kApfsBtreeVariableTocValueOffset);
@@ -6912,7 +6929,18 @@ ApfsRecoveredInodeState recoverInodeState(QIODevice* image,
             }
         }
     }
-    return state;
+    return states;
+}
+
+// Recover one inode's xattrs + internal_flags + dstream size. File preservation
+// keeps this small wrapper; directory collection uses the batch helper above.
+ApfsRecoveredInodeState recoverInodeState(QIODevice* image,
+                                          const ApfsRepairGeometry& geometry,
+                                          const ApfsLiveFsChain& chain,
+                                          uint64_t inodeId,
+                                          QStringList* blockers) {
+    return recoverInodeStates(image, geometry, chain, QSet<uint64_t>{inodeId}, blockers)
+        .value(inodeId);
 }
 
 // Carry a preserved file's recovered special-inode state onto its rebuilt payload: decmpfs
@@ -6966,6 +6994,22 @@ bool applyPreservedInodeState(const ApfsRecoveredInodeState& state,
         // sparse builder, so alloced_size / sparse_bytes recompute to the original values.
         file->sparse = true;
         file->sparseLogicalSize = state.dstreamLogicalSize;
+    }
+    return true;
+}
+
+bool applyPreservedDirectoryState(const ApfsRecoveredInodeState& state,
+                                  ApfsRootDirectoryPayload* directory,
+                                  QStringList* blockers) {
+    for (const ApfsRecoveredXattr& xattr : state.xattrs) {
+        if ((xattr.flags & kApfsXattrDataEmbedded) == 0) {
+            blockers->append(
+                QStringLiteral("APFS preserve: directory data-stream xattr '%1' on '%2' is not "
+                               "yet supported")
+                    .arg(QString::fromUtf8(xattr.name), directory->directoryName));
+            return false;
+        }
+        directory->xattrs.append(xattr);
     }
     return true;
 }
@@ -15497,6 +15541,48 @@ bool applyEmbeddedXattrMetadata(const PartitionApfsInodeMetadataUpdate& update,
     return true;
 }
 
+bool applyEmbeddedDirectoryXattrMetadata(const PartitionApfsInodeMetadataUpdate& update,
+                                         ApfsRootDirectoryPayload* directory,
+                                         QStringList* blockers) {
+    if (update.xattr_mutations.isEmpty()) {
+        return true;
+    }
+    QVector<ApfsRecoveredXattr> updated = directory->xattrs;
+    for (const auto& mutation : update.xattr_mutations) {
+        const QByteArray name = mutation.name.toUtf8();
+        if (name.isEmpty() || name.size() > 127 || name.contains('\0')) {
+            blockers->append(QStringLiteral(
+                "APFS inode-metadata-commit: xattr name must be 1-127 non-NUL UTF-8 bytes"));
+            return false;
+        }
+        if (name == QByteArray(kApfsXattrNameCompressed) ||
+            name == QByteArray(kApfsXattrNameResourceFork) ||
+            name == QByteArray(kApfsXattrNameSymlink)) {
+            blockers->append(QStringLiteral(
+                "APFS inode-metadata-commit: content-critical xattr '%1' requires its dedicated mutation path")
+                                 .arg(mutation.name));
+            return false;
+        }
+        if (mutation.value.size() > kApfsXattrMaxEmbeddedSize) {
+            blockers->append(QStringLiteral(
+                "APFS inode-metadata-commit: xattr '%1' exceeds the embedded-value limit")
+                                 .arg(mutation.name));
+            return false;
+        }
+        updated.erase(std::remove_if(updated.begin(),
+                                     updated.end(),
+                                     [&name](const ApfsRecoveredXattr& xattr) {
+                                         return xattr.name == name;
+                                     }),
+                      updated.end());
+        if (!mutation.remove) {
+            updated.append({name, kApfsXattrDataEmbedded, mutation.value});
+        }
+    }
+    directory->xattrs = std::move(updated);
+    return true;
+}
+
 bool applyInodeMetadata(const ApfsInodeMetadataRequest& request,
                         QVector<ApfsRootFilePayload>* files,
                         QVector<ApfsRootDirectoryPayload>* directories,
@@ -15505,11 +15591,6 @@ bool applyInodeMetadata(const ApfsInodeMetadataRequest& request,
         if (request.metadata.update_symbolic_link_target) {
             blockers->append(QStringLiteral(
                 "APFS inode-metadata-commit: a directory cannot become a symbolic link"));
-            return false;
-        }
-        if (!request.metadata.xattr_mutations.isEmpty()) {
-            blockers->append(QStringLiteral(
-                "APFS inode-metadata-commit: directory xattr mutation is not yet supported"));
             return false;
         }
         for (auto& directory : *directories) {
@@ -15527,7 +15608,8 @@ bool applyInodeMetadata(const ApfsInodeMetadataRequest& request,
                                      &directory.bsdFlags,
                                      &directory.ownerId,
                                      &directory.groupId);
-            return true;
+            return applyEmbeddedDirectoryXattrMetadata(
+                request.metadata, &directory, blockers);
         }
     } else {
         for (auto& file : *files) {
@@ -15817,9 +15899,48 @@ bool collectFullFsTree(const QString& sourcePath,
                        QVector<ApfsRootFilePayload>* files,
                        QVector<ApfsRootDirectoryPayload>* directories,
                        QStringList* blockers) {
-    return collectDirectorySubtree({sourcePath, files, directories, blockers},
-                                   QStringLiteral("/"),
-                                   kApfsRootDirectoryId);
+    if (!collectDirectorySubtree({sourcePath, files, directories, blockers},
+                                 QStringLiteral("/"),
+                                 kApfsRootDirectoryId)) {
+        return false;
+    }
+    if (directories->isEmpty()) {
+        return true;
+    }
+
+    QString openError;
+    auto image = openFileOrRawDeviceReadOnly(sourcePath, &openError);
+    if (!image) {
+        blockers->append(
+            QStringLiteral("APFS preserve: unable to reopen tree for directory xattrs: %1")
+                .arg(openError));
+        return false;
+    }
+    ApfsFsCommitContext ctx;
+    if (!loadFsCommitContext(image.get(), &ctx, blockers)) {
+        return false;
+    }
+    QSet<uint64_t> directoryIds;
+    for (const ApfsRootDirectoryPayload& directory : std::as_const(*directories)) {
+        directoryIds.insert(directory.directoryId);
+    }
+    const auto states = recoverInodeStates(
+        image.get(), ctx.geometry, ctx.chain, directoryIds, blockers);
+    if (!blockers->isEmpty()) {
+        return false;
+    }
+    for (ApfsRootDirectoryPayload& directory : *directories) {
+        const auto state = states.constFind(directory.directoryId);
+        if (state == states.cend()) {
+            blockers->append(QStringLiteral("APFS preserve: directory inode %1 was not found")
+                                 .arg(directory.directoryId));
+            return false;
+        }
+        if (!applyPreservedDirectoryState(*state, &directory, blockers)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // A7 (A-h) clone: the shared data stream id and logical size a clone inherits from its
