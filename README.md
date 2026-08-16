@@ -18,6 +18,9 @@ Current state:
   and physical raw writes also require `--allow-raw-writes`.
 - File create/write/delete/rename/move now routes arbitrary parent paths into
   the APFS writer instead of the old one-directory child APIs.
+- Repeated Explorer reads use one copied-core reader session per mounted APFS
+  generation. Uncompressed range reads fetch only the requested extents, and
+  every successful mutation rebuilds the session before callbacks resume.
 - Directory create/delete/rename/move now routes parent paths through copied core
   wrappers; empty directory delete and directory rename/move rebuild the APFS
   tree with one copy-on-write checkpoint.
@@ -35,6 +38,12 @@ Current state:
 - `apfs_mount_service --health` reports installed service state, startup type,
   service recovery policy, configured mounts, visible root entries, and mount
   availability as JSON.
+- Whole-device and zero-offset partition aliases are canonicalized to one raw
+  region and one worker. The exact partition target wins, preventing two drive
+  letters from mounting the same writable APFS bytes concurrently.
+- Service and worker logs rotate at 8 MiB. Service startup also removes legacy
+  oversized logs so an always-running installation cannot grow logs without a
+  bound.
 - `apfs_mount_manager` is now a Qt Widgets manager UI with an accessible mount
   table, refresh/discover/open/change-letter/read-write-mode/enable-disable/unmount/copy
   actions, raw health JSON view, and `--status`/`--self-test` verification
@@ -285,6 +294,15 @@ Verified USB evidence:
   no service restart, no reboot, and automatic restore to read-only/raw-disabled.
   Hash: `89BB2ED96A9521257813B3E5FF3AD25466F6FEEB71AE04D1C1EF1D0A9E0AEA8B`.
   Artifact: `artifacts\usb-rw\usb-normal-user-rw-proof.json`.
+- Current extended normal-user proof is
+  `artifacts\usb-rw\usb-native-extended-unicode-proof.json`. It passed nested
+  Unicode names, a 394-character path, Robocopy with a 1 MiB payload, four
+  concurrent readers with matching hashes, recursive cleanup, and read-only/
+  raw-disabled restoration without restarting the service or Windows. The
+  persistent reader session reduced this lane from 71.8 seconds to 34.3 seconds.
+- `artifacts\service-aliases\raw-alias-deduplication-session-proof.json` proves
+  `\\.\PhysicalDrive1` and Partition 1 resolve to `disk:1:offset:0`, while only
+  exact Partition 1 remains configured at `V:` across service resync intervals.
 - `scripts\verify-current-apfs-state.ps1` generated
   `artifacts\state\current-apfs-state.json`. Current preflight is `ready=true`:
   no UAC prompt is pending, installed binaries match the current build, stale
@@ -346,21 +364,19 @@ Verified USB evidence:
   flips back to read-only, and removes the mapping. Current post-repair
   preflight passes.
 - `scripts\run-apfs-for-windows-certification.ps1` writes
-  `artifacts\certification\apfs-for-windows-certification.json`. Current full
-  no-reboot run completed on `2026-08-16` against current Partition 1/`V:` with `ok=true`,
-  `local_code_gates_ok=true`, `installed_persistence_ok=true`,
-  `mounted_usb_file_actions_ok=true`, `usb_preflight_ready=true`, and
-  `full_usb_rw_ok=true`. It runs build, CTest, script parse, local worker,
-  service IPC, package, license, WinFsp, copied-core, installed-state, direct
-  mounted-drive USB file actions, and serial-pinned USB RW proof gates. Broader
-  public-certification gates still need crash/rollback, Apple/macOS validation,
-  surprise-unplug, and wider metadata coverage.
+  `artifacts\certification\apfs-for-windows-certification.json`. It runs build,
+  CTest, script parse, local worker, service IPC, package, license, WinFsp,
+  copied-core, installed-state, raw-alias, direct mounted-drive USB file-action,
+  and serial-pinned USB RW proof gates. Treat that artifact as the authoritative
+  result for the checked-out build. Broader public-certification gates still
+  need crash-during-write/rollback, Apple/macOS validation, surprise-unplug,
+  real APFS basic-info/security metadata writes, and xattr/link coverage.
 
 Verified copied-core mutation evidence:
 
-- Current `ctest --test-dir build -C Release --output-on-failure` passes 11/11,
+- Current `ctest --test-dir build -C Release --output-on-failure` passes 12/12,
   including `apfs_service_partition_parser`, `apfs_service_control_self_test`,
-  and `apfs_service_ipc_self_test`.
+  `apfs_service_ipc_self_test`, and `apfs_service_log_rotation`.
   These exercise service-side safe config requests, set-enabled/remove behavior,
   raw-write denial, and actual local socket transport against a temporary
   ProgramData root.

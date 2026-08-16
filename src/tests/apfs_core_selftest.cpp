@@ -81,6 +81,52 @@ int verifyRead(const QString& imagePath,
     return 0;
 }
 
+int verifyRangeRead(const QString& imagePath,
+                    const QString& path,
+                    uint64_t offset,
+                    uint64_t length,
+                    const QByteArray& expected,
+                    QJsonArray* proofs) {
+    QFile image(imagePath);
+    if (!image.open(QIODevice::ReadOnly)) {
+        return fail(QStringLiteral("range read %1").arg(path),
+                    QStringLiteral("unable to open image"));
+    }
+    const auto read = sak::PartitionApfsFileSystemReader::readFileRange(
+        &image, path, offset, length);
+    if (!read.ok) {
+        return fail(QStringLiteral("range read %1").arg(path),
+                    QStringLiteral("readFileRange failed"),
+                    read.blockers);
+    }
+    if (read.data != expected) {
+        return fail(QStringLiteral("range read %1").arg(path),
+                    QStringLiteral("range content mismatch"));
+    }
+    sak::PartitionApfsFileSystemReaderSession session(&image);
+    const auto sessionRead = session.readFileRange(path, offset, length);
+    const auto repeatedSessionRead = session.readFileRange(path, offset, length);
+    if (!sessionRead.ok || !repeatedSessionRead.ok) {
+        QStringList blockers = sessionRead.blockers;
+        blockers.append(repeatedSessionRead.blockers);
+        return fail(QStringLiteral("session range read %1").arg(path),
+                    QStringLiteral("persistent reader session failed"),
+                    blockers);
+    }
+    if (sessionRead.data != expected || repeatedSessionRead.data != expected) {
+        return fail(QStringLiteral("session range read %1").arg(path),
+                    QStringLiteral("persistent reader session content mismatch"));
+    }
+    appendProof(proofs,
+                QStringLiteral("range read %1").arg(path),
+                {{QStringLiteral("offset"), QString::number(offset)},
+                 {QStringLiteral("requested_bytes"), QString::number(length)},
+                 {QStringLiteral("returned_bytes"), QString::number(read.data.size())},
+                 {QStringLiteral("sha256"), sha256Hex(read.data)},
+                 {QStringLiteral("session_repeat_ok"), true}});
+    return 0;
+}
+
 sak::PartitionApfsWriteOptions certifiedImageOnlyOptions() {
     sak::PartitionApfsWriteOptions options;
     options.enable_experimental_writer = true;
@@ -175,6 +221,24 @@ int main(int argc, char* argv[]) {
                 {{QStringLiteral("volume"), seedListing.volume_name},
                  {QStringLiteral("entries"), seedListing.entries.size()}});
     if (const int rc = verifyRead(seedImage, QStringLiteral("/seed.txt"), seedData, &proofs);
+        rc != 0) {
+        return rc;
+    }
+    if (const int rc = verifyRangeRead(seedImage,
+                                       QStringLiteral("/seed.txt"),
+                                       5,
+                                       11,
+                                       seedData.mid(5, 11),
+                                       &proofs);
+        rc != 0) {
+        return rc;
+    }
+    if (const int rc = verifyRangeRead(seedImage,
+                                       QStringLiteral("/seed.txt"),
+                                       static_cast<uint64_t>(seedData.size()) + 1,
+                                       4096,
+                                       {},
+                                       &proofs);
         rc != 0) {
         return rc;
     }

@@ -12,6 +12,7 @@
 #include <QVector>
 
 #include <cstdint>
+#include <memory>
 
 class QIODevice;
 
@@ -106,6 +107,32 @@ struct PartitionApfsDirectoryExportOptions {
     uint64_t max_total_bytes{0};
 };
 
+/// Mounted reader state for repeated directory and range reads. Recreate after
+/// any APFS mutation so the parsed object-map and file-tree generation stays current.
+class PartitionApfsFileSystemReaderSession {
+public:
+    explicit PartitionApfsFileSystemReaderSession(QIODevice* device,
+                                                  const QString& credential = {});
+    ~PartitionApfsFileSystemReaderSession();
+
+    PartitionApfsFileSystemReaderSession(const PartitionApfsFileSystemReaderSession&) = delete;
+    PartitionApfsFileSystemReaderSession& operator=(
+        const PartitionApfsFileSystemReaderSession&) = delete;
+
+    [[nodiscard]] PartitionApfsFileReadResult listDirectory(
+        const QString& path = {},
+        int max_entries = kPartitionApfsDefaultBrowseEntryLimit);
+    [[nodiscard]] PartitionApfsFileReadResult readFile(const QString& path,
+                                                       uint64_t max_bytes);
+    [[nodiscard]] PartitionApfsFileReadResult readFileRange(const QString& path,
+                                                            uint64_t offset,
+                                                            uint64_t length);
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
 class PartitionApfsFileSystemReader {
 public:
     /// @p credential (optional) is the FileVault volume password or personal
@@ -124,6 +151,14 @@ public:
                                                               const QString& path,
                                                               uint64_t max_bytes,
                                                               const QString& credential = {});
+    /// Read one logical range without materializing the file prefix. Compressed
+    /// files may still require prefix/full-stream decode depending on APFS encoding.
+    [[nodiscard]] static PartitionApfsFileReadResult readFileRange(
+        QIODevice* device,
+        const QString& path,
+        uint64_t offset,
+        uint64_t length,
+        const QString& credential = {});
     [[nodiscard]] static PartitionApfsFileReadResult readFileFromImage(
         const QString& image_path,
         const QString& path,

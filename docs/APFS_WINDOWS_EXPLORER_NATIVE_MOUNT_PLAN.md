@@ -345,8 +345,9 @@ Exit gate: release checklist passes with artifacts under this repo.
   `artifacts\package\APFS-for-Windows-0.1.0.zip` with built binaries, Qt runtime
   DLLs, platform plugin, install/repair/uninstall scripts, README, and APFS
   core provenance note. `scripts\verify-release-package.ps1` verifies the staged
-  package layout. Current verified ZIP SHA-256 is
-  `69659F7905213782D21575BCB2920E405E7CC12C532945FAFD1075A9A8A6A0E5`.
+  package layout. The current ZIP SHA-256 is recorded in
+  `artifacts\package\package-proof.json` so README changes cannot leave a stale
+  self-referential package hash.
 - `LICENSE`, `THIRD_PARTY_LICENSES.md`, and
   `scripts\verify-license-notices.ps1` now cover project license presence plus
   Qt, WinFsp, and Apple LZFSE notices required by the release package.
@@ -480,13 +481,11 @@ Exit gate: release checklist passes with artifacts under this repo.
   write/rename, child move to root, nested directory create, and file-backed raw
   directory create/delete while preserving a 16 MiB existing file. Every result
   is verified with `PartitionApfsFileSystemReader`.
-- `apfs_winfs_worker --read-write` now has a guarded mount-facing mutation path
-  for APFS image and raw targets. It maps WinFsp root-file create, overwrite,
-  write, truncate/resize, rename, delete, one-root-directory direct child-file
-  write/rename/delete, child-file move between root and one root directory, empty
-  root-directory create/delete, and nested directory create into copied APFS
-  COW commits, then reloads the APFS reader view after each
-  commit.
+- `apfs_winfs_worker --read-write` has a guarded mount-facing mutation path for
+  APFS image and raw targets. WinFsp file and directory create, overwrite,
+  write, truncate/resize, rename/move, and delete route arbitrary parent paths
+  into copied APFS COW commits, then rebuild the mounted reader session after
+  each commit.
 - `apfs_winfs_worker` directory enumeration now sorts entries by name and resumes
   after a marker lexically even if the exact marker entry was already deleted.
   This fixes recursive delete clients that enumerate a directory while deleting
@@ -498,20 +497,18 @@ Exit gate: release checklist passes with artifacts under this repo.
 - Raw-device writes remain off by default. A raw target can only enter RW mode
   with both `--read-write` and `--allow-raw-writes`; the installed Disk 2 mapping
   does not set those flags.
-- The copied APFS writer preserves existing directory trees during supported
-  metadata commits by carrying directory parent ids through fs-tree rebuilds.
-  The imported public mutation API currently exposes nested directory create,
-  but not deeper child-file mutation or directory rename/delete by arbitrary path.
+- The copied APFS writer preserves existing directory trees during metadata
+  commits by carrying directory parent ids through fs-tree rebuilds. The
+  imported mutation API exposes arbitrary parent paths for file and directory
+  operations used by the worker.
 - The copied APFS writer now wraps the next contiguous checkpoint ephemeral set
   to checkpoint data-ring slot 0 when the live data tail is too close to the end.
   The stronger local Robocopy/delete proof hit the old
   `checkpoint data ring would wrap` failure while deleting `root.txt`; after this
   copied-core fix, the same proof deletes the whole tree and leaves only
   `large.bin` and `seed.txt` at root.
-- The worker resolves directory-create parent paths and passes
-  `parent_directory_path` into the imported writer, so nested directory create is
-  supported. File mutation remains root or one-root-directory child; directory
-  rename/move and deeper child-file mutation return `STATUS_NOT_SUPPORTED`.
+- The worker resolves file and directory parent paths and passes them into the
+  imported writer for nested create/write/rename/move/delete operations.
 - The copied APFS writer now preserves existing files during metadata-only
   commits by logical size plus recovered extents instead of allocating a
   `QByteArray` as large as each existing file. This addresses the worker crash
@@ -530,7 +527,7 @@ Exit gate: release checklist passes with artifacts under this repo.
 - Verified:
   `cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_PREFIX_PATH=C:\Qt\6.10.3\msvc2022_64`;
   `cmake --build build --config Release --parallel`;
-  `ctest --test-dir build -C Release --output-on-failure` passes 11/11;
+  `ctest --test-dir build -C Release --output-on-failure` passes 12/12;
   PowerShell installer/uninstaller/test-helper AST parse; service/worker/manager
   console smoke.
 - Current source keeps generated-image RW enabled and now allows physical raw
@@ -768,14 +765,15 @@ Exit gate: release checklist passes with artifacts under this repo.
 - Source checkout remains off-limits for edits; APFS core changes for this
   project are made only in the copied tree under `third_party\sak_apfs_core`.
 - Basic serial/signature-pinned physical USB RW now passes as normal user on the
-  current hybrid MBR Partition 1 APFS target at `V:`. Remaining work before public RW default: repeat/soak
-  the USB mutation lane, add broader metadata/xattr/symlink/hardlink mutation
-  coverage, richer cache invalidation, crash/rollback proof, real physical
-  surprise-unplug behavior, and Apple/macOS validation.
+  current hybrid MBR Partition 1 APFS target at `V:`. Remaining work before
+  public RW default: longer repeat/soak, real APFS basic-info/security metadata
+  writes, xattr/symlink/hardlink mutation coverage, crash-during-write/rollback
+  proof, real physical surprise-unplug behavior, and Apple/macOS validation.
   `\\.\PhysicalDrive2` remains read-only.
 - Current local state is safe to pause: no UAC prompt is pending, no USB verifier
   process remains, service is Automatic/running, installed binaries match the
-  current build, one tray manager is running, and `V:` is read-only with raw writes disabled.
+  current build, one tray manager is running, and `V:` is read-only with raw
+  writes disabled.
 - Normal Explorer-style file actions remain a non-admin requirement, but service
   policy restore/install is admin-gated on this machine: a non-admin
   `--add-mount ... --read-only` restore attempt failed with
@@ -900,7 +898,7 @@ Exit gate: release checklist passes with artifacts under this repo.
   probes as a 536,870,912-byte APFS `RawSignature` container and mounts at `V:`.
 - Service discovery now parses MBR primary partitions in addition to GPT and
   whole-device APFS. `apfs_service_partition_parser` adds synthetic regular and
-  zero-offset hybrid MBR coverage; CTest passes 11/11.
+  zero-offset hybrid MBR coverage; CTest passes 12/12.
 - Raw-write policy no longer trusts only a discovery target-name match. Service
   opens and APFS-probes the exact requested raw target before enabling writes,
   which safely supports equivalent whole-device/Partition 1 hybrid aliases.
@@ -917,5 +915,24 @@ Exit gate: release checklist passes with artifacts under this repo.
 - Installer/repair add machine-wide manager `--tray` logon startup. Manager is
   single-instance and retains right-click `Open`/`Exit` with stacked `AP` over
   `FS` icon. Uninstaller removes startup registration and stops manager.
+- Whole-device and Partition 1 targets are now reduced to a raw-region identity.
+  `\\.\PhysicalDrive1` and
+  `\\?\GLOBALROOT\Device\Harddisk1\Partition1` both resolve to
+  `disk:1:offset:0`; canonicalization keeps only exact Partition 1 at `V:` and
+  prevents concurrent workers over the same APFS bytes. Evidence:
+  `artifacts\service-aliases\raw-alias-deduplication-session-proof.json`.
+- Copied-core uncompressed range reads now read requested extents directly, and
+  each worker keeps one reader session per mounted APFS generation. Mutations
+  destroy the old session before closing its device and create a fresh session
+  after commit. Session range behavior is covered by `apfs_core_selftest`.
+- `artifacts\usb-rw\usb-native-extended-unicode-proof.json` passed nested
+  Unicode names, a 394-character path, Robocopy with a 1 MiB payload, four
+  concurrent readers, matching hashes, recursive cleanup, and read-only/
+  raw-disabled restoration. It completed in 34.3 seconds versus 71.8 seconds
+  before persistent reader sessions. No service restart or reboot occurred.
+- Service and worker logs rotate at 8 MiB. Service startup prunes legacy
+  oversized logs; the live repair removed prior 990 MB worker and 519 MB service
+  logs. `apfs_service_log_rotation` verifies pruning in a temporary ProgramData
+  root, and CTest now passes 12/12.
 - No reboot was performed. Actual post-reboot/logon proof remains blocked by
   explicit instruction not to restart this PC.

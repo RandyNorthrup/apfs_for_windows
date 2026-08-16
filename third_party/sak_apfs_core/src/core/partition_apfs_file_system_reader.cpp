@@ -505,10 +505,7 @@ public:
     [[nodiscard]] PartitionApfsFileReadResult listDirectory(const QString& path, int maxEntries) {
         PartitionApfsFileReadResult result;
         result.file_system = QStringLiteral("APFS");
-        if (!mount(&result)) {
-            return result;
-        }
-        if (!scanFileSystem(&result)) {
+        if (!ensureMountedAndScanned(&result)) {
             return result;
         }
 
@@ -540,7 +537,7 @@ public:
     [[nodiscard]] PartitionApfsFileReadResult readFile(const QString& path, uint64_t maxBytes) {
         PartitionApfsFileReadResult result;
         result.file_system = QStringLiteral("APFS");
-        if (!mountAndScan(&result)) {
+        if (!ensureMountedAndScanned(&result)) {
             return result;
         }
 
@@ -563,6 +560,69 @@ public:
         return result;
     }
 
+    [[nodiscard]] PartitionApfsFileReadResult readFileRange(const QString& path,
+                                                            uint64_t offset,
+                                                            uint64_t length) {
+        PartitionApfsFileReadResult result;
+        result.file_system = QStringLiteral("APFS");
+        if (!ensureMountedAndScanned(&result)) {
+            return result;
+        }
+
+        const auto target = resolveFileReadTarget(path, 1, &result, false);
+        if (!target.has_value()) {
+            return result;
+        }
+        if (length > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
+            result.blockers.append(QStringLiteral("APFS range read exceeds byte-array limit"));
+            return result;
+        }
+
+        uint64_t logicalSize = target->inode.size;
+        if (target->compressed) {
+            const auto header = apfsParseDecmpfsHeader(target->decmpfs_xattr);
+            if (!header.has_value()) {
+                result.blockers.append(QStringLiteral("APFS decmpfs attribute is malformed"));
+                return result;
+            }
+            logicalSize = header->uncompressed_size;
+        }
+        if (offset >= logicalSize || length == 0) {
+            result.volume_name = volumeName_;
+            result.ok = result.blockers.isEmpty();
+            return result;
+        }
+
+        const uint64_t available = logicalSize - offset;
+        const uint64_t bytesToRead = std::min<uint64_t>(length, available);
+        const uint64_t end = offset + bytesToRead;
+        FileReadTarget rangeTarget = *target;
+        rangeTarget.bytes_to_read = end;
+        if (rangeTarget.compressed) {
+            if (end > kMaxFileReadBytes) {
+                result.blockers.append(QStringLiteral(
+                    "APFS compressed range read exceeds decode limit"));
+                return result;
+            }
+            if (!appendCompressedFileData(rangeTarget, &result)) {
+                return result;
+            }
+            result.data = result.data.mid(static_cast<qsizetype>(offset),
+                                          static_cast<qsizetype>(bytesToRead));
+        } else if (!appendFileDataRange(rangeTarget, offset, end, &result)) {
+            return result;
+        }
+
+        for (const auto& xattr : xattrsByInode_.values(rangeTarget.inode.object_id)) {
+            if (xattr.first != QLatin1StringView(kApfsXattrNameCompressed)) {
+                result.xattrs.append(xattr);
+            }
+        }
+        result.volume_name = volumeName_;
+        result.ok = result.blockers.isEmpty();
+        return result;
+    }
+
     [[nodiscard]] PartitionApfsFileDebugResult debugFile(const QString& path) {
         PartitionApfsFileDebugResult result;
         result.file_system = QStringLiteral("APFS");
@@ -570,7 +630,7 @@ public:
 
         PartitionApfsFileReadResult readResult;
         readResult.file_system = QStringLiteral("APFS");
-        if (!mountAndScan(&readResult)) {
+        if (!ensureMountedAndScanned(&readResult)) {
             result.blockers = readResult.blockers;
             result.warnings = readResult.warnings;
             return result;
@@ -645,6 +705,14 @@ public:
     }
 
 private:
+    [[nodiscard]] bool ensureMountedAndScanned(PartitionApfsFileReadResult* result) {
+        if (mountedAndScanned_) {
+            return true;
+        }
+        mountedAndScanned_ = mountAndScan(result);
+        return mountedAndScanned_;
+    }
+
     [[nodiscard]] bool mountAndScan(PartitionApfsFileReadResult* result) {
         return mount(result) && scanFileSystem(result);
     }
@@ -913,7 +981,10 @@ private:
     }
 
     [[nodiscard]] std::optional<FileReadTarget> resolveFileReadTarget(
-        const QString& path, uint64_t maxBytes, PartitionApfsFileReadResult* result) const {
+        const QString& path,
+        uint64_t maxBytes,
+        PartitionApfsFileReadResult* result,
+        bool warnOnTruncate = true) const {
         const QString normalized = cleanPath(path);
         const auto record = resolveFile(normalized, result);
         if (!record.has_value()) {
@@ -944,7 +1015,7 @@ private:
             }
             const uint64_t logical = header->uncompressed_size;
             const uint64_t bytesToRead = std::min<uint64_t>(logical, effectiveMax);
-            if (logical > bytesToRead) {
+            if (warnOnTruncate && logical > bytesToRead) {
                 result->warnings.append(
                     QStringLiteral("APFS file read truncated at %1 bytes").arg(bytesToRead));
             }
@@ -957,7 +1028,7 @@ private:
                                   resourceForkObjIdByInode_.value(record->file_id, 0)};
         }
         const uint64_t bytesToRead = std::min<uint64_t>(inode->size, effectiveMax);
-        if (inode->size > bytesToRead) {
+        if (warnOnTruncate && inode->size > bytesToRead) {
             result->warnings.append(
                 QStringLiteral("APFS file read truncated at %1 bytes").arg(bytesToRead));
         }
@@ -1139,6 +1210,37 @@ private:
                 return false;
             }
             result->data.append(static_cast<qsizetype>(target.bytes_to_read - cursor), '\0');
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool appendFileDataRange(const FileReadTarget& target,
+                                           uint64_t offset,
+                                           uint64_t end,
+                                           PartitionApfsFileReadResult* result) {
+        if (offset >= end) {
+            return true;
+        }
+        const auto extents = sortedExtents(target.inode.private_id);
+        if (extents.isEmpty() && !target.inode.sparse) {
+            result->blockers.append(QStringLiteral("APFS file has no readable extents"));
+            return false;
+        }
+        result->data.reserve(static_cast<qsizetype>(end - offset));
+
+        uint64_t cursor = offset;
+        for (const auto& extent : extents) {
+            if (!appendReadableExtent(extent, end, &cursor, result)) {
+                return false;
+            }
+        }
+        if (cursor < end) {
+            if (!target.inode.sparse) {
+                result->blockers.append(
+                    QStringLiteral("APFS file extents ended before expected range"));
+                return false;
+            }
+            result->data.append(static_cast<qsizetype>(end - cursor), '\0');
         }
         return true;
     }
@@ -2160,6 +2262,7 @@ private:
     // A7 (A-h): every embedded named attribute (ACL, Finder info, user xattrs)
     // keyed by inode object id, surfaced on a file read result.
     QMultiHash<uint64_t, QPair<QString, QByteArray>> xattrsByInode_;
+    bool mountedAndScanned_{false};
 };
 
 struct ApfsExportFrame {
@@ -2337,6 +2440,34 @@ PartitionApfsFileReadResult withOpenedApfsImage(
 
 }  // namespace
 
+struct PartitionApfsFileSystemReaderSession::Impl {
+    explicit Impl(QIODevice* device, const QString& credential)
+        : reader(device, credential) {}
+
+    ApfsReader reader;
+};
+
+PartitionApfsFileSystemReaderSession::PartitionApfsFileSystemReaderSession(
+    QIODevice* device, const QString& credential)
+    : impl_(std::make_unique<Impl>(device, credential)) {}
+
+PartitionApfsFileSystemReaderSession::~PartitionApfsFileSystemReaderSession() = default;
+
+PartitionApfsFileReadResult PartitionApfsFileSystemReaderSession::listDirectory(
+    const QString& path, int max_entries) {
+    return impl_->reader.listDirectory(path, max_entries);
+}
+
+PartitionApfsFileReadResult PartitionApfsFileSystemReaderSession::readFile(
+    const QString& path, uint64_t max_bytes) {
+    return impl_->reader.readFile(path, max_bytes);
+}
+
+PartitionApfsFileReadResult PartitionApfsFileSystemReaderSession::readFileRange(
+    const QString& path, uint64_t offset, uint64_t length) {
+    return impl_->reader.readFileRange(path, offset, length);
+}
+
 PartitionApfsFileReadResult PartitionApfsFileSystemReader::listDirectory(
     QIODevice* device, const QString& path, int max_entries, const QString& credential) {
     return ApfsReader(device, credential).listDirectory(path, max_entries);
@@ -2354,6 +2485,15 @@ PartitionApfsFileReadResult PartitionApfsFileSystemReader::readFile(QIODevice* d
                                                                     uint64_t max_bytes,
                                                                     const QString& credential) {
     return ApfsReader(device, credential).readFile(path, max_bytes);
+}
+
+PartitionApfsFileReadResult PartitionApfsFileSystemReader::readFileRange(
+    QIODevice* device,
+    const QString& path,
+    uint64_t offset,
+    uint64_t length,
+    const QString& credential) {
+    return ApfsReader(device, credential).readFileRange(path, offset, length);
 }
 
 PartitionApfsFileReadResult PartitionApfsFileSystemReader::readFileFromImage(

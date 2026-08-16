@@ -108,6 +108,7 @@ add_test(NAME apfs_service_console COMMAND apfs_mount_service --run-console)
 add_test(NAME apfs_service_health COMMAND apfs_mount_service --health)
 add_test(NAME apfs_service_control_self_test COMMAND apfs_mount_service --self-test-control)
 add_test(NAME apfs_service_ipc_self_test COMMAND apfs_mount_service --self-test-ipc)
+add_test(NAME apfs_service_log_rotation COMMAND apfs_mount_service --self-test-log-rotation)
 add_test(NAME apfs_service_discovery_empty COMMAND apfs_mount_service --discover-apfs --max-physical-drives 0)
 add_test(NAME apfs_service_partition_parser COMMAND apfs_mount_service --self-test-partitions)
 add_test(NAME apfs_manager_status COMMAND apfs_mount_manager --status)
@@ -121,6 +122,6 @@ if(WinFsp_FOUND)
     list(APPEND APFS_TEST_PATH_MODS "PATH=path_list_prepend:${APFS_WINFSP_ROOT}/bin")
 endif()
 
-set_tests_properties(apfs_probe_help apfs_worker_status apfs_service_console apfs_service_health apfs_service_control_self_test apfs_service_ipc_self_test apfs_service_discovery_empty apfs_service_partition_parser apfs_manager_status apfs_manager_self_test apfs_core_selftest PROPERTIES
+set_tests_properties(apfs_probe_help apfs_worker_status apfs_service_console apfs_service_health apfs_service_control_self_test apfs_service_ipc_self_test apfs_service_log_rotation apfs_service_discovery_empty apfs_service_partition_parser apfs_manager_status apfs_manager_self_test apfs_core_selftest PROPERTIES
     ENVIRONMENT_MODIFICATION "${APFS_TEST_PATH_MODS}"
 )

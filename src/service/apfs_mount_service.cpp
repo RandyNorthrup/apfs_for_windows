@@ -26,6 +26,7 @@
 #ifdef Q_OS_WIN
 #include <windows.h>
 #include <dbt.h>
+#include <winioctl.h>
 
 #include <algorithm>
 #include <array>
@@ -47,6 +48,7 @@ constexpr int kDefaultMaxPhysicalDrives = 32;
 constexpr DWORD kServiceWaitSliceMs = 1000;
 constexpr qint64 kServiceSyncIntervalMs = 5000;
 constexpr int kControlSocketTimeoutMs = 3000;
+constexpr qint64 kMaxLogBytes = 8LL * 1024LL * 1024LL;
 constexpr quint64 kSectorBytes = 512;
 constexpr quint64 kFallbackProbeBytes = 1024ULL * 1024ULL * 1024ULL;
 constexpr char kGptSignature[] = "EFI PART";
@@ -64,6 +66,8 @@ HANDLE g_stopEvent = nullptr;
 HANDLE g_resyncEvent = nullptr;
 HDEVNOTIFY g_deviceNotification = nullptr;
 std::mutex g_configMutex;
+std::mutex g_logMutex;
+std::once_flag g_logPruneOnce;
 
 constexpr GUID kDiskDeviceInterfaceGuid = {0x53f56307,
                                            0xb6bf,
@@ -161,9 +165,37 @@ QString logDir() {
     return QDir(programDataRoot()).filePath(QStringLiteral("logs"));
 }
 
+void rotateLogIfNeeded(const QString& path) {
+    const QFileInfo info(path);
+    if (!info.exists() || info.size() < kMaxLogBytes) {
+        return;
+    }
+
+    const QString archivePath = path + QStringLiteral(".1");
+    QFile::remove(archivePath);
+    if (info.size() > kMaxLogBytes * 2) {
+        QFile::remove(path);
+        return;
+    }
+    QFile::rename(path, archivePath);
+}
+
+void pruneLegacyOversizedLogs() {
+    QDir directory(logDir());
+    const QFileInfoList files = directory.entryInfoList(
+        {QStringLiteral("*.log"), QStringLiteral("*.trace.txt")}, QDir::Files);
+    for (const QFileInfo& info : files) {
+        rotateLogIfNeeded(info.absoluteFilePath());
+    }
+}
+
 void appendServiceLog(const QString& message) {
     QDir().mkpath(logDir());
-    QFile file(QDir(logDir()).filePath(QStringLiteral("apfs_mount_service.log")));
+    std::scoped_lock lock(g_logMutex);
+    std::call_once(g_logPruneOnce, pruneLegacyOversizedLogs);
+    const QString path = QDir(logDir()).filePath(QStringLiteral("apfs_mount_service.log"));
+    rotateLogIfNeeded(path);
+    QFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
         return;
     }
@@ -894,6 +926,241 @@ std::optional<MountConfig> preferredMountForTarget(const QVector<MountConfig>& p
     return *found;
 }
 
+QString canonicalDiscoveredTarget(const QString& target,
+                                  const QVector<DiscoveredApfsVolume>& volumes,
+                                  bool* wasAlias = nullptr) {
+    if (wasAlias) {
+        *wasAlias = false;
+    }
+    for (const auto& volume : volumes) {
+        if (volume.partition.index != 0 && volume.partition.offset_bytes == 0 &&
+            target.compare(physicalDrivePath(volume.disk_index), Qt::CaseInsensitive) == 0) {
+            if (wasAlias) {
+                *wasAlias = true;
+            }
+            return volume.target;
+        }
+    }
+    for (const auto& volume : volumes) {
+        if (target.compare(volume.target, Qt::CaseInsensitive) == 0) {
+            return volume.target;
+        }
+    }
+    return target;
+}
+
+struct ParsedRawTarget {
+    int disk_index{-1};
+    int partition_index{0};
+};
+
+std::optional<ParsedRawTarget> parseRawTarget(const QString& target) {
+    const QString physicalPrefix = QStringLiteral("\\\\.\\PhysicalDrive");
+    if (target.startsWith(physicalPrefix, Qt::CaseInsensitive)) {
+        bool ok = false;
+        const int disk = target.mid(physicalPrefix.size()).toInt(&ok);
+        if (ok && disk >= 0) {
+            return ParsedRawTarget{.disk_index = disk};
+        }
+        return std::nullopt;
+    }
+
+    const QString partitionPrefix = QStringLiteral("\\\\?\\GLOBALROOT\\Device\\Harddisk");
+    if (!target.startsWith(partitionPrefix, Qt::CaseInsensitive)) {
+        return std::nullopt;
+    }
+    const QString suffix = target.mid(partitionPrefix.size());
+    const QString marker = QStringLiteral("\\Partition");
+    const qsizetype markerIndex = suffix.indexOf(marker, 0, Qt::CaseInsensitive);
+    if (markerIndex <= 0) {
+        return std::nullopt;
+    }
+    bool diskOk = false;
+    bool partitionOk = false;
+    const int disk = suffix.left(markerIndex).toInt(&diskOk);
+    const int partition = suffix.mid(markerIndex + marker.size()).toInt(&partitionOk);
+    if (!diskOk || !partitionOk || disk < 0 || partition <= 0) {
+        return std::nullopt;
+    }
+    return ParsedRawTarget{.disk_index = disk, .partition_index = partition};
+}
+
+std::optional<quint64> windowsPartitionOffset(const QString& target, DWORD* error = nullptr) {
+    if (error) {
+        *error = ERROR_SUCCESS;
+    }
+    const std::wstring path = target.toStdWString();
+    HANDLE handle = CreateFileW(path.c_str(),
+                                0,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                nullptr,
+                                OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL,
+                                nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        if (error) {
+            *error = GetLastError();
+        }
+        return std::nullopt;
+    }
+
+    PARTITION_INFORMATION_EX information{};
+    DWORD returned = 0;
+    const BOOL ok = DeviceIoControl(handle,
+                                    IOCTL_DISK_GET_PARTITION_INFO_EX,
+                                    nullptr,
+                                    0,
+                                    &information,
+                                    sizeof(information),
+                                    &returned,
+                                    nullptr);
+    const DWORD ioctlError = ok ? ERROR_SUCCESS : GetLastError();
+    CloseHandle(handle);
+    if (!ok || information.StartingOffset.QuadPart < 0) {
+        if (error) {
+            *error = ioctlError;
+        }
+        return std::nullopt;
+    }
+    return static_cast<quint64>(information.StartingOffset.QuadPart);
+}
+
+std::optional<QString> rawTargetIdentity(const QString& target,
+                                         const QVector<DiscoveredApfsVolume>& volumes) {
+    const std::optional<ParsedRawTarget> parsed = parseRawTarget(target);
+    if (!parsed.has_value()) {
+        return std::nullopt;
+    }
+
+    quint64 offset = 0;
+    if (parsed->partition_index != 0) {
+        const auto discovered = std::find_if(
+            volumes.begin(), volumes.end(), [&](const DiscoveredApfsVolume& volume) {
+                return volume.disk_index == parsed->disk_index &&
+                       volume.partition.index == parsed->partition_index;
+            });
+        if (discovered != volumes.end()) {
+            offset = discovered->partition.offset_bytes;
+        } else {
+            const std::optional<quint64> queried = windowsPartitionOffset(target);
+            if (!queried.has_value()) {
+                return std::nullopt;
+            }
+            offset = *queried;
+        }
+    }
+    return QStringLiteral("disk:%1:offset:%2").arg(parsed->disk_index).arg(offset);
+}
+
+bool targetsReferToSameRawRegion(const QString& left,
+                                 const QString& right,
+                                 const QVector<DiscoveredApfsVolume>& volumes) {
+    if (left.compare(right, Qt::CaseInsensitive) == 0) {
+        return true;
+    }
+    const std::optional<QString> leftIdentity = rawTargetIdentity(left, volumes);
+    const std::optional<QString> rightIdentity = rawTargetIdentity(right, volumes);
+    return leftIdentity.has_value() && rightIdentity.has_value() &&
+           *leftIdentity == *rightIdentity;
+}
+
+int targetIdentityDiagnostic(const QStringList& args) {
+    const QString target = argumentValue(args, QStringLiteral("--target")).trimmed();
+    const std::optional<ParsedRawTarget> parsed = parseRawTarget(target);
+    DWORD offsetError = ERROR_SUCCESS;
+    std::optional<quint64> partitionOffset;
+    if (parsed.has_value() && parsed->partition_index != 0) {
+        partitionOffset = windowsPartitionOffset(target, &offsetError);
+    }
+    const std::optional<QString> identity = rawTargetIdentity(target, {});
+    const bool ok = parsed.has_value() && identity.has_value();
+    printJson(QJsonObject{
+        {QStringLiteral("component"), QStringLiteral("apfs_mount_service")},
+        {QStringLiteral("check"), QStringLiteral("target_identity")},
+        {QStringLiteral("ok"), ok},
+        {QStringLiteral("target"), target},
+        {QStringLiteral("parsed"), parsed.has_value()},
+        {QStringLiteral("disk_index"), parsed.has_value() ? parsed->disk_index : -1},
+        {QStringLiteral("partition_index"), parsed.has_value() ? parsed->partition_index : -1},
+        {QStringLiteral("partition_offset_bytes"),
+         partitionOffset.has_value() ? QJsonValue(QString::number(*partitionOffset)) : QJsonValue()},
+        {QStringLiteral("win32_error"), static_cast<qint64>(offsetError)},
+        {QStringLiteral("win32_error_message"),
+         offsetError == ERROR_SUCCESS ? QString() : winError(offsetError)},
+        {QStringLiteral("identity"),
+         identity.has_value() ? QJsonValue(*identity) : QJsonValue()}});
+    return ok ? 0 : 1;
+}
+
+bool canonicalizeDiscoveredMountAliases(QVector<MountConfig>* mounts,
+                                        const QVector<DiscoveredApfsVolume>& volumes,
+                                        QJsonArray* actions = nullptr) {
+    QVector<MountConfig> normalized;
+    QVector<bool> exactTargets;
+    QVector<std::optional<QString>> identities;
+    bool changed = false;
+
+    for (const auto& mount : *mounts) {
+        bool wasAlias = false;
+        MountConfig candidate = mount;
+        candidate.target = canonicalDiscoveredTarget(mount.target, volumes, &wasAlias);
+
+        const std::optional<ParsedRawTarget> parsedCandidate = parseRawTarget(candidate.target);
+        const bool candidateIsExact = !wasAlias && parsedCandidate.has_value() &&
+                                      parsedCandidate->partition_index != 0;
+        const std::optional<QString> candidateIdentity =
+            rawTargetIdentity(candidate.target, volumes);
+
+        qsizetype duplicateIndex = -1;
+        for (qsizetype i = 0; i < normalized.size(); ++i) {
+            if (normalized.at(i).target.compare(candidate.target, Qt::CaseInsensitive) == 0 ||
+                (candidateIdentity.has_value() && identities.at(i).has_value() &&
+                 *candidateIdentity == *identities.at(i))) {
+                duplicateIndex = i;
+                break;
+            }
+        }
+        if (duplicateIndex < 0) {
+            normalized.append(candidate);
+            exactTargets.append(candidateIsExact);
+            identities.append(candidateIdentity);
+            if (wasAlias) {
+                changed = true;
+                if (actions) {
+                    actions->append(QJsonObject{
+                        {QStringLiteral("action"), QStringLiteral("canonicalized")},
+                        {QStringLiteral("from_target"), mount.target},
+                        {QStringLiteral("to_target"), candidate.target},
+                        {QStringLiteral("mount"), candidate.mount}});
+                }
+            }
+            continue;
+        }
+
+        changed = true;
+        const bool replaceAliasWithExact = candidateIsExact && !exactTargets.at(duplicateIndex);
+        const MountConfig removed =
+            replaceAliasWithExact ? normalized.at(duplicateIndex) : candidate;
+        if (replaceAliasWithExact) {
+            normalized[duplicateIndex] = candidate;
+            exactTargets[duplicateIndex] = true;
+            identities[duplicateIndex] = candidateIdentity;
+        }
+        if (actions) {
+            actions->append(QJsonObject{
+                {QStringLiteral("action"), QStringLiteral("removed_duplicate_alias")},
+                {QStringLiteral("target"), removed.target},
+                {QStringLiteral("mount"), removed.mount},
+                {QStringLiteral("kept_mount"), normalized.at(duplicateIndex).mount}});
+        }
+    }
+
+    if (changed) {
+        *mounts = std::move(normalized);
+    }
+    return changed;
+}
+
 bool mergeDiscoveredMounts(QVector<MountConfig>* mounts,
                            const QVector<DiscoveredApfsVolume>& volumes,
                            QJsonArray* added,
@@ -904,8 +1171,8 @@ bool mergeDiscoveredMounts(QVector<MountConfig>* mounts,
         const bool exists = std::any_of(mounts->begin(),
                                         mounts->end(),
                                         [&](const MountConfig& mount) {
-                                            return mount.target.compare(volume.target,
-                                                                        Qt::CaseInsensitive) == 0;
+                                            return targetsReferToSameRawRegion(
+                                                mount.target, volume.target, volumes);
                                         });
         if (exists) {
             continue;
@@ -955,13 +1222,24 @@ QVector<MountConfig> readMountConfigWithAutoDiscovery(
     }
 
     const DiscoveryScan scan = discoverApfsVolumes(kDefaultMaxPhysicalDrives, false);
+    QJsonArray aliasActions;
     QJsonArray added;
-    if (mergeDiscoveredMounts(&mounts, scan.volumes, &added, preferredMounts)) {
+    const bool aliasesChanged =
+        canonicalizeDiscoveredMountAliases(&mounts, scan.volumes, &aliasActions);
+    const bool mountsAdded = mergeDiscoveredMounts(&mounts, scan.volumes, &added, preferredMounts);
+    if (aliasesChanged || mountsAdded) {
         QString writeError;
         if (writeMountConfig(mounts, &writeError)) {
-            appendServiceLog(QStringLiteral("Auto-discovered APFS mounts: %1")
-                                 .arg(QString::fromUtf8(QJsonDocument(added).toJson(
-                                     QJsonDocument::Compact))));
+            if (!aliasActions.isEmpty()) {
+                appendServiceLog(QStringLiteral("Canonicalized APFS target aliases: %1")
+                                     .arg(QString::fromUtf8(QJsonDocument(aliasActions).toJson(
+                                         QJsonDocument::Compact))));
+            }
+            if (!added.isEmpty()) {
+                appendServiceLog(QStringLiteral("Auto-discovered APFS mounts: %1")
+                                     .arg(QString::fromUtf8(QJsonDocument(added).toJson(
+                                         QJsonDocument::Compact))));
+            }
         } else {
             appendServiceLog(writeError);
         }
@@ -1963,12 +2241,62 @@ int partitionParserSelfTest() {
                           hybridPartitions.first().scheme == QStringLiteral("MBR") &&
                           hybridPartitions.first().offset_bytes == 0 &&
                           hybridPartitions.first().size_bytes == 512ULL * 1024ULL;
-    const bool ok = regularOk && hybridOk;
+
+    DiscoveredApfsVolume hybridVolume;
+    hybridVolume.disk_index = 7;
+    hybridVolume.target = partitionDevicePath(7, 1);
+    hybridVolume.kind = QStringLiteral("mbr_partition");
+    hybridVolume.partition = PartitionCandidate{.index = 1,
+                                                 .scheme = QStringLiteral("MBR"),
+                                                 .mbr_type = 0x06,
+                                                 .offset_bytes = 0,
+                                                 .size_bytes = 512ULL * 1024ULL};
+    DiscoveredApfsVolume wholeDeviceVolume;
+    wholeDeviceVolume.disk_index = 7;
+    wholeDeviceVolume.target = physicalDrivePath(7);
+    wholeDeviceVolume.kind = QStringLiteral("whole_device");
+    const QVector<DiscoveredApfsVolume> hybridVolumes{wholeDeviceVolume, hybridVolume};
+
+    QVector<MountConfig> migratedMounts{
+        MountConfig{.target = physicalDrivePath(7),
+                    .mount = QStringLiteral("U:"),
+                    .read_only = false,
+                    .allow_raw_writes = true,
+                    .enabled = true}};
+    const bool migrated = canonicalizeDiscoveredMountAliases(&migratedMounts, hybridVolumes);
+    const bool migrationOk = migrated && migratedMounts.size() == 1 &&
+                             migratedMounts.first().target == hybridVolume.target &&
+                             migratedMounts.first().mount == QStringLiteral("U:") &&
+                             !migratedMounts.first().read_only &&
+                             migratedMounts.first().allow_raw_writes;
+
+    QVector<MountConfig> duplicateMounts{
+        MountConfig{.target = physicalDrivePath(7),
+                    .mount = QStringLiteral("U:"),
+                    .read_only = true,
+                    .allow_raw_writes = false,
+                    .enabled = true},
+        MountConfig{.target = hybridVolume.target,
+                    .mount = QStringLiteral("V:"),
+                    .read_only = false,
+                    .allow_raw_writes = true,
+                    .enabled = true}};
+    const bool deduplicated =
+        canonicalizeDiscoveredMountAliases(&duplicateMounts, hybridVolumes);
+    const bool deduplicationOk = deduplicated && duplicateMounts.size() == 1 &&
+                                 duplicateMounts.first().target == hybridVolume.target &&
+                                 duplicateMounts.first().mount == QStringLiteral("V:") &&
+                                 !duplicateMounts.first().read_only &&
+                                 duplicateMounts.first().allow_raw_writes;
+
+    const bool ok = regularOk && hybridOk && migrationOk && deduplicationOk;
     printJson(QJsonObject{{QStringLiteral("component"), QStringLiteral("apfs_mount_service")},
                           {QStringLiteral("check"), QStringLiteral("partition_parser_self_test")},
                           {QStringLiteral("ok"), ok},
                           {QStringLiteral("partition_count"), partitions.size()},
                           {QStringLiteral("hybrid_partition_count"), hybridPartitions.size()},
+                          {QStringLiteral("hybrid_alias_migration_ok"), migrationOk},
+                          {QStringLiteral("hybrid_alias_deduplication_ok"), deduplicationOk},
                           {QStringLiteral("partition"),
                            partitions.isEmpty() ? QJsonObject{}
                                                 : partitionToJson(partitions.first())}});
@@ -1986,8 +2314,12 @@ int configureDiscoveredMounts(const QStringList& args) {
     }
 
     const DiscoveryScan scan = discoverApfsVolumes(maxDrives, true);
+    QJsonArray aliasActions;
     QJsonArray added;
-    const bool changed = mergeDiscoveredMounts(&mounts, scan.volumes, &added);
+    const bool aliasesChanged =
+        canonicalizeDiscoveredMountAliases(&mounts, scan.volumes, &aliasActions);
+    const bool mountsAdded = mergeDiscoveredMounts(&mounts, scan.volumes, &added);
+    const bool changed = aliasesChanged || mountsAdded;
     if (changed && !writeMountConfig(mounts, &error)) {
         QTextStream(stderr) << error << Qt::endl;
         return 4;
@@ -2005,6 +2337,7 @@ int configureDiscoveredMounts(const QStringList& args) {
                {QStringLiteral("scan"), QStringLiteral("apfs_discovery")},
                {QStringLiteral("config"), configPath()},
                {QStringLiteral("changed"), changed},
+               {QStringLiteral("alias_actions"), aliasActions},
                {QStringLiteral("added_mounts"), added},
                {QStringLiteral("configured_mounts"), configured},
                {QStringLiteral("volumes"), volumes}});
@@ -2609,6 +2942,40 @@ int runConsole() {
                {QStringLiteral("configured_mounts"), array}});
     return 0;
 }
+
+int selfTestLogRotation() {
+    QTemporaryDir temporaryRoot;
+    if (!temporaryRoot.isValid()) {
+        return 1;
+    }
+    qputenv("APFS_FOR_WINDOWS_PROGRAMDATA_ROOT", temporaryRoot.path().toUtf8());
+    QDir().mkpath(logDir());
+
+    const QString servicePath =
+        QDir(logDir()).filePath(QStringLiteral("apfs_mount_service.log"));
+    const QString legacyWorkerPath =
+        QDir(logDir()).filePath(QStringLiteral("worker-legacy.trace.txt"));
+    for (const QString& path : {servicePath, legacyWorkerPath}) {
+        QFile oversized(path);
+        if (!oversized.open(QIODevice::WriteOnly) ||
+            !oversized.resize(kMaxLogBytes * 2 + 1)) {
+            return 1;
+        }
+    }
+
+    appendServiceLog(QStringLiteral("log-rotation-self-test"));
+    const QFileInfo serviceInfo(servicePath);
+    const QFileInfo legacyWorkerInfo(legacyWorkerPath);
+    const bool ok = serviceInfo.exists() && serviceInfo.size() > 0 &&
+                    serviceInfo.size() < kMaxLogBytes && !legacyWorkerInfo.exists();
+    printJson({{QStringLiteral("component"), QStringLiteral("apfs_mount_service")},
+               {QStringLiteral("check"), QStringLiteral("log_rotation")},
+               {QStringLiteral("ok"), ok},
+               {QStringLiteral("max_log_bytes"), QString::number(kMaxLogBytes)},
+               {QStringLiteral("service_log_bytes"), QString::number(serviceInfo.size())},
+               {QStringLiteral("legacy_worker_log_removed"), !legacyWorkerInfo.exists()}});
+    return ok ? 0 : 1;
+}
 #endif
 
 }  // namespace
@@ -2651,6 +3018,9 @@ int main(int argc, char* argv[]) {
     if (args.contains(QStringLiteral("--self-test-partitions"), Qt::CaseInsensitive)) {
         return partitionParserSelfTest();
     }
+    if (args.contains(QStringLiteral("--target-identity"), Qt::CaseInsensitive)) {
+        return targetIdentityDiagnostic(args);
+    }
     if (args.contains(QStringLiteral("--configure-discovered"), Qt::CaseInsensitive)) {
         return configureDiscoveredMounts(args);
     }
@@ -2662,6 +3032,9 @@ int main(int argc, char* argv[]) {
     }
     if (args.contains(QStringLiteral("--self-test-ipc"), Qt::CaseInsensitive)) {
         return selfTestControlIpc();
+    }
+    if (args.contains(QStringLiteral("--self-test-log-rotation"), Qt::CaseInsensitive)) {
+        return selfTestLogRotation();
     }
     if (args.contains(QStringLiteral("--run-console"), Qt::CaseInsensitive)) {
         return runConsole();

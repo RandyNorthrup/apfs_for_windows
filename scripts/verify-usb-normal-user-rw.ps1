@@ -18,6 +18,9 @@ param(
     [string]$CleanupStaleProofPrefix = "sak-user-rw-manual-proof-",
     [switch]$PreflightOnly,
     [switch]$CleanupStaleProofEntries,
+    [switch]$ExtendedFileActions,
+    [ValidateRange(2, 16)][int]$ConcurrentReaders = 4,
+    [ValidateRange(1048576, 33554432)][int]$ExtendedPayloadBytes = 4194304,
     [switch]$NoDiagnostics,
     [switch]$ElevatedSetWritable,
     [switch]$ElevatedRestore,
@@ -85,6 +88,39 @@ function Get-MountRoot {
         return "$Name\"
     }
     return $Name
+}
+
+function Convert-ToExtendedPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if ($Path.StartsWith("\\?\")) {
+        return $Path
+    }
+    if ($Path.StartsWith("\\")) {
+        return "\\?\UNC\$($Path.Substring(2))"
+    }
+    return "\\?\$Path"
+}
+
+function Get-ByteArraySha256 {
+    param([Parameter(Mandatory = $true)][byte[]]$Bytes)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($sha.ComputeHash($Bytes))).Replace("-", "")
+    } finally {
+        $sha.Dispose()
+    }
+}
+
+function Get-PathSha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace("-", "")
+    } finally {
+        $sha.Dispose()
+        $stream.Dispose()
+    }
 }
 
 function Get-ServicePid {
@@ -607,6 +643,24 @@ $cleanupErrors = @()
 $remainingStaleEntries = @()
 $workerTracePath = Join-Path $env:ProgramData "APFS for Windows\logs\worker-$($Mount.Substring(0, 1)).trace.txt"
 $serviceLogPath = Join-Path $env:ProgramData "APFS for Windows\logs\apfs_mount_service.log"
+$extendedSourceDir = Join-Path $artifactDir "$testName-extended-source"
+$extendedResults = [ordered]@{
+    requested = [bool]$ExtendedFileActions
+    ok = [bool](-not $ExtendedFileActions)
+    unicode_path = $null
+    unicode_names_match = $false
+    unicode_hash = $null
+    unicode_expected_hash = $null
+    long_path = $null
+    long_path_characters = 0
+    long_path_hash = $null
+    long_path_expected_hash = $null
+    robocopy_exit_code = $null
+    robocopy_hashes_match = $false
+    concurrent_reader_count = 0
+    concurrent_hashes_match = $false
+    recursive_cleanup = $false
+}
 
 try {
     $serviceExe = Join-Path $InstallRoot "apfs_mount_service.exe"
@@ -677,18 +731,131 @@ try {
     }
     $renamed = Test-Path -LiteralPath $renamedPath -PathType Leaf
     $renameHash = (Get-FileHash -LiteralPath $renamedPath -Algorithm SHA256).Hash
+
+    if ($ExtendedFileActions) {
+        $unicodeDirectoryName = ConvertFrom-Json -InputObject '"Unicode-R\u00e9sum\u00e9-\u65e5\u672c\u8a9e"'
+        $unicodeFileName = ConvertFrom-Json -InputObject '"na\u00efve-\u0434\u0430\u043d\u043d\u044b\u0435-\u6e2c\u8a66.txt"'
+        $unicodeContent = ConvertFrom-Json -InputObject '"APFS Unicode filename and content proof: caf\u00e9 \u65e5\u672c\u8a9e \u0434\u0430\u043d\u043d\u044b\u0435"'
+        $unicodeDirectory = Join-Path $testDir $unicodeDirectoryName
+        $unicodeFile = Join-Path $unicodeDirectory $unicodeFileName
+        $unicodePayload = [Text.Encoding]::UTF8.GetBytes("$unicodeContent`r`n")
+        $unicodeExpectedHash = Get-ByteArraySha256 -Bytes $unicodePayload
+        Invoke-FsMutationWithRetry -Name "create Unicode directory" -Timeout $TimeoutSeconds -Operation {
+            [IO.Directory]::CreateDirectory($unicodeDirectory) | Out-Null
+        }
+        Invoke-FsMutationWithRetry -Name "write Unicode file" -Timeout $TimeoutSeconds -Operation {
+            [IO.File]::WriteAllBytes($unicodeFile, $unicodePayload)
+        }
+        $unicodeHash = Get-PathSha256 -Path $unicodeFile
+        $unicodeDirectoryEntry = Get-ChildItem -LiteralPath $testDir -Directory | Where-Object {
+            $_.Name -ceq $unicodeDirectoryName
+        } | Select-Object -First 1
+        $unicodeFileEntry = Get-ChildItem -LiteralPath $unicodeDirectory -File | Where-Object {
+            $_.Name -ceq $unicodeFileName
+        } | Select-Object -First 1
+        $unicodeNamesMatch = [bool]($unicodeDirectoryEntry -and $unicodeFileEntry)
+
+        $longDirectory = $testDir
+        foreach ($index in 1..6) {
+            $segment = "long-segment-$index-" + ("x" * 34)
+            $longDirectory = Join-Path $longDirectory $segment
+        }
+        $longFile = Join-Path $longDirectory ("long-file-" + ("y" * 48) + ".bin")
+        $extendedLongDirectory = Convert-ToExtendedPath -Path $longDirectory
+        $extendedLongFile = Convert-ToExtendedPath -Path $longFile
+        $longPayload = [Text.Encoding]::UTF8.GetBytes("APFS long path proof $testName`r`n")
+        $longExpectedHash = Get-ByteArraySha256 -Bytes $longPayload
+        Invoke-FsMutationWithRetry -Name "create over-260-character directory" -Timeout $TimeoutSeconds -Operation {
+            [IO.Directory]::CreateDirectory($extendedLongDirectory) | Out-Null
+        }
+        Invoke-FsMutationWithRetry -Name "write over-260-character file" -Timeout $TimeoutSeconds -Operation {
+            [IO.File]::WriteAllBytes($extendedLongFile, $longPayload)
+        }
+        $longHash = Get-PathSha256 -Path $extendedLongFile
+
+        Remove-Item -LiteralPath $extendedSourceDir -Recurse -Force -ErrorAction SilentlyContinue
+        $sourceNested = Join-Path $extendedSourceDir "nested"
+        [IO.Directory]::CreateDirectory($sourceNested) | Out-Null
+        $largePayload = [byte[]]::new($ExtendedPayloadBytes)
+        [Random]::new(20260816).NextBytes($largePayload)
+        $largeSource = Join-Path $extendedSourceDir "large-payload.bin"
+        $smallSource = Join-Path $sourceNested "copy-source.txt"
+        [IO.File]::WriteAllBytes($largeSource, $largePayload)
+        [IO.File]::WriteAllText($smallSource, "APFS Robocopy nested proof`r`n", [Text.Encoding]::UTF8)
+        $largeExpectedHash = Get-ByteArraySha256 -Bytes $largePayload
+        $smallExpectedHash = Get-PathSha256 -Path $smallSource
+        $robocopyDestination = Join-Path $testDir "robocopy-destination"
+        robocopy $extendedSourceDir $robocopyDestination /E /R:2 /W:1 /NP /NFL /NDL /NJH /NJS | Out-Null
+        $robocopyExitCode = $LASTEXITCODE
+        if ($robocopyExitCode -ge 8) {
+            throw "Robocopy failed with exit code $robocopyExitCode"
+        }
+        $largeDestination = Join-Path $robocopyDestination "large-payload.bin"
+        $smallDestination = Join-Path (Join-Path $robocopyDestination "nested") "copy-source.txt"
+        $robocopyHashesMatch =
+            (Get-PathSha256 -Path $largeDestination) -ieq $largeExpectedHash -and
+            (Get-PathSha256 -Path $smallDestination) -ieq $smallExpectedHash
+
+        $readerJobs = @(foreach ($reader in 1..$ConcurrentReaders) {
+            Start-Job -ScriptBlock {
+                param($Path)
+                (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+            } -ArgumentList $largeDestination
+        })
+        try {
+            $concurrentHashes = @($readerJobs | Receive-Job -Wait)
+        } finally {
+            $readerJobs | Remove-Job -Force -ErrorAction SilentlyContinue
+        }
+        $concurrentHashesMatch = $concurrentHashes.Count -eq $ConcurrentReaders -and
+            @($concurrentHashes | Where-Object { $_ -ine $largeExpectedHash }).Count -eq 0
+
+        $extendedResults = [ordered]@{
+            requested = $true
+            ok = [bool](
+                $unicodeNamesMatch -and
+                $unicodeHash -ieq $unicodeExpectedHash -and
+                $longFile.Length -gt 260 -and
+                $longHash -ieq $longExpectedHash -and
+                $robocopyExitCode -lt 8 -and
+                $robocopyHashesMatch -and
+                $concurrentHashesMatch)
+            unicode_path = $unicodeFile
+            unicode_names_match = $unicodeNamesMatch
+            unicode_hash = $unicodeHash
+            unicode_expected_hash = $unicodeExpectedHash
+            long_path = $longFile
+            long_path_characters = $longFile.Length
+            long_path_hash = $longHash
+            long_path_expected_hash = $longExpectedHash
+            robocopy_exit_code = $robocopyExitCode
+            robocopy_hashes_match = [bool]$robocopyHashesMatch
+            concurrent_reader_count = $concurrentHashes.Count
+            concurrent_hashes_match = [bool]$concurrentHashesMatch
+            recursive_cleanup = $false
+        }
+        if (-not $extendedResults.ok) {
+            throw "Extended APFS file-action verification failed."
+        }
+    }
+
     Invoke-FsMutationWithRetry -Name "normal-user delete proof file" -Timeout $TimeoutSeconds -Operation {
         Remove-Item -LiteralPath $renamedPath -Force
     }
     $fileDeleted = -not (Test-Path -LiteralPath $renamedPath)
     Invoke-FsMutationWithRetry -Name "normal-user delete proof directory" -Timeout $TimeoutSeconds -Operation {
-        Remove-Item -LiteralPath $testDir -Force
+        Remove-Item -LiteralPath $testDir -Recurse:$ExtendedFileActions -Force
     }
     $dirDeleted = -not (Test-Path -LiteralPath $testDir)
+    if ($ExtendedFileActions) {
+        $extendedResults.recursive_cleanup = [bool]$dirDeleted
+        $extendedResults.ok = [bool]($extendedResults.ok -and $dirDeleted)
+    }
 } catch {
     $operationError = $_.Exception.Message
     Remove-Item -LiteralPath $testDir -Recurse -Force -ErrorAction SilentlyContinue
 } finally {
+    Remove-Item -LiteralPath $extendedSourceDir -Recurse -Force -ErrorAction SilentlyContinue
     $serviceExe = Join-Path $InstallRoot "apfs_mount_service.exe"
     $restoreTarget = $expectedTarget
     if (Test-Path -LiteralPath $statePathResolved -PathType Leaf) {
@@ -752,6 +919,7 @@ $ok = $setupExit -eq 0 -and
     ($renameHash -ieq $expectedHash) -and
     $fileDeleted -and
     $dirDeleted -and
+    $extendedResults.ok -and
     $restoreOk -and
     (-not $CleanupStaleProofEntries -or ($remainingStaleEntries.Count -eq 0 -and $cleanupErrors.Count -eq 0)) -and
     $state -and
@@ -802,6 +970,7 @@ $result = [ordered]@{
         renamed_file_hash = $renameHash
         file_deleted = [bool]$fileDeleted
         directory_deleted = [bool]$dirDeleted
+        extended_file_actions = $extendedResults
         error = $operationError
     }
     cleanup_stale = [ordered]@{

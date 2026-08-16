@@ -230,6 +230,12 @@ $steps += Invoke-CertificationStep -Name "installed_app_registration" -AllowedEx
     powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-installed-app-registration.ps1
 }
 
+$usbAliasDeduplication = Invoke-CertificationStep -Name "service_raw_alias_deduplication" -AllowedExitCodes @(0, 1) -Script {
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-service-raw-alias-deduplication.ps1 `
+        -DiskNumber $UsbDiskNumber -PartitionNumber $UsbPartitionNumber -ExpectedMount $UsbMount
+}
+$steps += $usbAliasDeduplication
+
 if ($RunRepair) {
     $steps += Invoke-CertificationStep -Name "repair_install" -Script {
         if (Test-CurrentProcessAdmin) {
@@ -354,7 +360,8 @@ if ($RunUsbWriteProof) {
             -DiskNumber $UsbDiskNumber -PartitionNumber $UsbPartitionNumber `
             -ExpectedSerial $UsbExpectedSerial -MinimumDiskBytes $UsbMinimumDiskBytes `
             -MaximumDiskBytes $UsbMaximumDiskBytes -Mount $UsbMount `
-            -CleanupStaleProofEntries -NoDiagnostics
+            -CleanupStaleProofEntries -ExtendedFileActions -ExtendedPayloadBytes 1048576 `
+            -NoDiagnostics
     }
 } else {
     $steps += [pscustomobject][ordered]@{
@@ -394,11 +401,21 @@ $serviceRecoveryPolicyOk = @($steps | Where-Object { $_.name -eq "service_recove
 $startMenuEntriesOk = @($steps | Where-Object { $_.name -eq "start_menu_entries" -and $_.payload_ok -eq $true }).Count -gt 0
 $installedAppRegistrationOk = @($steps | Where-Object { $_.name -eq "installed_app_registration" -and $_.payload_ok -eq $true }).Count -gt 0
 $installedPersistenceOk = $serviceRecoveryPolicyOk -and $startMenuEntriesOk -and $installedAppRegistrationOk
+$usbAliasDeduplicationOk = $usbAliasDeduplication.parsed_json -and $usbAliasDeduplication.json.ok -eq $true
 $mountedUsbFileActionsPreflightReady = $mountedUsbPreflight.parsed_json -and $mountedUsbPreflight.json.ok -eq $true
 $mountedUsbFileActionsOk = @($steps | Where-Object { $_.name -eq "usb_mounted_file_actions" -and $_.payload_ok -eq $true }).Count -gt 0
 $usbPreflightReady = $usbPreflight.parsed_json -and $usbPreflight.json.ok -eq $true
 $fullUsbOk = @($steps | Where-Object { $_.name -eq "usb_normal_user_rw" -and $_.payload_ok -eq $true }).Count -gt 0
-$usbRequirementOk = if ($RunUsbWriteProof) { $fullUsbOk } else { $usbPreflightReady -and $fullUsbOk }
+$extendedUsbFileActionsOk = @($steps | Where-Object {
+    $_.name -eq "usb_normal_user_rw" -and
+    $_.parsed_json -eq $true -and
+    $_.json.operations.extended_file_actions.ok -eq $true
+}).Count -gt 0
+$usbRequirementOk = if ($RunUsbWriteProof) {
+    $usbAliasDeduplicationOk -and $fullUsbOk -and $extendedUsbFileActionsOk
+} else {
+    $usbAliasDeduplicationOk -and $usbPreflightReady -and $fullUsbOk
+}
 $mountedUsbRequirementOk = if ($RunUsbMountedFileActions) { $mountedUsbFileActionsOk } else { $true }
 
 $result = [ordered]@{
@@ -414,10 +431,12 @@ $result = [ordered]@{
     start_menu_entries_ok = [bool]$startMenuEntriesOk
     installed_app_registration_ok = [bool]$installedAppRegistrationOk
     installed_persistence_ok = [bool]$installedPersistenceOk
+    usb_alias_deduplication_ok = [bool]$usbAliasDeduplicationOk
     mounted_usb_file_actions_preflight_ready = [bool]$mountedUsbFileActionsPreflightReady
     mounted_usb_file_actions_ok = [bool]$mountedUsbFileActionsOk
     usb_preflight_ready = [bool]$usbPreflightReady
     full_usb_rw_ok = [bool]$fullUsbOk
+    extended_usb_file_actions_ok = [bool]$extendedUsbFileActionsOk
     no_reboot_performed = $true
     current_user = [ordered]@{
         identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name

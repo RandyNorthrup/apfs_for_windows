@@ -49,9 +49,10 @@ using PNTSTATUS = NTSTATUS*;
 namespace {
 
 constexpr uint64_t kFallbackProbeBytes = 1024ULL * 1024ULL * 1024ULL;
-constexpr uint64_t kDefaultMaxFileReadBytes = 512ULL * 1024ULL * 1024ULL;
+constexpr uint64_t kDefaultMaxFileReadBytes = std::numeric_limits<uint64_t>::max();
 constexpr uint64_t kDefaultMaxMutationBytes = 64ULL * 1024ULL * 1024ULL;
 constexpr uint64_t kAllocationUnit = 4096;
+constexpr qint64 kMaxTraceBytes = 8LL * 1024LL * 1024LL;
 
 QString normalizeApfsPath(const QString& input) {
     QString path = input.trimmed();
@@ -184,6 +185,16 @@ void trace(const QString& message) {
         return;
     }
     QMutexLocker locker(&gTraceMutex);
+    const QFileInfo traceInfo(path);
+    if (traceInfo.exists() && traceInfo.size() >= kMaxTraceBytes) {
+        const QString archivePath = path + QStringLiteral(".1");
+        QFile::remove(archivePath);
+        if (traceInfo.size() > kMaxTraceBytes * 2) {
+            QFile::remove(path);
+        } else {
+            QFile::rename(path, archivePath);
+        }
+    }
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
         return;
@@ -315,9 +326,9 @@ public:
         freeBytes_ = detection->free_bytes;
         targetContainerBytes_ = detection->total_bytes != 0 ? detection->total_bytes : size;
 
-        const auto root = sak::PartitionApfsFileSystemReader::listDirectory(device_.get(),
-                                                                            QStringLiteral("/"),
-                                                                            1);
+        readerSession_ =
+            std::make_unique<sak::PartitionApfsFileSystemReaderSession>(device_.get());
+        const auto root = readerSession_->listDirectory(QStringLiteral("/"), 1);
         if (!root.volume_name.trimmed().isEmpty()) {
             volumeLabel_ = root.volume_name.trimmed().left(32);
         }
@@ -380,24 +391,24 @@ public:
         if (offset >= entry.sizeBytes) {
             return STATUS_END_OF_FILE;
         }
-        const uint64_t end = std::min<uint64_t>(entry.sizeBytes, offset + length);
-        const uint64_t bytesNeeded = std::min<uint64_t>(end, maxFileReadBytes_);
-        if (offset >= bytesNeeded) {
+        if (offset >= maxFileReadBytes_) {
             return STATUS_END_OF_FILE;
         }
+        const uint64_t available = std::min<uint64_t>(entry.sizeBytes - offset,
+                                                      maxFileReadBytes_ - offset);
+        const uint64_t bytesNeeded = std::min<uint64_t>(length, available);
 
         QMutexLocker locker(&ioMutex_);
-        const auto file = sak::PartitionApfsFileSystemReader::readFile(
-            device_.get(), entry.path, bytesNeeded);
+        const auto file = readerSession_->readFileRange(entry.path, offset, bytesNeeded);
         if (!file.ok || !file.blockers.isEmpty()) {
             return STATUS_ACCESS_DENIED;
         }
-        if (offset >= static_cast<uint64_t>(file.data.size())) {
+        if (file.data.isEmpty()) {
             return STATUS_END_OF_FILE;
         }
-        const uint64_t available = static_cast<uint64_t>(file.data.size()) - offset;
-        const ULONG toCopy = static_cast<ULONG>(std::min<uint64_t>(length, available));
-        std::memcpy(buffer, file.data.constData() + offset, toCopy);
+        const ULONG toCopy = static_cast<ULONG>(
+            std::min<uint64_t>(length, static_cast<uint64_t>(file.data.size())));
+        std::memcpy(buffer, file.data.constData(), toCopy);
         *transferred = toCopy;
         return STATUS_SUCCESS;
     }
@@ -412,8 +423,8 @@ public:
         }
 
         QMutexLocker locker(&ioMutex_);
-        const auto listing = sak::PartitionApfsFileSystemReader::listDirectory(
-            device_.get(), directory.path, sak::kPartitionApfsDefaultBrowseEntryLimit);
+        const auto listing = readerSession_->listDirectory(
+            directory.path, sak::kPartitionApfsDefaultBrowseEntryLimit);
         if (!listing.blockers.isEmpty()) {
             return STATUS_OBJECT_NAME_NOT_FOUND;
         }
@@ -763,7 +774,7 @@ public:
         return status;
     }
 
-    NTSTATUS canDelete(const FileContext* context) const {
+    NTSTATUS canDelete(const FileContext* context) {
         if (readOnly_) {
             return STATUS_MEDIA_WRITE_PROTECTED;
         }
@@ -776,8 +787,7 @@ public:
                 return STATUS_NOT_SUPPORTED;
             }
             QMutexLocker locker(&ioMutex_);
-            const auto listing = sak::PartitionApfsFileSystemReader::listDirectory(
-                device_.get(), context->entry.path, 1);
+            const auto listing = readerSession_->listDirectory(context->entry.path, 1);
             if (!listing.ok || !listing.blockers.isEmpty()) {
                 return STATUS_ACCESS_DENIED;
             }
@@ -1117,8 +1127,8 @@ private:
             return STATUS_SUCCESS;
         }
 
-        const auto listing = sak::PartitionApfsFileSystemReader::listDirectory(
-            device_.get(), parentPath(normalized), sak::kPartitionApfsDefaultBrowseEntryLimit);
+        const auto listing = readerSession_->listDirectory(
+            parentPath(normalized), sak::kPartitionApfsDefaultBrowseEntryLimit);
         if (!listing.blockers.isEmpty()) {
             return STATUS_OBJECT_NAME_NOT_FOUND;
         }
@@ -1198,9 +1208,9 @@ private:
             return STATUS_UNRECOGNIZED_VOLUME;
         }
 
-        const auto root = sak::PartitionApfsFileSystemReader::listDirectory(newDevice.get(),
-                                                                            QStringLiteral("/"),
-                                                                            1);
+        auto newReaderSession =
+            std::make_unique<sak::PartitionApfsFileSystemReaderSession>(newDevice.get());
+        const auto root = newReaderSession->listDirectory(QStringLiteral("/"), 1);
         if (!root.blockers.isEmpty()) {
             if (error) {
                 *error = root.blockers.join(QStringLiteral("; "));
@@ -1208,7 +1218,9 @@ private:
             return STATUS_ACCESS_DENIED;
         }
 
+        readerSession_.reset();
         device_ = std::move(newDevice);
+        readerSession_ = std::move(newReaderSession);
         totalBytes_ = detection->total_bytes;
         freeBytes_ = detection->free_bytes;
         targetContainerBytes_ = detection->total_bytes != 0 ? detection->total_bytes : size;
@@ -1274,6 +1286,7 @@ private:
         }
 
         QMutexLocker locker(&ioMutex_);
+        readerSession_.reset();
         device_.reset();
         QString tempPath;
         sak::PartitionApfsImageCheckpointCommitResult result;
@@ -1351,6 +1364,7 @@ private:
         }
 
         QMutexLocker locker(&ioMutex_);
+        readerSession_.reset();
         device_.reset();
         const auto result = sak::PartitionApfsWriter::commitRawFileWrite(
             {.target_path = target_,
@@ -1385,6 +1399,7 @@ private:
         }
 
         QMutexLocker locker(&ioMutex_);
+        readerSession_.reset();
         device_.reset();
         QString tempPath;
         sak::PartitionApfsImageCheckpointCommitResult result;
@@ -1436,6 +1451,7 @@ private:
         }
 
         QMutexLocker locker(&ioMutex_);
+        readerSession_.reset();
         device_.reset();
         QString tempPath;
         sak::PartitionApfsImageCheckpointCommitResult result;
@@ -1491,6 +1507,7 @@ private:
         }
 
         QMutexLocker locker(&ioMutex_);
+        readerSession_.reset();
         device_.reset();
         QString tempPath;
         sak::PartitionApfsImageCheckpointCommitResult result;
@@ -1549,6 +1566,7 @@ private:
         }
 
         QMutexLocker locker(&ioMutex_);
+        readerSession_.reset();
         device_.reset();
         QString tempPath;
         sak::PartitionApfsImageCheckpointCommitResult result;
@@ -1613,6 +1631,7 @@ private:
         }
 
         QMutexLocker locker(&ioMutex_);
+        readerSession_.reset();
         device_.reset();
         QString tempPath;
         sak::PartitionApfsImageCheckpointCommitResult result;
@@ -1693,8 +1712,7 @@ private:
             return STATUS_SUCCESS;
         }
         QMutexLocker locker(&ioMutex_);
-        const auto file = sak::PartitionApfsFileSystemReader::readFile(
-            device_.get(), entry.path, entry.sizeBytes);
+        const auto file = readerSession_->readFile(entry.path, entry.sizeBytes);
         if (!file.ok || !file.blockers.isEmpty()) {
             trace(QStringLiteral("read for mutation failed: %1")
                       .arg(file.blockers.join(QStringLiteral("; "))));
@@ -1739,6 +1757,7 @@ private:
     QString target_;
     QString volumeLabel_{QStringLiteral("APFS")};
     std::unique_ptr<QIODevice> device_;
+    std::unique_ptr<sak::PartitionApfsFileSystemReaderSession> readerSession_;
     mutable QMutex ioMutex_;
     mutable QMutex contextMutex_;
     std::vector<std::unique_ptr<FileContext>> activeContexts_;
