@@ -281,7 +281,18 @@ public:
         fitToScreen();
     }
 
-    QJsonObject selfTestResult() const {
+    QJsonObject selfTestResult(const QIcon& trayIcon, const QMenu& trayMenu) const {
+        QJsonArray trayActions;
+        bool hasTrayOpenAction = false;
+        bool hasTrayExitAction = false;
+        for (const QAction* action : trayMenu.actions()) {
+            if (!action || action->isSeparator()) {
+                continue;
+            }
+            trayActions.append(action->text());
+            hasTrayOpenAction = hasTrayOpenAction || action->text() == QStringLiteral("Open");
+            hasTrayExitAction = hasTrayExitAction || action->text() == QStringLiteral("Exit");
+        }
         return QJsonObject{{QStringLiteral("component"), QStringLiteral("apfs_mount_manager")},
                            {QStringLiteral("ui"), QStringLiteral("available")},
                            {QStringLiteral("accessible_table_name"),
@@ -304,7 +315,13 @@ public:
                            {QStringLiteral("has_unmount_button"),
                             !unmountButton_->accessibleName().isEmpty()},
                            {QStringLiteral("has_copy_button"),
-                            !copyButton_->accessibleName().isEmpty()}};
+                            !copyButton_->accessibleName().isEmpty()},
+                           {QStringLiteral("tray_icon_available"), !trayIcon.isNull()},
+                           {QStringLiteral("tray_context_actions"), trayActions},
+                           {QStringLiteral("has_tray_open_action"), hasTrayOpenAction},
+                           {QStringLiteral("has_tray_exit_action"), hasTrayExitAction},
+                           {QStringLiteral("quit_on_last_window_closed"),
+                            QApplication::quitOnLastWindowClosed()}};
     }
 
 private:
@@ -673,9 +690,16 @@ int main(int argc, char* argv[]) {
 
     MountManagerWindow window;
     window.setWindowIcon(icon);
+    QMenu trayMenu;
+    QAction openAction(QStringLiteral("Open"), &trayMenu);
+    QAction exitAction(QStringLiteral("Exit"), &trayMenu);
+    trayMenu.addAction(&openAction);
+    trayMenu.addSeparator();
+    trayMenu.addAction(&exitAction);
     if (rawArgs.contains(QStringLiteral("--self-test"), Qt::CaseInsensitive)) {
-        printJson(window.selfTestResult());
-        return window.selfTestResult().value(QStringLiteral("health_ok")).toBool(false) ? 0 : 1;
+        const QJsonObject result = window.selfTestResult(icon, trayMenu);
+        printJson(result);
+        return result.value(QStringLiteral("health_ok")).toBool(false) ? 0 : 1;
     }
 
     QLocalSocket existingInstance;
@@ -715,13 +739,6 @@ int main(int argc, char* argv[]) {
             window.activateWindow();
         }
     });
-
-    QMenu trayMenu;
-    QAction openAction(QStringLiteral("Open"), &trayMenu);
-    QAction exitAction(QStringLiteral("Exit"), &trayMenu);
-    trayMenu.addAction(&openAction);
-    trayMenu.addSeparator();
-    trayMenu.addAction(&exitAction);
 
     QSystemTrayIcon trayIcon(icon);
     trayIcon.setToolTip(QStringLiteral("APFS for Windows"));

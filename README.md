@@ -53,8 +53,9 @@ Current state:
   modes.
 - `apfs_mount_manager` creates a persistent tray icon using a stacked `AP` over
   `FS` icon. Right-click menu includes `Open` and `Exit`; closing the window no
-  longer exits the app. Install/repair registers hidden `--tray` launch for each
-  Windows logon, and a local single-instance channel prevents duplicate icons.
+  longer exits the app. Install/repair registers a machine-wide logon task plus
+  an HKLM Run fallback for hidden `--tray` launch, and a local single-instance
+  channel prevents duplicate icons.
 - `apfs_core_selftest` verifies copied APFS writer/reader behavior against
   temporary images and a file-backed raw target: format/list/read, root and
   nested file write/rename/delete, directory create/delete/rename/move, raw
@@ -108,6 +109,9 @@ stops/relaunches the tray manager when run through the guarded launcher, keeps
 `ApfsForWindowsMountService` Automatic/running, verifies auto-discovered mounts
 and installed binary hashes, and writes
 `artifacts\repair\install-repair-proof.json`. It does not reboot.
+Packaged install/repair resolves Qt DLLs and `platforms\qwindows.dll` from the
+extracted package before using a developer Qt path. Both scripts support
+non-admin `-ValidatePayloadOnly` checks.
 
 To pin one known mount to read-only during repair, pass both values:
 
@@ -217,9 +221,10 @@ Uninstall:
 .\scripts\uninstall-apfs-for-windows.ps1 -RemoveFiles
 ```
 
-The uninstaller stops the service, waits for worker/mount teardown through the
-service stop path, deletes the service, optionally removes installed files, and
-writes `artifacts\uninstall\uninstall-proof.json`.
+The uninstaller stops the service, waits for worker/mount and tray-manager
+teardown, deletes the service, removes the logon task and HKLM Run fallback,
+optionally removes installed files, and writes
+`artifacts\uninstall\uninstall-proof.json`.
 Install/repair also deploy Start Menu shortcuts for the manager and elevated
 uninstall flow; `scripts\verify-start-menu-entries.ps1` verifies those shortcuts
 and the installed uninstall script.
@@ -237,7 +242,16 @@ Build a release ZIP without installing:
 This stages `artifacts\package\APFS-for-Windows-0.1.0`, creates
 `artifacts\package\APFS-for-Windows-0.1.0.zip`, and verifies the required
 binaries, Qt runtime files, install/repair/uninstall scripts, README, license
-notices, and APFS core provenance note are present.
+notices, and APFS core provenance note are present. Package verification also
+runs install and repair payload-only validation from the staged directory.
+
+Windows 11 VM lifecycle certification now covers clean package install,
+Automatic service start, saved `R:` mount restoration across two VM reboots,
+exact file hash and read-only enforcement, one interactive tray process with
+`Open` and `Exit`, and packaged uninstall with no product residue. WinFsp and the
+APFS fixture remain after uninstall. Sanitized proof is tracked at
+`docs\evidence\windows-vm-install-lifecycle-2026-08-16.json`. The host PC was not
+rebooted.
 
 License notices:
 
@@ -508,9 +522,9 @@ Verified copied-core mutation evidence:
   earlier installed service/mount persistence state before the normal-user RW
   diagnostic: service Automatic, `Z:` mounted, expected file hash matches, and
   write probe is denied. Current post-repair state separately confirms `Y:` is
-  read-only with raw writes disabled. Actual post-reboot proof still requires a
-  reboot or armed next-login verifier run; no reboot was performed in this
-  session.
+  read-only with raw writes disabled. Host post-reboot proof remains prohibited,
+  but Windows 11 VM reboot persistence and uninstall lifecycle proof now pass and
+  are tracked under `docs\evidence`.
 - `artifacts\boot-persistence\apfs-persistence-y-verification.json` proves the
   current no-reboot `Y:` persistence state: service Automatic/running, mounted
   root entries visible, existing movie file read probe returns 4096 bytes, and a

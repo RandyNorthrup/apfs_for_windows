@@ -2,8 +2,8 @@
   "component": "apfs_for_windows",
   "check": "apple_vm_roundtrip",
   "ok": true,
-  "completed_utc": "2026-08-16T19:36:32.9507248Z",
-  "duration_seconds": 30.321,
+  "completed_utc": "2026-08-16T20:20:37.2689243Z",
+  "duration_seconds": 32.6,
   "credential_material_recorded": false,
   "no_host_reboot_performed": true,
   "native_macos_operations": {
@@ -19,7 +19,7 @@
     "unicode_file": "D15C89BA02965E34B5E292AEB8D7B7D0A12B538FB6DC623DD998327D3F118DBC",
     "macos_hardlink_file": "76FD91615F8B856AB498A543707EE1BAC16AD6F56E597584538A0356389281DB",
     "windows_return_file": "A4DDBF29B458AABD9FA5E69BDDF059C7C61A3E1779E6B1E6954CEFEECF580964",
-    "windows_return_image": "1CF594966DA5DBA8503ECD3987F601899BD43A4E9FFC6C56649360D8DB07AC9B"
+    "windows_return_image": "B65080703A8F86C781A025EBC60FB38288DB586939904B11D9E759E63F34C292"
   },
   "preserved_apple_state": {
     "symlink_target": "../WinProof/Nested/windows-renamed-by-macos.txt",
@@ -36,12 +36,12 @@
     "symlink_inode_mode": 41453,
     "symlink_has_data_extents": false
   },
-  "raw_local_proof_sha256": "8FC3C80A75CAFFA285FD22600638668D110900EF83F72A5F85D223EB77E03B93",
+  "raw_local_proof_sha256": "68FA278E2928738E5754BB1C4D034A4E23CAD2EBEFA564FAE2940420B0274EB1",
   "fsck_log_sha256": {
-    "first_before": "EBFBB22A03B7CB7F2D322AD048B65F69893067C5602F1F325CCB01316D77868A",
-    "first_after": "8F02D230CD7FC818B2E44DF2028A31E1969DA3E9762F938DF1F8CEFAB6EF93DE",
-    "final_before": "1D278908010D8FE6AE37BD37967A9044941E4DBEE9C282C6D63EF62393B13B32",
-    "final_after": "C9180E8B78476958DE24AAA7031F5682B203AE7057B26B6A4C654E21282B65F7"
+    "first_before": "A060F9BAA2EFECFBE3E77F9552EFED62E90F4FA2B7154E4EB68AE16A76E678C8",
+    "first_after": "131410F733074CD12C7404EBF48289B8D12E7A3498727FBF1BC3AD04C0D22BDF",
+    "final_before": "0084604267959BA48E2A44144FFECD2CE72FA0C63B6AC16A2F13FF26D18CDD3B",
+    "final_after": "65401B10996AE007CE6C4ED838E4825F92BA5C33A23DD02088AC44DC4A8CF5FD"
   },
   "remaining_scope": [
     "Windows-native xattr and symbolic-link target creation or mutation",

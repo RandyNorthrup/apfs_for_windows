@@ -73,13 +73,19 @@ $managerProcessesBefore = @(Get-CimInstance Win32_Process -Filter "Name='apfs_mo
 foreach ($manager in $managerProcessesBefore) {
     Stop-Process -Id $manager.ProcessId -Force -ErrorAction SilentlyContinue
 }
-$managerProcessesAfter = @(Get-CimInstance Win32_Process -Filter "Name='apfs_mount_manager.exe'" -ErrorAction SilentlyContinue |
-    Where-Object {
-        $_.ExecutablePath -and
-        [IO.Path]::GetFullPath([string]$_.ExecutablePath).Equals(
-            $managerPath,
-            [StringComparison]::OrdinalIgnoreCase)
-    })
+$managerStopDeadline = [DateTime]::UtcNow.AddSeconds(10)
+do {
+    $managerProcessesAfter = @(Get-CimInstance Win32_Process -Filter "Name='apfs_mount_manager.exe'" -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.ExecutablePath -and
+            [IO.Path]::GetFullPath([string]$_.ExecutablePath).Equals(
+                $managerPath,
+                [StringComparison]::OrdinalIgnoreCase)
+        })
+    if ($managerProcessesAfter.Count -gt 0) {
+        Start-Sleep -Milliseconds 100
+    }
+} while ($managerProcessesAfter.Count -gt 0 -and [DateTime]::UtcNow -lt $managerStopDeadline)
 $startMenuRemoved = $false
 if (Test-Path -LiteralPath $StartMenuDir) {
     Remove-Item -LiteralPath $StartMenuDir -Recurse -Force
@@ -98,7 +104,18 @@ if (Test-Path -LiteralPath $registryKeyPath) {
 $startupKeyPath = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run"
 $startupValueName = "APFS for Windows Mount Manager"
 Remove-ItemProperty -Path $startupKeyPath -Name $startupValueName -Force -ErrorAction SilentlyContinue
-$startupEntryRemoved = $null -eq (Get-ItemPropertyValue -Path $startupKeyPath -Name $startupValueName -ErrorAction SilentlyContinue)
+$startupKey = Get-Item -LiteralPath $startupKeyPath -ErrorAction SilentlyContinue
+$startupEntryRemoved = $null -eq $startupKey -or
+    $null -eq $startupKey.GetValue($startupValueName, $null)
+if ($startupKey) {
+    $startupKey.Close()
+}
+$startupTaskName = "APFS for Windows Mount Manager"
+$startupTaskBefore = Get-ScheduledTask -TaskName $startupTaskName -ErrorAction SilentlyContinue
+if ($startupTaskBefore) {
+    Unregister-ScheduledTask -TaskName $startupTaskName -Confirm:$false
+}
+$startupTaskRemoved = $null -eq (Get-ScheduledTask -TaskName $startupTaskName -ErrorAction SilentlyContinue)
 $installRootRemoved = $false
 if ($RemoveFiles -and (Test-Path -LiteralPath $InstallRoot)) {
     Remove-Item -LiteralPath $InstallRoot -Recurse -Force
@@ -106,7 +123,7 @@ if ($RemoveFiles -and (Test-Path -LiteralPath $InstallRoot)) {
 }
 
 $ok = $null -eq $serviceAfter -and $startMenuRemoved -and $registryRemoved -and
-    $startupEntryRemoved -and $managerProcessesAfter.Count -eq 0 -and
+    $startupEntryRemoved -and $startupTaskRemoved -and $managerProcessesAfter.Count -eq 0 -and
     ((-not $RemoveFiles) -or $installRootRemoved)
 $result = [ordered]@{
     component = "apfs_for_windows"
@@ -121,6 +138,8 @@ $result = [ordered]@{
     uninstall_registry_removed = [bool]$registryRemoved
     manager_startup_value = $startupValueName
     manager_startup_removed = [bool]$startupEntryRemoved
+    manager_startup_task = $startupTaskName
+    manager_startup_task_removed = [bool]$startupTaskRemoved
     manager_processes_stopped = [bool]($managerProcessesAfter.Count -eq 0)
     manager_processes_before = $managerProcessesBefore
     service_before = if ($serviceBefore) {

@@ -81,7 +81,11 @@ $ok = $controlSelfTest.exit_code -eq 0 -and
     $managerSelfTest.json.has_letter_button -eq $true -and
     $managerSelfTest.json.has_mode_button -eq $true -and
     $managerSelfTest.json.has_policy_button -eq $true -and
-    $managerSelfTest.json.has_unmount_button -eq $true
+    $managerSelfTest.json.has_unmount_button -eq $true -and
+    $managerSelfTest.json.tray_icon_available -eq $true -and
+    $managerSelfTest.json.has_tray_open_action -eq $true -and
+    $managerSelfTest.json.has_tray_exit_action -eq $true -and
+    $managerSelfTest.json.quit_on_last_window_closed -eq $false
 
 $result = [ordered]@{
     component = "apfs_for_windows"

@@ -2,8 +2,8 @@
   "component": "apfs_for_windows",
   "check": "certification_orchestrator",
   "ok": true,
-  "started_utc": "2026-08-16T19:35:20.2033161Z",
-  "completed_utc": "2026-08-16T19:37:42.8765837Z",
+  "started_utc": "2026-08-16T20:19:08.0036395Z",
+  "completed_utc": "2026-08-16T20:21:47.1752402Z",
   "step_count": 28,
   "failed_steps": [],
   "skipped_steps": [
@@ -50,6 +50,7 @@
     "service_start_mode": "Auto",
     "installed_binaries_match_build": true,
     "tray_process_count": 1,
+    "tray_startup_task_registered": true,
     "pending_uac_count": 0,
     "usb_mount_exists": true,
     "usb_mount_read_only": true,
@@ -57,14 +58,14 @@
   },
   "release": {
     "version": "0.1.0",
-    "zip_size_bytes": 12835709,
-    "zip_sha256": "22CA47EBF465286F9E61A67E6AE96171AEA8AE0FC85C1578C4FC99CDA7721907"
+    "zip_size_bytes": 12839605,
+    "zip_sha256": "28065BA2C9BEE49E6A61985F21F597A586247D3F7D9767A53F2E26E680AC31B0"
   },
   "raw_artifact_sha256": {
-    "certification": "4A63561E60C107427059D1E31ED64A7E269415EAAE666344FC6A182C36AF5627",
-    "repair": "B557D935B7FDD04A3FBD65ECB707C968161A67068DC450C09E6EFB28E65A91B3",
-    "usb_rw": "8055057BDC205C93B1FC4687A1C5B673850CA11E9D3681ADFA203B566C9CA3A4",
-    "apple_vm": "8FC3C80A75CAFFA285FD22600638668D110900EF83F72A5F85D223EB77E03B93"
+    "certification": "FF126BEAEA75B62C72BC20FFAF902924ED552693A6CCB493C494B3F2355F5E0F",
+    "repair": "1FABAC61ED4F0CA926958648ABF1917B66AC9DC820170F486D093FABFE75370A",
+    "usb_rw": "26ED7B9B07A4787CEC4D2D3EE3288DF64DAE039EEDDA9890FEE7693CECAA7D4F",
+    "apple_vm": "68FA278E2928738E5754BB1C4D034A4E23CAD2EBEFA564FAE2940420B0274EB1"
   },
   "remaining_scope": [
     "Windows-native xattr and symbolic-link target creation or mutation",

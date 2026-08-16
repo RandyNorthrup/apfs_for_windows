@@ -18,6 +18,30 @@ function Resolve-RepoPath {
     return Join-Path $repoRoot $Path
 }
 
+function Invoke-PayloadValidation {
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptPath,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    $raw = @(powershell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath -ValidatePayloadOnly 2>&1)
+    $exitCode = $LASTEXITCODE
+    $json = $null
+    $errorText = $null
+    try {
+        $json = ($raw -join "`n") | ConvertFrom-Json
+    } catch {
+        $errorText = $_.Exception.Message
+    }
+    [ordered]@{
+        name = $Name
+        ok = [bool]($exitCode -eq 0 -and $json -and $json.ok)
+        exit_code = $exitCode
+        result = $json
+        parse_error = $errorText
+        raw = if ($json) { $null } else { $raw -join "`n" }
+    }
+}
+
 $resolvedPackageRoot = Resolve-RepoPath $PackageRoot
 $resolvedOutput = Resolve-RepoPath $OutputPath
 $stageRoot = Join-Path $resolvedPackageRoot "APFS-for-Windows-$Version"
@@ -57,7 +81,13 @@ foreach ($relative in $requiredFiles) {
 $missing = @($fileReports | Where-Object { -not $_.exists } | ForEach-Object { $_.relative_path })
 $zipExists = Test-Path -LiteralPath $zipPath -PathType Leaf
 $zipHash = if ($zipExists) { (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash } else { $null }
-$ok = $zipExists -and ($missing.Count -eq 0)
+$installPayload = Invoke-PayloadValidation `
+    -ScriptPath (Join-Path $stageRoot "install-apfs-for-windows.ps1") `
+    -Name "install_payload"
+$repairPayload = Invoke-PayloadValidation `
+    -ScriptPath (Join-Path $stageRoot "repair-apfs-for-windows-install.ps1") `
+    -Name "repair_payload"
+$ok = $zipExists -and ($missing.Count -eq 0) -and $installPayload.ok -and $repairPayload.ok
 
 $result = [ordered]@{
     component = "apfs_for_windows"
@@ -70,6 +100,8 @@ $result = [ordered]@{
     zip_exists = [bool]$zipExists
     zip_sha256 = $zipHash
     missing_required_files = @($missing)
+    install_payload = $installPayload
+    repair_payload = $repairPayload
     files = @($fileReports)
     completed_utc = (Get-Date).ToUniversalTime().ToString("o")
 }

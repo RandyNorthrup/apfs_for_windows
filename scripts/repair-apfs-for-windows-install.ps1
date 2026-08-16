@@ -13,7 +13,8 @@ param(
     [string]$AppVersion = "0.1.0",
     [int]$TimeoutSeconds = 60,
     [string]$OutputPath = "artifacts\repair\install-repair-proof.json",
-    [switch]$SkipWinFspCheck
+    [switch]$SkipWinFspCheck,
+    [switch]$ValidatePayloadOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -353,10 +354,28 @@ function Install-ManagerStartupEntry {
     param([Parameter(Mandatory = $true)][string]$InstallPath)
     $keyPath = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run"
     $valueName = "APFS for Windows Mount Manager"
+    $taskName = "APFS for Windows Mount Manager"
     $managerExe = Join-Path $InstallPath "apfs_mount_manager.exe"
     $command = "`"$managerExe`" --tray"
     New-Item -Path $keyPath -Force | Out-Null
     New-ItemProperty -Path $keyPath -Name $valueName -Value $command -PropertyType String -Force | Out-Null
+    $action = New-ScheduledTaskAction -Execute $managerExe -Argument "--tray"
+    $trigger = New-ScheduledTaskTrigger -AtLogOn
+    $principal = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited
+    $settings = New-ScheduledTaskSettingsSet `
+        -MultipleInstances IgnoreNew `
+        -StartWhenAvailable `
+        -ExecutionTimeLimit ([TimeSpan]::Zero) `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries
+    Register-ScheduledTask `
+        -TaskName $taskName `
+        -Action $action `
+        -Trigger $trigger `
+        -Principal $principal `
+        -Settings $settings `
+        -Force | Out-Null
+    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
     [ordered]@{
         key_path = $keyPath
         value_name = $valueName
@@ -364,12 +383,73 @@ function Install-ManagerStartupEntry {
         registered = ([string](Get-ItemPropertyValue -Path $keyPath -Name $valueName -ErrorAction SilentlyContinue)).Equals(
             $command,
             [StringComparison]::OrdinalIgnoreCase)
+        scheduled_task_name = $taskName
+        scheduled_task_registered = $null -ne $task
+        scheduled_task_group_id = [string]$task.Principal.GroupId
+        scheduled_task_execution_time_limit = [string]$task.Settings.ExecutionTimeLimit
     }
+}
+
+$resolvedBuild = Resolve-Path -LiteralPath $BuildDir
+$qtDlls = @(
+    "Qt6Core.dll",
+    "Qt6Gui.dll",
+    "Qt6Network.dll",
+    "Qt6Widgets.dll"
+)
+$packageQtRoot = [string]$resolvedBuild
+$qtRuntimeRoot = if (Test-Path -LiteralPath (Join-Path $packageQtRoot "Qt6Core.dll") -PathType Leaf) {
+    $packageQtRoot
+} else {
+    $QtBin
+}
+$packagePlatform = Join-Path $packageQtRoot "platforms\qwindows.dll"
+$qtPlatformSource = if (Test-Path -LiteralPath $packagePlatform -PathType Leaf) {
+    $packagePlatform
+} else {
+    Join-Path (Split-Path -Parent $QtBin) "plugins\platforms\qwindows.dll"
+}
+
+if ($ValidatePayloadOnly) {
+    $requiredPayload = @(
+        @("apfs_mount_service.exe", (Join-Path $resolvedBuild "apfs_mount_service.exe")),
+        @("apfs_winfs_worker.exe", (Join-Path $resolvedBuild "apfs_winfs_worker.exe")),
+        @("apfs_mount_manager.exe", (Join-Path $resolvedBuild "apfs_mount_manager.exe")),
+        @("apfs_probe.exe", (Join-Path $resolvedBuild "apfs_probe.exe")),
+        @("uninstall-apfs-for-windows.ps1", (Join-Path $PSScriptRoot "uninstall-apfs-for-windows.ps1")),
+        @("Qt6Core.dll", (Join-Path $qtRuntimeRoot "Qt6Core.dll")),
+        @("Qt6Gui.dll", (Join-Path $qtRuntimeRoot "Qt6Gui.dll")),
+        @("Qt6Network.dll", (Join-Path $qtRuntimeRoot "Qt6Network.dll")),
+        @("Qt6Widgets.dll", (Join-Path $qtRuntimeRoot "Qt6Widgets.dll")),
+        @("platforms\qwindows.dll", $qtPlatformSource)
+    )
+    $payloadFiles = @($requiredPayload | ForEach-Object {
+        [ordered]@{
+            name = $_[0]
+            source = [string]$_[1]
+            exists = Test-Path -LiteralPath ([string]$_[1]) -PathType Leaf
+        }
+    })
+    $missingPayload = @($payloadFiles | Where-Object { -not $_.exists } | ForEach-Object { $_.name })
+    $payloadResult = [ordered]@{
+        component = "apfs_for_windows"
+        check = "repair_payload"
+        ok = [bool]($missingPayload.Count -eq 0)
+        validation_only = $true
+        no_admin_required = $true
+        build_dir = [string]$resolvedBuild
+        qt_runtime_root = $qtRuntimeRoot
+        qt_platform_source = $qtPlatformSource
+        missing_payload = @($missingPayload)
+        files = @($payloadFiles)
+    }
+    $payloadResult | ConvertTo-Json -Depth 6
+    if (-not $payloadResult.ok) { exit 1 }
+    exit 0
 }
 
 Assert-Admin
 
-$resolvedBuild = Resolve-Path -LiteralPath $BuildDir
 $resolvedOutput = Resolve-RepoPath $OutputPath
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $resolvedOutput) | Out-Null
 
@@ -425,20 +505,14 @@ foreach ($binary in $binaries) {
 }
 Copy-RequiredFile -Source (Join-Path $PSScriptRoot "uninstall-apfs-for-windows.ps1") -Destination (Join-Path $InstallRoot "uninstall-apfs-for-windows.ps1")
 
-$qtDlls = @(
-    "Qt6Core.dll",
-    "Qt6Gui.dll",
-    "Qt6Network.dll",
-    "Qt6Widgets.dll"
-)
 foreach ($qtDll in $qtDlls) {
-    Copy-RequiredFile -Source (Join-Path $QtBin $qtDll) -Destination (Join-Path $InstallRoot $qtDll)
+    Copy-RequiredFile -Source (Join-Path $qtRuntimeRoot $qtDll) -Destination (Join-Path $InstallRoot $qtDll)
 }
 
 $platformDir = Join-Path $InstallRoot "platforms"
 New-Item -ItemType Directory -Force -Path $platformDir | Out-Null
 Copy-RequiredFile `
-    -Source (Join-Path (Split-Path -Parent $QtBin) "plugins\platforms\qwindows.dll") `
+    -Source $qtPlatformSource `
     -Destination (Join-Path $platformDir "qwindows.dll")
 
 $serviceExe = Join-Path $InstallRoot "apfs_mount_service.exe"
@@ -520,6 +594,7 @@ $ok = $allBinariesMatch -and
     $recoveryPolicy.non_crash_failures_enabled -eq $true -and
     $managerCleanup.all_stopped -eq $true -and
     $managerStartupProof.registered -eq $true -and
+    $managerStartupProof.scheduled_task_registered -eq $true -and
     $mountProof -and
     ($mountProof.mode -ne "explicit_read_only_target" -or
         ($mountProof.read_only -eq $true -and $mountProof.allow_raw_writes -eq $false))

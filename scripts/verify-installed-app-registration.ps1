@@ -46,6 +46,18 @@ $startupKeyPath = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run"
 $startupValueName = "APFS for Windows Mount Manager"
 $expectedStartupCommand = "`"$managerExe`" --tray"
 $actualStartupCommand = [string](Get-ItemPropertyValue -Path $startupKeyPath -Name $startupValueName -ErrorAction SilentlyContinue)
+$startupTaskName = "APFS for Windows Mount Manager"
+$startupTask = Get-ScheduledTask -TaskName $startupTaskName -ErrorAction SilentlyContinue
+$startupTaskAction = @($startupTask.Actions | Select-Object -First 1)
+$startupTaskTrigger = @($startupTask.Triggers | Select-Object -First 1)
+$startupTaskGroupId = [string]$startupTask.Principal.GroupId
+$startupTaskGroupOk = $startupTaskGroupId -in @("S-1-5-32-545", "Users", "BUILTIN\Users")
+$startupTaskOk = $startupTask -and
+    ([string]$startupTaskAction.Execute).Equals($managerExe, [StringComparison]::OrdinalIgnoreCase) -and
+    ([string]$startupTaskAction.Arguments).Trim() -eq "--tray" -and
+    [string]$startupTaskTrigger.CimClass.CimClassName -eq "MSFT_TaskLogonTrigger" -and
+    $startupTaskGroupOk -and
+    [string]$startupTask.Settings.ExecutionTimeLimit -eq "PT0S"
 $ok = $item -and
     $values.DisplayName -eq "APFS for Windows" -and
     $values.DisplayVersion -eq $ExpectedVersion -and
@@ -56,7 +68,8 @@ $ok = $item -and
     ([string]$values.UninstallString).Contains("-RemoveFiles") -and
     $values.NoModify -eq 1 -and
     $values.NoRepair -eq 1 -and
-    $actualStartupCommand.Equals($expectedStartupCommand, [StringComparison]::OrdinalIgnoreCase)
+    $actualStartupCommand.Equals($expectedStartupCommand, [StringComparison]::OrdinalIgnoreCase) -and
+    $startupTaskOk
 
 $result = [ordered]@{
     component = "apfs_for_windows"
@@ -72,9 +85,24 @@ $result = [ordered]@{
         display_icon = $managerExe
         uninstall_script = $uninstallScript
         manager_startup_command = $expectedStartupCommand
+        manager_startup_task = $startupTaskName
     }
     actual = $values
     actual_manager_startup_command = $actualStartupCommand
+    manager_startup_task_ok = [bool]$startupTaskOk
+    manager_startup_task = if ($startupTask) {
+        [ordered]@{
+            name = $startupTaskName
+            state = [string]$startupTask.State
+            execute = [string]$startupTaskAction.Execute
+            arguments = [string]$startupTaskAction.Arguments
+            trigger_class = [string]$startupTaskTrigger.CimClass.CimClassName
+            group_id = $startupTaskGroupId
+            execution_time_limit = [string]$startupTask.Settings.ExecutionTimeLimit
+        }
+    } else {
+        $null
+    }
     completed_utc = (Get-Date).ToUniversalTime().ToString("o")
 }
 

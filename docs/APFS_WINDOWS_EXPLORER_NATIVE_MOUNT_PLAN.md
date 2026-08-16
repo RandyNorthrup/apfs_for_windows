@@ -263,9 +263,10 @@ Exit gate: release checklist passes with artifacts under this repo.
   and native macOS round-trip media. Full Windows metadata mutation is not complete:
   `SetBasicInfo` and `SetSecurity` remain compatibility no-ops, and Windows-native
   symlink target/xattr creation is not exposed.
-- M4 install/service/startup implementation passes without reboot. Automatic service,
-  recovery policy, Start Menu, Apps & Features, tray startup, and installed binary
-  hashes pass. Actual host post-reboot proof remains prohibited by user instruction.
+- M4 exit gate passes in a clean Windows 11 VM. Package install, Automatic service,
+  saved mount restoration across two reboots, Start Menu, Apps & Features, one
+  interactive tray process, installed hashes, and complete uninstall cleanup pass.
+  Actual host post-reboot proof remains prohibited by user instruction.
 - M5 discovery/manager/tray implementation passes current automated lanes. Real
   physical surprise-unplug behavior remains unproven.
 - M6 passes local CTest, crash recovery, installed service, current 30 GB USB,
@@ -357,16 +358,19 @@ Exit gate: release checklist passes with artifacts under this repo.
   (`HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\APFS for Windows`)
   with an uninstall command. `scripts\verify-installed-app-registration.ps1`
   verifies this without admin.
-- Install/repair register `APFS for Windows Mount Manager` under the machine Run
-  key with `--tray`, so each interactive user gets the stacked `AP` over `FS`
-  tray icon at logon. Manager uses a local single-instance channel; later
-  launches show the existing window instead of creating duplicate tray icons.
-  Uninstall removes the startup value and stops the installed manager process.
+- Install/repair register `APFS for Windows Mount Manager` as a machine-wide
+  Users-group logon task with unlimited runtime, plus a machine Run-key fallback.
+  Each interactive user gets the stacked `AP` over `FS` tray icon at logon.
+  Manager uses a local single-instance channel; later launches show the existing
+  window instead of creating duplicate tray icons. Uninstall removes both startup
+  registrations and waits for the installed manager process to exit.
 - `scripts\build-release-package.ps1` creates a non-admin release ZIP under
   `artifacts\package\APFS-for-Windows-0.1.0.zip` with built binaries, Qt runtime
   DLLs, platform plugin, install/repair/uninstall scripts, README, and APFS
   core provenance note. `scripts\verify-release-package.ps1` verifies the staged
-  package layout. The current ZIP SHA-256 is recorded in
+  package layout and runs install/repair `-ValidatePayloadOnly` from the staged
+  package. Install/repair prefer package-local Qt files before developer Qt.
+  The current ZIP SHA-256 is recorded in
   `artifacts\package\package-proof.json` so README changes cannot leave a stale
   self-referential package hash.
 - `LICENSE`, `THIRD_PARTY_LICENSES.md`, and
@@ -374,8 +378,9 @@ Exit gate: release checklist passes with artifacts under this repo.
   Qt, WinFsp, and Apple LZFSE notices required by the release package.
 - `apfs_mount_service --uninstall` now stops the service, waits for the service
   stop path to tear down workers/mounts, then deletes the service. The PowerShell
-  uninstaller writes `artifacts\uninstall\uninstall-proof.json` and can remove
-  installed files with `-RemoveFiles`.
+  uninstaller also waits for tray-manager exit, removes both startup mechanisms,
+  writes `artifacts\uninstall\uninstall-proof.json`, and can remove installed
+  files with `-RemoveFiles`. Missing registry values are handled idempotently.
 - `scripts\repair-apfs-for-windows-install.ps1` is the focused elevated recovery
   path for the current machine: it stops the service, reaps lingering installed
   APFS worker processes, redeploys current build binaries, keeps the Windows
@@ -395,6 +400,10 @@ Exit gate: release checklist passes with artifacts under this repo.
   mount, expected root entries, expected file SHA-256, and write-denied behavior.
   It can also arm an HKCU RunOnce verifier for next logon after reboot via
   `-ArmNextLogon`.
+- `scripts\windows-vm\verify-installed-state.ps1` is the reusable VM lifecycle
+  verifier. It proves installed binary hashes, saved fixture mount, file hash,
+  read-only denial, service mode, registration, startup task, exactly one
+  interactive tray process, and manager self-test with bounded child-process I/O.
 - `scripts\verify-service-worker-restart.ps1` kills the service-owned
   `apfs_winfs_worker.exe` child, waits for the service supervisor to launch a new
   worker, then verifies the mounted root and expected file SHA-256.
@@ -832,11 +841,10 @@ Exit gate: release checklist passes with artifacts under this repo.
   deterministic target-loss cleanup are proven without reboot. The service now
   registers disk-device notifications for immediate resync, but M5 still needs
   real physical surprise-unplug proof.
-- No actual reboot proof has been run because this machine must not be restarted.
-  Automatic service start mode, recovery policy, normal-session mount visibility,
-  and current `V:` persistence/read-only proof are current; use
-  `scripts\verify-apfs-boot-persistence.ps1 -ArmNextLogon` before a future
-  user-approved reboot to capture post-reboot proof.
+- Host PC has not been rebooted because it must not be restarted. A clean Windows
+  11 VM now proves Automatic service startup, saved `R:` mount restoration, exact
+  file hash, and read-only enforcement across two VM reboots. Host evidence still
+  uses current-state/no-reboot lanes only.
 - The previous USB read blocker was classified and removed. `apfs_probe
   --debug-file icons8-jester.svg` showed no decmpfs/resource-fork data and an
   impossible extent physical block `1753640960` outside the 30 GB container.
@@ -971,8 +979,8 @@ Exit gate: release checklist passes with artifacts under this repo.
   oversized logs; the live repair removed prior 990 MB worker and 519 MB service
   logs. `apfs_service_log_rotation` verifies pruning in a temporary ProgramData
   root, and CTest now passes 12/12.
-- No reboot was performed. Actual post-reboot/logon proof remains blocked by
-  explicit instruction not to restart this PC.
+- No host reboot was performed; explicit instruction not to restart this PC
+  remains in force. Windows VM reboot/logon proof is tracked separately.
 - Copied reader/writer now preserves fixed Apple inode metadata during tree-wide
   copy-on-write rebuilds: create/modify/change/access times, write generation,
   BSD flags, owner/group, exact inode mode, file payload, and directory payload.
@@ -987,7 +995,7 @@ Exit gate: release checklist passes with artifacts under this repo.
   never copied into source or proof JSON. Parameterized shell helpers live under
   `scripts\apple-vm`.
 - Automated Windows -> macOS -> Windows -> macOS proof passed on 2026-08-16 in
-  30.321 seconds during the integrated certification. macOS created a hard link,
+  32.6 seconds during the final integrated certification. macOS created a hard link,
   symbolic link, xattr, fixed mode, and
   fixed mtime; Windows read both links, created/renamed/deleted content, removed one
   hard-link name, and preserved remaining inode metadata exactly. Final macOS mount
@@ -995,11 +1003,20 @@ Exit gate: release checklist passes with artifacts under this repo.
   `fsck_apfs -n` passed before and after both macOS mounts. Sanitized evidence:
   `docs\evidence\apple-vm-roundtrip-2026-08-16.json`.
 - Integrated no-reboot certification passed 28 steps from
-  `2026-08-16T19:35:20Z` through `2026-08-16T19:37:42Z`: all required local,
+  `2026-08-16T20:19:08Z` through `2026-08-16T20:21:47Z`: all required local,
   installed-service, native Apple, direct mounted-drive, alias-deduplication,
   serial-pinned USB RW, Unicode, 394-character path, Robocopy, concurrent-read,
   cleanup, and read-only restoration gates passed. Repair was intentionally a
   separate passing elevated step immediately before the non-admin certification.
   Release ZIP SHA-256 is
-  `22CA47EBF465286F9E61A67E6AE96171AEA8AE0FC85C1578C4FC99CDA7721907`.
+  `28065BA2C9BEE49E6A61985F21F597A586247D3F7D9767A53F2E26E680AC31B0`.
   Sanitized evidence: `docs\evidence\no-reboot-certification-2026-08-16.json`.
+- Exact release ZIP Windows 11 VM lifecycle passed on 2026-08-16. Archive
+  `28065BA2C9BEE49E6A61985F21F597A586247D3F7D9767A53F2E26E680AC31B0`
+  installed using package-local Qt, restored saved `R:` automatically after VM
+  reboot, matched the expected file hash, denied writes in read-only mode, ran
+  one interactive tray with `Open` and `Exit`, and matched installed binary
+  hashes. Packaged uninstall then removed service, mount, manager, startup task,
+  Run fallback, Start Menu, Apps & Features registration, and install root while
+  preserving WinFsp and the APFS fixture. Sanitized evidence:
+  `docs\evidence\windows-vm-install-lifecycle-2026-08-16.json`.
