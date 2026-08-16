@@ -868,6 +868,32 @@ int main(int argc, char* argv[]) {
                 {{QStringLiteral("previous_xid"), QString::number(directoryCreate.previous_xid)},
                  {QStringLiteral("new_xid"), QString::number(directoryCreate.new_xid)}});
 
+    const QString rootXattrImage = tempDir.filePath(QStringLiteral("root-xattr.apfs"));
+    sak::PartitionApfsInodeMetadataUpdate rootXattrUpdate;
+    rootXattrUpdate.xattr_mutations.append(
+        {.name = QStringLiteral("user.apfswin_root"), .value = QByteArray("root EA payload")});
+    const auto rootXattrSet = sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
+        {.source_image_path = directoryImage,
+         .written_image_path = rootXattrImage,
+         .target_name = QStringLiteral("/"),
+         .target_is_directory = true,
+         .metadata = rootXattrUpdate,
+         .options = options});
+    const auto rootXattrRead = sak::PartitionApfsFileSystemReader::readXattrsFromImage(
+        rootXattrImage, QStringLiteral("/"));
+    const auto hasRootXattr = [](const auto& read) {
+        return std::any_of(read.xattrs.cbegin(), read.xattrs.cend(), [](const auto& xattr) {
+            return xattr.first == QStringLiteral("user.apfswin_root") &&
+                   xattr.second == QByteArray("root EA payload");
+        });
+    };
+    if (!rootXattrSet.ok || !rootXattrRead.ok || !hasRootXattr(rootXattrRead)) {
+        return fail(QStringLiteral("commit volume-root embedded xattr"),
+                    QStringLiteral("volume-root xattr set or read failed"),
+                    rootXattrSet.blockers + rootXattrRead.blockers);
+    }
+    appendProof(&proofs, QStringLiteral("commit volume-root embedded xattr"));
+
     const QString directoryXattrImage =
         tempDir.filePath(QStringLiteral("directory-xattr.apfs"));
     sak::PartitionApfsInodeMetadataUpdate directoryXattrUpdate;
@@ -875,7 +901,7 @@ int main(int argc, char* argv[]) {
         {.name = QStringLiteral("user.apfswin_directory"),
          .value = QByteArray("directory EA payload")});
     const auto directoryXattrSet = sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
-        {.source_image_path = directoryImage,
+        {.source_image_path = rootXattrImage,
          .written_image_path = directoryXattrImage,
          .target_name = QStringLiteral("Proof Folder"),
          .target_is_directory = true,
@@ -895,6 +921,14 @@ int main(int argc, char* argv[]) {
         return fail(QStringLiteral("commit directory embedded xattr"),
                     QStringLiteral("directory xattr set or read failed"),
                     directoryXattrSet.blockers + directoryXattrRead.blockers);
+    }
+    const auto rootXattrAfterDirectoryMutation =
+        sak::PartitionApfsFileSystemReader::readXattrsFromImage(
+            directoryXattrImage, QStringLiteral("/"));
+    if (!rootXattrAfterDirectoryMutation.ok || !hasRootXattr(rootXattrAfterDirectoryMutation)) {
+        return fail(QStringLiteral("preserve volume-root xattr across directory mutation"),
+                    QStringLiteral("volume-root xattr was not preserved"),
+                    rootXattrAfterDirectoryMutation.blockers);
     }
     appendProof(&proofs, QStringLiteral("commit directory embedded xattr"));
 
@@ -929,6 +963,13 @@ int main(int argc, char* argv[]) {
                     QStringLiteral("directory xattr was not preserved"),
                     directoryXattrAfterChild.blockers);
     }
+    const auto rootXattrAfterChild = sak::PartitionApfsFileSystemReader::readXattrsFromImage(
+        childImage, QStringLiteral("/"));
+    if (!rootXattrAfterChild.ok || !hasRootXattr(rootXattrAfterChild)) {
+        return fail(QStringLiteral("preserve volume-root xattr across child write"),
+                    QStringLiteral("volume-root xattr was not preserved"),
+                    rootXattrAfterChild.blockers);
+    }
 
     const QString directoryXattrRemovedImage =
         tempDir.filePath(QStringLiteral("directory-xattr-removed.apfs"));
@@ -960,9 +1001,38 @@ int main(int argc, char* argv[]) {
     }
     appendProof(&proofs, QStringLiteral("preserve and delete directory embedded xattr"));
 
+    const QString rootXattrRemovedImage =
+        tempDir.filePath(QStringLiteral("root-xattr-removed.apfs"));
+    sak::PartitionApfsInodeMetadataUpdate rootXattrRemove;
+    rootXattrRemove.xattr_mutations.append(
+        {.name = QStringLiteral("user.apfswin_root"), .remove = true});
+    const auto rootXattrDelete = sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
+        {.source_image_path = directoryXattrRemovedImage,
+         .written_image_path = rootXattrRemovedImage,
+         .target_name = QStringLiteral("/"),
+         .target_is_directory = true,
+         .metadata = rootXattrRemove,
+         .options = options});
+    const auto rootXattrAfterDelete = sak::PartitionApfsFileSystemReader::readXattrsFromImage(
+        rootXattrRemovedImage, QStringLiteral("/"));
+    if (!rootXattrDelete.ok || !rootXattrAfterDelete.ok ||
+        hasRootXattr(rootXattrAfterDelete)) {
+        return fail(QStringLiteral("delete volume-root embedded xattr"),
+                    QStringLiteral("volume-root xattr delete failed"),
+                    rootXattrDelete.blockers + rootXattrAfterDelete.blockers);
+    }
+    if (const int rc = verifyRead(rootXattrRemovedImage,
+                                  QStringLiteral("/Proof Folder/child.txt"),
+                                  childData,
+                                  &proofs);
+        rc != 0) {
+        return rc;
+    }
+    appendProof(&proofs, QStringLiteral("preserve and delete volume-root embedded xattr"));
+
     const QString childRenamedImage = tempDir.filePath(QStringLiteral("child-renamed.apfs"));
     const auto childRename = sak::PartitionApfsWriter::commitImageOnlyDirectoryChildRename(
-        {.source_image_path = directoryXattrRemovedImage,
+        {.source_image_path = rootXattrRemovedImage,
          .written_image_path = childRenamedImage,
          .directory_name = QStringLiteral("Proof Folder"),
          .file_name = QStringLiteral("child.txt"),

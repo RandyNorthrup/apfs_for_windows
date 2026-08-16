@@ -64,6 +64,7 @@ windows_mtime_epoch=$(stat -f '%m' "$windows_file")
 windows_bsd_flags=$(stat -f '%f' "$windows_file")
 windows_xattr=$(xattr -p user.apfswin_windows "$windows_file")
 windows_directory_xattr=$(xattr -p user.apfswin_windows_directory "$mount_point/WinProof")
+windows_root_xattr=$(xattr -p user.apfswin_windows_root "$mount_point")
 assert_equal "$windows_hash" "B58EE1D8BF6C0FF48A5D0AB28DCC938E941CE9AC9091E9C103D85C3784C1E4FC" "Windows origin hash"
 assert_equal "$unicode_hash" "D15C89BA02965E34B5E292AEB8D7B7D0A12B538FB6DC623DD998327D3F118DBC" "Unicode origin hash"
 assert_equal "$windows_link_target" "Nested/windows.txt" "Windows-created symlink target"
@@ -73,8 +74,12 @@ assert_equal "$windows_mtime_epoch" "1680674828" "Windows-created mtime"
 assert_equal "$windows_bsd_flags" "98304" "Windows-created BSD flags"
 assert_equal "$windows_xattr" "Windows EA payload" "Windows-created xattr"
 assert_equal "$windows_directory_xattr" "Windows directory EA payload" "Windows-created directory xattr"
+assert_equal "$windows_root_xattr" "Windows root EA payload" "Windows-created root xattr"
 xattr -w user.apfswin_windows 'macOS updated Windows EA payload' "$windows_file"
 xattr -w user.apfswin_windows_directory 'macOS updated Windows directory EA payload' "$mount_point/WinProof"
+xattr -w user.apfswin_windows_root 'macOS updated Windows root EA payload' "$mount_point"
+xattr -w user.apfswin_root_rw 'macOS root xattr payload' "$mount_point"
+xattr -w user.apfswin_root_delete 'delete this root xattr in Windows' "$mount_point"
 
 mac_dir="$mount_point/MacProof"
 mac_file="$mac_dir/Nested/mac.txt"
@@ -133,6 +138,7 @@ WINDOWS_MTIME_EPOCH=$windows_mtime_epoch
 WINDOWS_BSD_FLAGS=$windows_bsd_flags
 WINDOWS_XATTR=$windows_xattr
 WINDOWS_DIRECTORY_XATTR=$windows_directory_xattr
+WINDOWS_ROOT_XATTR=$windows_root_xattr
 MAC_SHA256=$mac_hash
 SYMLINK_TARGET=$symlink_target
 XATTR_VALUE=$xattr_value

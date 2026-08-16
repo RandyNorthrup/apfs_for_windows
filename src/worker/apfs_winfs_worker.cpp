@@ -63,6 +63,7 @@ constexpr int kTestFaultExitCode = 197;
 constexpr QLatin1StringView kTestFaultBeforeImageReplace("before-image-replace");
 constexpr QLatin1StringView kTestFaultAfterImageReplace("after-image-replace");
 constexpr int kWindowsEaMaxNameBytes = 127;
+constexpr uint64_t kApfsVolumeRootObjectId = 2;
 
 bool isContentCriticalXattr(const QByteArray& name) {
     return name == QByteArray(sak::kApfsXattrNameCompressed) ||
@@ -1291,7 +1292,7 @@ private:
                                           .directory = true,
                                           .regularFile = false,
                                           .symlink = false,
-                                          .objectId = 1,
+                                          .objectId = kApfsVolumeRootObjectId,
                                           .sizeBytes = 0,
                                           .inodeMode = 0040755};
             }
@@ -1951,7 +1952,12 @@ private:
         const QString normalized = normalizeApfsPath(path);
         QString parentDirectoryPath;
         QString targetName;
-        if (!splitDirectoryCreatePath(normalized, &parentDirectoryPath, &targetName)) {
+        if (normalized == QStringLiteral("/")) {
+            if (!directory || metadata.xattr_mutations.isEmpty()) {
+                return STATUS_NOT_SUPPORTED;
+            }
+            targetName = QStringLiteral("/");
+        } else if (!splitDirectoryCreatePath(normalized, &parentDirectoryPath, &targetName)) {
             return STATUS_NOT_SUPPORTED;
         }
 

@@ -227,6 +227,8 @@ $readonlyWriteBlocked = $false
 $aclExitCode = $null
 $eaState = $null
 $directoryEaState = $null
+$rootEaState = $null
+$rootEaName = "user.apfswin_usb_root"
 
 $normalIdentity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $serviceHealth = $null
@@ -296,6 +298,22 @@ try {
         }
 
         $proofMutationAttempted = $true
+        Set-NativeExtendedAttribute -Path $mountRoot -Name $rootEaName `
+            -Value ([Text.Encoding]::UTF8.GetBytes("USB Windows root EA payload"))
+        $rootEaFirst = [Text.Encoding]::UTF8.GetString([byte[]](
+            Get-NativeExtendedAttribute -Path $mountRoot -Name $rootEaName))
+        Set-NativeExtendedAttribute -Path $mountRoot -Name $rootEaName `
+            -Value ([Text.Encoding]::UTF8.GetBytes("USB updated root EA payload"))
+        $rootEaUpdated = [Text.Encoding]::UTF8.GetString([byte[]](
+            Get-NativeExtendedAttribute -Path $mountRoot -Name $rootEaName))
+        Remove-NativeExtendedAttribute -Path $mountRoot -Name $rootEaName
+        $rootEaState = [ordered]@{
+            name = $rootEaName
+            first_value = $rootEaFirst
+            updated_value = $rootEaUpdated
+            absent_after_delete = [bool](-not (Test-NativeExtendedAttribute `
+                -Path $mountRoot -Name $rootEaName))
+        }
         Invoke-FsMutationWithRetry -Name "create proof directory" -Timeout $TimeoutSeconds -Operation {
             [IO.Directory]::CreateDirectory($testDir) | Out-Null
         }
@@ -402,6 +420,13 @@ try {
     }
 } catch {
     $operationError = $_.Exception.Message
+    try {
+        if ($rootReady -and (Test-NativeExtendedAttribute -Path $mountRoot -Name $rootEaName)) {
+            Remove-NativeExtendedAttribute -Path $mountRoot -Name $rootEaName
+        }
+    } catch {
+        $cleanupErrors += "${rootEaName}: $($_.Exception.Message)"
+    }
     if ($proofMutationAttempted -and (Test-Path -LiteralPath $testDir -PathType Container)) {
         try {
             Remove-ProofDirectory -Path $testDir -MountRoot $mountRoot -Prefix $ProofPrefix
@@ -465,6 +490,9 @@ $ok = ($preflightOk -or ($rootReady -and
     ($directoryEaState.first_value -eq "USB Windows directory EA payload") -and
     ($directoryEaState.updated_value -eq "USB updated directory EA payload") -and
     $directoryEaState.absent_after_delete -and
+    ($rootEaState.first_value -eq "USB Windows root EA payload") -and
+    ($rootEaState.updated_value -eq "USB updated root EA payload") -and
+    $rootEaState.absent_after_delete -and
     $metadataState.hidden -and
     $metadataState.archive -and
     ($metadataState.length -eq $metadataPayload.Length) -and
@@ -522,6 +550,7 @@ $result = [ordered]@{
     acl_exit_code = $aclExitCode
     extended_attribute = $eaState
     directory_extended_attribute = $directoryEaState
+    root_extended_attribute = $rootEaState
     readonly_write_blocked = [bool]$readonlyWriteBlocked
     symbolic_link = $symbolicLinkState
     service_health_error = $serviceHealthError

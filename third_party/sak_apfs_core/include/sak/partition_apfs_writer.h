@@ -466,6 +466,7 @@ struct PartitionApfsInodeMetadataUpdate {
 struct PartitionApfsImageInodeMetadataCommitRequest {
     QString source_image_path;
     QString written_image_path;
+    // "/" with target_is_directory selects the APFS volume root inode.
     QString target_name;
     QString parent_directory_path;
     bool target_is_directory{false};
@@ -591,6 +592,7 @@ struct PartitionApfsRawDirectoryMutationCommitRequest {
 struct PartitionApfsRawInodeMetadataCommitRequest {
     QString target_path;
     uint64_t target_container_bytes{0};
+    // "/" with target_is_directory selects the APFS volume root inode.
     QString target_name;
     QString parent_directory_path;
     bool target_is_directory{false};

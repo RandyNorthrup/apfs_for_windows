@@ -68,17 +68,22 @@ windows_mtime_epoch=$(stat -f '%m' "$mount_point/WinProof/Nested/windows-renamed
 windows_bsd_flags=$(stat -f '%f' "$mount_point/WinProof/Nested/windows-renamed-back-by-windows.txt")
 windows_xattr=$(xattr -p user.apfswin_windows "$mount_point/WinProof/Nested/windows-renamed-back-by-windows.txt")
 windows_directory_xattr=$(xattr -p user.apfswin_windows_directory "$mount_point/WinProof")
+windows_root_xattr=$(xattr -p user.apfswin_windows_root "$mount_point")
 symlink_path="$mount_point/MacProof/windows-symlink"
 [ -L "$symlink_path" ] || fail "symbolic link missing"
 symlink_target=$(readlink "$symlink_path")
 xattr_value=$(xattr -p user.apfswin_roundtrip "$mount_point/MacProof/mac-hardlink.txt")
 updated_xattr=$(xattr -p user.apfswin_rw "$mount_point/MacProof/xattr-roundtrip.txt")
 updated_directory_xattr=$(xattr -p user.apfswin_directory_rw "$mount_point/MacProof")
+updated_root_xattr=$(xattr -p user.apfswin_root_rw "$mount_point")
 if xattr -p user.apfswin_delete "$mount_point/MacProof/xattr-roundtrip.txt" >/dev/null 2>&1; then
     fail "Windows-deleted xattr remains"
 fi
 if xattr -p user.apfswin_directory_delete "$mount_point/MacProof" >/dev/null 2>&1; then
     fail "Windows-deleted directory xattr remains"
+fi
+if xattr -p user.apfswin_root_delete "$mount_point" >/dev/null 2>&1; then
+    fail "Windows-deleted root xattr remains"
 fi
 link_count=$(stat -f '%l' "$mount_point/MacProof/mac-hardlink.txt")
 file_mode=$(stat -f '%Sp' "$mount_point/MacProof/mac-hardlink.txt")
@@ -97,10 +102,12 @@ assert_equal "$windows_mtime_epoch" "1680674828" "Windows-created mtime"
 assert_equal "$windows_bsd_flags" "98304" "Windows-created BSD flags"
 assert_equal "$windows_xattr" "Windows final EA payload" "Windows final xattr"
 assert_equal "$windows_directory_xattr" "Windows final directory EA payload" "Windows final directory xattr"
+assert_equal "$windows_root_xattr" "Windows final root EA payload" "Windows final root xattr"
 assert_equal "$symlink_target" "../WinProof/Nested/windows-renamed-by-macos.txt" "symlink target"
 assert_equal "$xattr_value" "macOS xattr payload" "xattr value"
 assert_equal "$updated_xattr" "Windows updated xattr payload" "updated xattr value"
 assert_equal "$updated_directory_xattr" "Windows updated directory xattr payload" "updated directory xattr value"
+assert_equal "$updated_root_xattr" "Windows updated root xattr payload" "updated root xattr value"
 assert_equal "$link_count" "1" "hard-link count"
 assert_equal "$file_mode" "-rw-r--r--" "file mode"
 assert_equal "$mtime" "2020-01-02T03:04:05-0800" "mtime"
@@ -124,14 +131,17 @@ WINDOWS_MTIME_EPOCH=$windows_mtime_epoch
 WINDOWS_BSD_FLAGS=$windows_bsd_flags
 WINDOWS_XATTR=$windows_xattr
 WINDOWS_DIRECTORY_XATTR=$windows_directory_xattr
+WINDOWS_ROOT_XATTR=$windows_root_xattr
 HARDLINK_SHA256=$hardlink_hash
 RETURN_SHA256=$return_hash
 SYMLINK_TARGET=$symlink_target
 XATTR_VALUE=$xattr_value
 UPDATED_XATTR_VALUE=$updated_xattr
 UPDATED_DIRECTORY_XATTR_VALUE=$updated_directory_xattr
+UPDATED_ROOT_XATTR_VALUE=$updated_root_xattr
 DELETED_XATTR_ABSENT=1
 DELETED_DIRECTORY_XATTR_ABSENT=1
+DELETED_ROOT_XATTR_ABSENT=1
 LINK_COUNT=$link_count
 FILE_MODE=$file_mode
 OWNER_GROUP=$owner_group

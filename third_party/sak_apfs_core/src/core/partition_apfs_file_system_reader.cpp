@@ -582,11 +582,21 @@ public:
         if (!ensureMountedAndScanned(&result)) {
             return result;
         }
-        const auto record = resolveFile(cleanPath(path), &result);
-        if (!record.has_value()) {
+        const QString normalized = cleanPath(path);
+        uint64_t inodeId = kApfsRootDirectoryId;
+        if (!pathParts(normalized).isEmpty()) {
+            const auto record = resolveFile(normalized, &result);
+            if (!record.has_value()) {
+                return result;
+            }
+            inodeId = record->file_id;
+        }
+        if (!inodeById_.contains(inodeId)) {
+            result.blockers.append(
+                QStringLiteral("APFS inode not found for xattr path: %1").arg(normalized));
             return result;
         }
-        for (const auto& xattr : xattrsByInode_.values(record->file_id)) {
+        for (const auto& xattr : xattrsByInode_.values(inodeId)) {
             if (xattr.first != QLatin1StringView(kApfsXattrNameCompressed)) {
                 result.xattrs.append(xattr);
             }

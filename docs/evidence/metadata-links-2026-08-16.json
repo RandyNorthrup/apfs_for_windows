@@ -36,6 +36,13 @@
       "update": true,
       "delete": true
     },
+    "root_extended_attribute": {
+      "name": "user.apfswin_root",
+      "create_read": true,
+      "restart_persistence": true,
+      "update": true,
+      "delete": true
+    },
     "delete_reparse_converted_to_empty_regular_file": true,
     "cleanup_verified": true
   },
@@ -66,10 +73,16 @@
       "updated_value": "USB updated directory EA payload",
       "absent_after_delete": true
     },
+    "root_extended_attribute": {
+      "name": "user.apfswin_usb_root",
+      "first_value": "USB Windows root EA payload",
+      "updated_value": "USB updated root EA payload",
+      "absent_after_delete": true
+    },
     "proof_tree_removed": true,
     "final_read_only": true,
     "final_allow_raw_writes": false,
-    "completed_utc": "2026-08-16T22:56:46.4589805Z"
+    "completed_utc": "2026-08-16T23:40:04.0074067Z"
   },
   "native_macos_roundtrip": {
     "ok": true,
@@ -83,14 +96,22 @@
     "macos_xattrs_read_updated_and_deleted_by_windows": true,
     "windows_directory_ea_read_and_updated_by_macos": true,
     "macos_directory_xattrs_read_updated_and_deleted_by_windows": true,
+    "windows_root_ea_read_and_updated_by_macos": true,
+    "macos_root_xattrs_read_updated_and_deleted_by_windows": true,
     "final_windows_ea": "Windows final EA payload",
+    "final_windows_directory_ea": "Windows final directory EA payload",
+    "final_windows_root_ea": "Windows final root EA payload",
     "final_updated_macos_xattr": "Windows updated xattr payload",
+    "final_updated_macos_directory_xattr": "Windows updated directory xattr payload",
+    "final_updated_macos_root_xattr": "Windows updated root xattr payload",
     "deleted_macos_xattr_absent": true,
+    "deleted_macos_directory_xattr_absent": true,
+    "deleted_macos_root_xattr_absent": true,
     "native_fsck_before_and_after_each_mount": true,
-    "final_image_sha256": "9D4D1FA9D3ABB8F2E2904DE931D5A50365C0560CC41F68D3C167B89C81BA1729",
-    "duration_seconds": 33.289,
+    "final_image_sha256": "81EA59A4101F4B024E9CF495DBF3CB2E5B9E07746C5FC86B6FA656FAA9D03068",
+    "duration_seconds": 33.216,
     "remote_artifacts_cleaned": true,
-    "completed_utc": "2026-08-16T22:56:00.5768732Z"
+    "completed_utc": "2026-08-16T23:39:19.5291963Z"
   },
   "windows_security_claim": {
     "persisted_to_apfs": [
@@ -103,7 +124,6 @@
     "apple_acl_blob_roundtrip": false
   },
   "unsupported_mutations": [
-    "APFS volume-root directory extended-attribute mutation",
     "non-ASCII Windows EA names",
     "large APFS stream-backed xattr mutation",
     "empty Windows EA value as a distinct value because zero length requests deletion",

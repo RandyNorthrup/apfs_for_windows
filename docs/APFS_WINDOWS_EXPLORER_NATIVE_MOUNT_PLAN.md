@@ -260,11 +260,10 @@ Exit gate: release checklist passes with artifacts under this repo.
 - M2 complete for current file/directory transaction surface: arbitrary nested
   create/write/rename/move/delete, generation refresh, and rollback/crash lanes pass.
 - M3 file-content, namespace, basic-info, POSIX security metadata, symbolic-link,
-  and supported regular-file/named-directory EA exit gates pass on disposable
-  image, physical USB, and native macOS round-trip media. Hard-link creation plus
-  volume-root directory EAs, zero-length EA values, non-ASCII-name EAs, and large
-  stream-backed xattr mutation remain outside the current Windows callback
-  surface.
+  and supported regular-file/named-directory/volume-root EA exit gates pass on
+  disposable image, physical USB, and native macOS round-trip media. Hard-link
+  creation plus zero-length EA values, non-ASCII-name EAs, and large stream-backed
+  xattr mutation remain outside the current Windows callback surface.
 - M4 exit gate passes in a clean Windows 11 VM. Package install, Automatic service,
   saved mount restoration across a reboot, Start Menu, Apps & Features, one
   interactive tray process, installed hashes, and complete uninstall cleanup pass.
@@ -482,8 +481,9 @@ Exit gate: release checklist passes with artifacts under this repo.
   root proof directories, waits for final mount visibility, records
   initial/final mount policy, reports any stale entries still visible after
   cleanup, labels `-AllowStaleInstalledWorker` runs as
-  `current_installed_mount_only`, and proves root proof-directory create plus
-  direct child-file write/hash/rename/overwrite/delete inside its own
+  `current_installed_mount_only`, and proves volume-root EA plus root
+  proof-directory create and direct child-file write/hash/rename/overwrite/delete
+  inside its own
   `sak-mounted-file-actions-proof-*` directory on the selected mount. Current
   certification wraps this proof in an explicit temporary writable policy
   window and restores that mount read-only afterward.
@@ -523,7 +523,8 @@ Exit gate: release checklist passes with artifacts under this repo.
   rename, delete, root-directory create/delete, direct directory-child
   write/rename, child move to root, nested directory create, and file-backed raw
   directory create/delete while preserving a 16 MiB existing file. Every result
-  is verified with `PartitionApfsFileSystemReader`.
+  is verified with `PartitionApfsFileSystemReader`. Root-EA coverage creates,
+  reads, preserves, and deletes an embedded xattr on APFS inode 2.
 - `apfs_core_selftest` now also builds deterministic interrupted checkpoint
   images from actual pre-commit and committed bytes. The current insert changes
   18 blocks. Omitting checkpoint-map publication selects the old generation;
@@ -608,8 +609,9 @@ Exit gate: release checklist passes with artifacts under this repo.
   intentionally separate from service policy repair, because normal file
   create/write/delete through a mounted drive should not need elevation. The
   latest orchestrated run temporarily enabled writable policy outside this
-  verifier, proved write/hash/rename/overwrite/delete through the mounted drive,
-  then restored `V:` read-only.
+  verifier, proved root/file/named-directory EA create/read/update/delete plus
+  write/hash/rename/overwrite/delete through the mounted drive, then restored
+  `V:` read-only.
 - `scripts\run-apfs-for-windows-certification.ps1` currently writes
   `artifacts\certification\apfs-for-windows-certification.json` with
   `local_code_gates_ok=true`, `release_package_ok=true`,
@@ -818,10 +820,10 @@ Exit gate: release checklist passes with artifacts under this repo.
 - Serial/signature-pinned physical USB RW passes as normal user on the current
   hybrid MBR Partition 1 APFS target at `V:`. Real APFS timestamp/BSD-flag/POSIX
   security metadata writes, read-only enforcement, Windows symbolic-link
-  creation/follow/delete, and supported regular-file/named-directory EA
+  creation/follow/delete, and supported regular-file/named-directory/volume-root EA
   create/read/update/delete now pass on that raw target. Remaining work before
-  public RW default: hard-link creation; volume-root directory EAs; zero-length,
-  non-ASCII-name, and large stream-backed xattr mutation;
+  public RW default: hard-link creation; zero-length, non-ASCII-name, and large
+  stream-backed xattr mutation;
   physical raw-media crash/power-loss recovery proof; and real surprise-unplug
   behavior. Apple-created xattr/symlink/hardlink preservation and supported EA
   mutation pass a native macOS round trip. Deterministic image worker crash
@@ -1023,20 +1025,21 @@ Exit gate: release checklist passes with artifacts under this repo.
   mutation. `apfs_probe --debug-file` now reports fixed inode metadata used by the
   cross-platform preservation assertion.
 - Copied writer metadata updates now atomically create, replace, or delete
-  embedded regular-file and named-directory xattrs while preserving unrelated
-  embedded xattrs. Directory state is batch-recovered in one fs-tree walk and
-  preserved across unrelated COW mutations; directory stream-backed xattrs fail
+  embedded regular-file, named-directory, and volume-root xattrs while preserving
+  unrelated embedded xattrs. Directory state, including root inode 2, is
+  batch-recovered in one fs-tree walk and preserved across unrelated COW
+  mutations; directory stream-backed xattrs fail
   closed instead of being dropped. WinFsp `GetEa`/`SetEa` exposes printable ASCII
   names from 1 through 127 bytes and values up to the APFS embedded limit of
   3,804 bytes. Protected
   `com.apple.decmpfs`, `com.apple.ResourceFork`, and `com.apple.fs.symlink`
   attributes fail closed. Non-ASCII-name and large stream-backed xattr mutation
-  remain outside current scope. Named directories are supported; the APFS volume
-  root is not represented by the current name/parent metadata transaction.
-- Local WinFsp proof passed file and named-directory EA create/read, restart
-  persistence, update, and delete. Physical `V:` proof passed file and directory
-  operations using `user.apfswin_usb` and `user.apfswin_usb_directory`, then
-  removed its proof tree and restored read-only/raw-disabled policy.
+  remain outside current scope.
+- Local WinFsp proof passed file, named-directory, and volume-root EA create/read,
+  restart persistence, update, and delete. Physical `V:` proof passed file,
+  directory, and volume-root operations using `user.apfswin_usb`,
+  `user.apfswin_usb_directory`, and `user.apfswin_usb_root`, then removed its
+  proof tree and restored read-only/raw-disabled policy.
   `apfs_core_selftest` also verifies copied-core directory-EA preservation across
   child-file writes plus set/read/delete and protected-name rejection.
 - `scripts\verify-apple-vm-roundtrip.ps1` is a credential-free tracked harness:
@@ -1044,18 +1047,19 @@ Exit gate: release checklist passes with artifacts under this repo.
   never copied into source or proof JSON. Parameterized shell helpers live under
   `scripts\apple-vm`.
 - Automated Windows -> macOS -> Windows -> macOS proof passed on 2026-08-16 in
-  33.289 seconds. Windows created file and directory EAs; macOS read and updated
-  both, created file and directory xattrs, a hard link, and a symbolic link;
-  Windows read the macOS xattrs, updated one file/directory pair, deleted the
-  other pair, and replaced its original EAs; final macOS verified every expected
-  value and deletion. Windows also removed one hard-link name while preserving the
+  33.216 seconds. Windows created file, directory, and volume-root EAs; macOS read
+  and updated all three, created file, directory, and volume-root xattrs, a hard
+  link, and a symbolic link; Windows read the macOS xattrs, updated one
+  file/directory/root set, deleted the other set, and replaced its original EAs;
+  final macOS verified every expected value and deletion. Windows also removed
+  one hard-link name while preserving the
   surviving inode metadata exactly. Native `fsck_apfs -n` passed before and
   after both macOS mounts. Final image SHA-256 was
-  `9D4D1FA9D3ABB8F2E2904DE931D5A50365C0560CC41F68D3C167B89C81BA1729`.
+  `81EA59A4101F4B024E9CF495DBF3CB2E5B9E07746C5FC86B6FA656FAA9D03068`.
   Sanitized evidence:
   `docs\evidence\apple-vm-roundtrip-2026-08-16.json`.
 - Integrated no-host-reboot certification passed 28 steps with `-SkipBuild` from
-  `2026-08-16T22:54:19Z` through `2026-08-16T22:57:36Z` after the same Release
+  `2026-08-16T23:37:22Z` through `2026-08-16T23:41:21Z` after the same Release
   build and 12-test CTest suite had already passed. All required local,
   installed-service, native Apple, direct mounted-drive, alias-deduplication,
   serial-pinned USB RW, Unicode, 394-character path, Robocopy, concurrent-read,
@@ -1063,8 +1067,8 @@ Exit gate: release checklist passes with artifacts under this repo.
   Repair was intentionally a separate passing elevated step before certification.
   Sanitized evidence: `docs\evidence\no-reboot-certification-2026-08-16.json`.
 - Exact release ZIP Windows 11 VM lifecycle passed from
-  `2026-08-16T23:06:31Z` through `2026-08-16T23:09:27Z`. Archive
-  `201BBCBB701F90695556566ECA00E89F6DC7C34B532D52E3162D3282B702D365`
+  `2026-08-16T23:49:10Z` through `2026-08-16T23:51:36Z`. Archive
+  `43CA8EC672CB3E504DA804AF7416C917F2CA7E412E33DF269F2C68D06106E5D3`
   installed using package-local Qt, restored saved `R:` automatically after VM
   reboot, matched the expected file hash, denied writes in read-only mode, ran
   one interactive tray with `Open` and `Exit`, and matched installed binary

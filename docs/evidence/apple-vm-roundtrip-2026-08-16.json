@@ -2,8 +2,8 @@
   "component": "apfs_for_windows",
   "check": "apple_vm_roundtrip",
   "ok": true,
-  "completed_utc": "2026-08-16T22:56:00.5768732Z",
-  "duration_seconds": 33.289,
+  "completed_utc": "2026-08-16T23:39:19.5291963Z",
+  "duration_seconds": 33.216,
   "credential_material_recorded": false,
   "no_host_reboot_performed": true,
   "native_macos_operations": {
@@ -25,14 +25,17 @@
     "final_extended_attribute_written_by_windows": "Windows final EA payload",
     "directory_extended_attribute_created": "Windows directory EA payload",
     "directory_extended_attribute_read_and_updated_by_macos": "macOS updated Windows directory EA payload",
-    "final_directory_extended_attribute_written_by_windows": "Windows final directory EA payload"
+    "final_directory_extended_attribute_written_by_windows": "Windows final directory EA payload",
+    "root_extended_attribute_created": "Windows root EA payload",
+    "root_extended_attribute_read_and_updated_by_macos": "macOS updated Windows root EA payload",
+    "final_root_extended_attribute_written_by_windows": "Windows final root EA payload"
   },
   "content_sha256": {
     "windows_file": "B58EE1D8BF6C0FF48A5D0AB28DCC938E941CE9AC9091E9C103D85C3784C1E4FC",
     "unicode_file": "D15C89BA02965E34B5E292AEB8D7B7D0A12B538FB6DC623DD998327D3F118DBC",
     "macos_hardlink_file": "76FD91615F8B856AB498A543707EE1BAC16AD6F56E597584538A0356389281DB",
     "windows_return_file": "A4DDBF29B458AABD9FA5E69BDDF059C7C61A3E1779E6B1E6954CEFEECF580964",
-    "windows_return_image": "9D4D1FA9D3ABB8F2E2904DE931D5A50365C0560CC41F68D3C167B89C81BA1729"
+    "windows_return_image": "81EA59A4101F4B024E9CF495DBF3CB2E5B9E07746C5FC86B6FA656FAA9D03068"
   },
   "preserved_apple_state": {
     "symlink_target": "../WinProof/Nested/windows-renamed-by-macos.txt",
@@ -43,6 +46,9 @@
     "windows_read_macos_directory_xattr": true,
     "windows_updated_macos_directory_xattr": "Windows updated directory xattr payload",
     "windows_deleted_second_macos_directory_xattr": true,
+    "windows_read_macos_root_xattr": true,
+    "windows_updated_macos_root_xattr": "Windows updated root xattr payload",
+    "windows_deleted_second_macos_root_xattr": true,
     "remaining_hardlink_count": 1,
     "file_mode": "-rw-r--r--",
     "mtime": "2020-01-02T03:04:05-0800",
@@ -56,13 +62,12 @@
     "symlink_has_data_extents": false
   },
   "fsck_log_sha256": {
-    "first_before": "FF291E790383044CDE8AE004D8B3D7EECEC17065DEE20EFB3DF3D1E0B03A336B",
-    "first_after": "8B9C828EBBA8A2C9A7A8799B2C893D11312277C13AD545644DA91DB51C4B66C2",
-    "final_before": "B0C47F82BAFF6C1521AA562E70FA5DCF28B7E3273FB22F6FB39D49AF3D4347FB",
-    "final_after": "1A20557A01E3919C96FE2AECBCF706C3C6EFB5C954BD582F36C8441499FFB083"
+    "first_before": "29232DAFFB0F468472E60A191EDAFE2B30A5DB50EAD90FEFCD4094DAD8BB3163",
+    "first_after": "4BE9356AD82CB28ACAA4DEC0AB4BE774E1008DC534451265CE19E00522ABFB41",
+    "final_before": "C651FE1DA1D6CE58F1B40079CF630F02433D41ADB45A6A222882AA3D258EA5F9",
+    "final_after": "D511DDBF6DE9F94A46B8DD4B46E76E2C1D9B7C631A8195C549AB5A1E51D4B581"
   },
   "remaining_scope": [
-    "APFS volume-root directory extended-attribute mutation",
     "empty Windows EA value as a distinct value because zero length requests deletion",
     "non-ASCII Windows EA names",
     "large APFS stream-backed xattr mutation",

@@ -330,6 +330,8 @@ try {
         Set-NativeExtendedAttribute -Path (Join-Path $mountRoot "WinProof") `
             -Name "user.apfswin_windows_directory" `
             -Value ([Text.Encoding]::UTF8.GetBytes("Windows directory EA payload"))
+        Set-NativeExtendedAttribute -Path $mountRoot -Name "user.apfswin_windows_root" `
+            -Value ([Text.Encoding]::UTF8.GetBytes("Windows root EA payload"))
         $windowsCreatedLink = Join-Path $mountRoot "WinProof\windows-created-symlink"
         New-NativeFileSymbolicLink -Path $windowsCreatedLink `
             -Target "Nested\windows.txt"
@@ -402,10 +404,16 @@ try {
         $macDirectoryEaFromMac = [Text.Encoding]::UTF8.GetString([byte[]](
             Get-NativeExtendedAttribute -Path $macDirectory `
                 -Name "user.apfswin_directory_rw"))
+        $windowsRootEaFromMac = [Text.Encoding]::UTF8.GetString([byte[]](
+            Get-NativeExtendedAttribute -Path $mountRoot -Name "user.apfswin_windows_root"))
+        $macRootEaFromMac = [Text.Encoding]::UTF8.GetString([byte[]](
+            Get-NativeExtendedAttribute -Path $mountRoot -Name "user.apfswin_root_rw"))
         $deleteEaPresentBefore = Test-NativeExtendedAttribute `
             -Path $xattrFile -Name "user.apfswin_delete"
         $deleteDirectoryEaPresentBefore = Test-NativeExtendedAttribute `
             -Path $macDirectory -Name "user.apfswin_directory_delete"
+        $deleteRootEaPresentBefore = Test-NativeExtendedAttribute `
+            -Path $mountRoot -Name "user.apfswin_root_delete"
         Set-NativeExtendedAttribute -Path $xattrFile -Name "user.apfswin_rw" `
             -Value ([Text.Encoding]::UTF8.GetBytes("Windows updated xattr payload"))
         Remove-NativeExtendedAttribute -Path $xattrFile -Name "user.apfswin_delete"
@@ -413,9 +421,14 @@ try {
             -Value ([Text.Encoding]::UTF8.GetBytes("Windows updated directory xattr payload"))
         Remove-NativeExtendedAttribute -Path $macDirectory `
             -Name "user.apfswin_directory_delete"
+        Set-NativeExtendedAttribute -Path $mountRoot -Name "user.apfswin_root_rw" `
+            -Value ([Text.Encoding]::UTF8.GetBytes("Windows updated root xattr payload"))
+        Remove-NativeExtendedAttribute -Path $mountRoot -Name "user.apfswin_root_delete"
         Set-NativeExtendedAttribute -Path $windowsDirectory `
             -Name "user.apfswin_windows_directory" `
             -Value ([Text.Encoding]::UTF8.GetBytes("Windows final directory EA payload"))
+        Set-NativeExtendedAttribute -Path $mountRoot -Name "user.apfswin_windows_root" `
+            -Value ([Text.Encoding]::UTF8.GetBytes("Windows final root EA payload"))
         $returnDirectory = Join-Path $mountRoot "WindowsReturn\Nested"
         New-Item -ItemType Directory -Path $returnDirectory -Force | Out-Null
         $returnFile = Join-Path $returnDirectory "final.txt"
@@ -452,6 +465,8 @@ try {
             mac_ea_from_macos = $macEaFromMac
             windows_directory_ea_from_macos = $windowsDirectoryEaFromMac
             mac_directory_ea_from_macos = $macDirectoryEaFromMac
+            windows_root_ea_from_macos = $windowsRootEaFromMac
+            mac_root_ea_from_macos = $macRootEaFromMac
             delete_ea_present_before = [bool]$deleteEaPresentBefore
             delete_ea_absent_after = [bool](-not (Test-NativeExtendedAttribute `
                 -Path $xattrFile -Name "user.apfswin_delete"))
@@ -468,6 +483,13 @@ try {
             final_windows_directory_ea = [Text.Encoding]::UTF8.GetString([byte[]](
                 Get-NativeExtendedAttribute -Path $windowsDirectory `
                     -Name "user.apfswin_windows_directory"))
+            delete_root_ea_present_before = [bool]$deleteRootEaPresentBefore
+            delete_root_ea_absent_after = [bool](-not (Test-NativeExtendedAttribute `
+                -Path $mountRoot -Name "user.apfswin_root_delete"))
+            updated_root_ea = [Text.Encoding]::UTF8.GetString([byte[]](
+                Get-NativeExtendedAttribute -Path $mountRoot -Name "user.apfswin_root_rw"))
+            final_windows_root_ea = [Text.Encoding]::UTF8.GetString([byte[]](
+                Get-NativeExtendedAttribute -Path $mountRoot -Name "user.apfswin_windows_root"))
         }
     } finally {
         Stop-ApfsWorker -Process $returnWorker
@@ -505,6 +527,8 @@ try {
         $windowsReturn.windows_directory_ea_from_macos -eq
             "macOS updated Windows directory EA payload" -and
         $windowsReturn.mac_directory_ea_from_macos -eq "macOS directory xattr payload" -and
+        $windowsReturn.windows_root_ea_from_macos -eq "macOS updated Windows root EA payload" -and
+        $windowsReturn.mac_root_ea_from_macos -eq "macOS root xattr payload" -and
         $windowsReturn.delete_ea_present_before -and
         $windowsReturn.delete_ea_absent_after -and
         $windowsReturn.updated_ea -eq "Windows updated xattr payload" -and
@@ -512,7 +536,11 @@ try {
         $windowsReturn.delete_directory_ea_present_before -and
         $windowsReturn.delete_directory_ea_absent_after -and
         $windowsReturn.updated_directory_ea -eq "Windows updated directory xattr payload" -and
-        $windowsReturn.final_windows_directory_ea -eq "Windows final directory EA payload")
+        $windowsReturn.final_windows_directory_ea -eq "Windows final directory EA payload" -and
+        $windowsReturn.delete_root_ea_present_before -and
+        $windowsReturn.delete_root_ea_absent_after -and
+        $windowsReturn.updated_root_ea -eq "Windows updated root xattr payload" -and
+        $windowsReturn.final_windows_root_ea -eq "Windows final root EA payload")
     if (-not $metadataPreserved -or -not $symlinkMetadataValid -or -not $windowsMutationValid) {
         throw "Windows return mutation or copied-core metadata preservation failed."
     }

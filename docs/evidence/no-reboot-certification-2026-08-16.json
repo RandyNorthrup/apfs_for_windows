@@ -2,13 +2,13 @@
   "component": "apfs_for_windows",
   "check": "certification_orchestrator",
   "ok": true,
-  "started_utc": "2026-08-16T22:54:19.6395124Z",
-  "completed_utc": "2026-08-16T22:57:36.7689576Z",
+  "started_utc": "2026-08-16T23:37:22.4145468Z",
+  "completed_utc": "2026-08-16T23:41:21.5466467Z",
   "step_count": 28,
   "failed_steps": [],
   "skipped_steps": [
     "build_release via -SkipBuild; current Release build and CTest passed before this run",
-    "repair_install; current binaries were repaired and verified separately at 2026-08-16T22:54:03.7081907Z"
+    "repair_install; current binaries were repaired and verified separately at 2026-08-16T23:25:55.2802320Z"
   ],
   "repair_completed_separately": true,
   "repair_ok": true,
@@ -21,12 +21,12 @@
     "copied_source_boundary": true,
     "release_package": true,
     "local_worker_content_namespace": true,
-    "local_worker_metadata_acl_symbolic_links_file_and_directory_extended_attributes": true,
+    "local_worker_metadata_acl_symbolic_links_file_directory_and_root_extended_attributes": true,
     "local_worker_crash_recovery": true,
-    "apple_vm_roundtrip_file_and_directory_extended_attributes_and_four_fsck": true,
+    "apple_vm_roundtrip_file_directory_and_root_extended_attributes_and_four_fsck": true,
     "installed_service_state": true,
     "raw_alias_deduplication": true,
-    "mounted_usb_metadata_acl_symbolic_links_file_and_directory_extended_attributes": true,
+    "mounted_usb_metadata_acl_symbolic_links_file_directory_and_root_extended_attributes": true,
     "serial_pinned_usb_rw": true,
     "extended_usb_file_actions": true,
     "separate_100_iteration_robocopy_soak": true
@@ -47,6 +47,8 @@
     "file_extended_attribute_name": "user.apfswin_usb",
     "directory_extended_attribute_create_read_update_delete": true,
     "directory_extended_attribute_name": "user.apfswin_usb_directory",
+    "root_extended_attribute_create_read_update_delete": true,
+    "root_extended_attribute_name": "user.apfswin_usb_root",
     "unicode_names": true,
     "long_path_characters": 394,
     "robocopy_payload_bytes": 1048576,
@@ -69,8 +71,9 @@
   "release": {
     "version": "0.1.0",
     "file_count": 17,
-    "zip_sha256": "201BBCBB701F90695556566ECA00E89F6DC7C34B532D52E3162D3282B702D365",
+    "zip_sha256": "43CA8EC672CB3E504DA804AF7416C917F2CA7E412E33DF269F2C68D06106E5D3",
     "package_verification_ok": true,
+    "rebuilt_after_documentation_only_change": true,
     "exact_archive_windows_vm_lifecycle_ok": true
   },
   "stress": {
@@ -84,7 +87,6 @@
   },
   "remaining_scope": [
     "physical surprise-unplug and raw-media power-loss recovery",
-    "APFS volume-root directory extended-attribute mutation",
     "empty Windows EA value as a distinct value because zero length requests deletion",
     "non-ASCII Windows EA names",
     "large APFS stream-backed xattr mutation",

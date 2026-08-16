@@ -71,11 +71,11 @@ Current state:
   retarget, clear, or delete relative and same-volume absolute symbolic links.
   External absolute targets fail closed.
 - WinFsp `GetEa`/`SetEa` callbacks expose APFS extended attributes on regular
-  files and named directories, with printable ASCII names from 1 through 127
-  bytes and embedded values up to 3,804 bytes. Create, read, restart
-  persistence, update, and delete pass on local images, the physical USB target,
-  and native macOS round trips. Content-critical filesystem attributes remain
-  hidden from this generic interface.
+  files, named directories, and the mounted volume root, with printable ASCII
+  names from 1 through 127 bytes and embedded values up to 3,804 bytes. Create,
+  read, restart persistence, update, and delete pass on local images, the
+  physical USB target, and native macOS round trips. Content-critical filesystem
+  attributes remain hidden from this generic interface.
 - Copied SAK APFS source is Randy-authored project code imported into this
   repo. Copied source-app license tags and branding notices were removed from
   code/docs per owner direction. Third-party notices remain for Qt, WinFsp, and
@@ -181,8 +181,8 @@ Apple VM round-trip verification accepts connection data only as runtime
 parameters. No password, key, or password-file content is copied into source or
 proof JSON. It creates a Windows APFS image, mutates and checks it with the macOS
 kernel plus `fsck_apfs`, mutates it again through WinFsp on Windows, then runs a
-second native macOS mount and `fsck_apfs` pair. File and directory xattrs are
-mutated in both directions. The latest sanitized evidence is
+second native macOS mount and `fsck_apfs` pair. File, named-directory, and
+volume-root xattrs are mutated in both directions. The latest sanitized evidence is
 `docs/evidence/apple-vm-roundtrip-2026-08-16.json`.
 
 Serial-pinned normal-user USB write/delete proof is current. The verifier keeps
@@ -325,10 +325,16 @@ Verified USB evidence:
   cleanup, labels `-AllowStaleInstalledWorker` runs as
   `current_installed_mount_only`, and only mutates its own
   `sak-mounted-file-actions-proof-*` directory on the selected mount during full
-  proof. It verifies file and directory EA create/read/update/delete in addition
-  to file namespace, metadata, ACL, and symbolic-link operations.
+  proof. It verifies file, named-directory, and volume-root EA
+  create/read/update/delete in addition to file namespace, metadata, ACL, and
+  symbolic-link operations.
   Current certification wraps this proof in an explicit temporary writable
   policy window, then restores the selected mount read-only afterward.
+- Current volume-root USB proof completed at `2026-08-16T23:40:04Z` against the
+  serial-pinned Partition 1 target at `V:`. Root, named-directory, and file EA
+  create/read/update/delete passed; the proof tree was removed; `V:` was restored
+  read-only with raw writes disabled. Artifact:
+  `artifacts\usb-rw\usb-mounted-file-actions-proof.json`.
 - Current media layout changed during SAK recertification. On
   `2026-08-16T17:22:33Z`, the same pinned 31,042,043,904-byte USB disk exposed
   Windows MBR Partition 1 at `V:` while the exact target probe identified a
@@ -422,10 +428,11 @@ Verified USB evidence:
   and four clean `fsck_apfs` passes.
   Treat that artifact as the authoritative result for the checked-out build.
   Current local proof includes a 100-iteration Robocopy soak and real APFS
-  basic-info/security, symbolic-link, and supported file-EA mutation on both
-  disposable images and the serial-pinned physical USB. Remaining public-RW
+  basic-info/security, symbolic-link, and supported file/named-directory/
+  volume-root EA mutation on both disposable images and the serial-pinned
+  physical USB. Remaining public-RW
   gates are physical raw-media power-loss recovery, real surprise-unplug,
-  hard-link creation, volume-root directory EAs, zero-length EA values, and
+  hard-link creation, zero-length EA values, and
   non-ASCII-name/large stream-backed xattr mutation.
   Existing Apple hard links remain preserved across Windows mutations. WinFsp's
   current public protocol still marks hard-link support unimplemented, so native
@@ -450,7 +457,9 @@ Verified copied-core mutation evidence:
   COW root-file insert, replace, rename, delete, root-directory create/delete,
   direct directory-child write/rename, child move to root, nested directory
   create, and file-backed raw directory create/delete while preserving a 16 MiB
-  existing file through the vendored `third_party\sak_apfs_core` code.
+  existing file through the vendored `third_party\sak_apfs_core` code. It also
+  creates, reads, preserves across unrelated COW mutations, and deletes a
+  volume-root embedded xattr.
 - `apfs_core_selftest` also composes interrupted checkpoint images from the real
   pre-commit and committed bytes. The current insert changes 18 blocks: readers
   select the old generation before checkpoint-map publication, the old generation

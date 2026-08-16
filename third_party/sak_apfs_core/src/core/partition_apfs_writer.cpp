@@ -1341,8 +1341,19 @@ struct ApfsRecoveredXattr {
 
 struct ApfsRecoveredInodeState {
     QVector<ApfsRecoveredXattr> xattrs;
+    bool inodeFound{false};
+    uint64_t privateId{0};
     uint64_t internalFlags{0};
     uint64_t dstreamLogicalSize{0};
+    uint16_t inodeMode{0};
+    uint64_t createdTimeNs{0};
+    uint64_t modifiedTimeNs{0};
+    uint64_t changedTimeNs{0};
+    uint64_t accessedTimeNs{0};
+    uint32_t writeGenerationCounter{0};
+    uint32_t bsdFlags{0};
+    uint32_t ownerId{0};
+    uint32_t groupId{0};
 };
 
 // A7 (A-h) hard link: one additional name (beyond a file's primary name) resolving to
@@ -1474,6 +1485,9 @@ struct ApfsRootDirectoryPayload {
     uint32_t bsdFlags{0};
     uint32_t ownerId{0};
     uint32_t groupId{0};
+    // Internal inode flags not derived from the current xattr set. Known
+    // xattr-presence flags are recomputed when records are emitted.
+    uint64_t extraInodeFlags{0};
     // Directories can carry Finder metadata, ACLs, and user xattrs. Preserve
     // original flags for unrelated attributes; Windows EA mutations create
     // ordinary embedded attributes.
@@ -2015,6 +2029,18 @@ uint64_t inodeAttributeFlags(const ApfsRootFilePayload& file) {
     return flags;
 }
 
+uint64_t directoryAttributeFlags(const ApfsRootDirectoryPayload& directory) {
+    uint64_t flags = directory.extraInodeFlags;
+    for (const ApfsRecoveredXattr& xattr : directory.xattrs) {
+        if (xattr.name == QByteArray(kApfsXattrNameSecurity)) {
+            flags |= kApfsInodeFlagHasSecurityEa;
+        } else if (xattr.name == QByteArray(kApfsXattrNameFinderInfo)) {
+            flags |= kApfsInodeFlagHasFinderInfo;
+        }
+    }
+    return flags;
+}
+
 // Bytes a file actually allocates on disk: the sum of its data-extent blocks. For
 // a sparse file this is less than the rounded logical size (the hole is unallocated).
 uint64_t fileAllocedBytes(const ApfsRootFilePayload& file, uint32_t blockSize) {
@@ -2191,14 +2217,15 @@ void appendRootFileRecords(QVector<ApfsBtreeKeyValue>* records, const ApfsRootFi
 }
 
 void appendRootDirectoryRecords(QVector<ApfsBtreeKeyValue>* records,
-                                const ApfsRootDirectoryPayload& directory,
-                                int32_t childCount) {
+                                 const ApfsRootDirectoryPayload& directory,
+                                 int32_t childCount) {
     records->append({fsKey(directory.directoryId, kApfsRecordInode),
                      inodeValue({.parentId = directory.parentDirectoryId,
                                  .privateId = directory.privateId,
-                                 .mode = directory.inodeMode,
-                                 .name = directory.directoryName,
-                                 .childOrLinkCount = childCount,
+                                  .mode = directory.inodeMode,
+                                  .name = directory.directoryName,
+                                  .childOrLinkCount = childCount,
+                                  .extraInternalFlags = directoryAttributeFlags(directory),
                                  .createdTimeNs = directory.createdTimeNs,
                                  .modifiedTimeNs = directory.modifiedTimeNs,
                                  .changedTimeNs = directory.changedTimeNs,
@@ -2321,8 +2348,19 @@ ApfsBtreeKeyValue defaultVolumeCryptoStateRecord() {
 }
 
 QVector<ApfsBtreeKeyValue> buildFsTreeRecords(const QVector<ApfsRootFilePayload>& files,
-                                              const QVector<ApfsRootDirectoryPayload>& directories,
-                                              bool includeCryptoState = false) {
+                                               const QVector<ApfsRootDirectoryPayload>& directories,
+                                               bool includeCryptoState = false) {
+    ApfsRootDirectoryPayload root{.directoryName = QStringLiteral("root"),
+                                  .directoryId = kApfsRootDirectoryId,
+                                  .privateId = kApfsRootDirectoryId,
+                                  .parentDirectoryId = kApfsTreeRootEntityId};
+    const auto rootState = std::find_if(
+        directories.cbegin(), directories.cend(), [](const ApfsRootDirectoryPayload& directory) {
+            return directory.directoryId == kApfsRootDirectoryId;
+        });
+    if (rootState != directories.cend()) {
+        root = *rootState;
+    }
     QVector<ApfsBtreeKeyValue> records{
         {directoryEntryKey(kApfsTreeRootEntityId, QStringLiteral("root")),
          directoryEntryValue(kApfsRootDirectoryId, kApfsDirTypeDirectory)},
@@ -2330,21 +2368,39 @@ QVector<ApfsBtreeKeyValue> buildFsTreeRecords(const QVector<ApfsRootFilePayload>
          directoryEntryValue(kApfsPrivateDirectoryId, kApfsDirTypeDirectory)},
         {fsKey(kApfsRootDirectoryId, kApfsRecordInode),
          inodeValue(
-             {.parentId = kApfsTreeRootEntityId,
-              .privateId = kApfsRootDirectoryId,
-              .mode = kApfsModeDirectory,
-              .name = QStringLiteral("root"),
-              .childOrLinkCount = directChildCount(kApfsRootDirectoryId, files, directories)})},
+             {.parentId = root.parentDirectoryId,
+               .privateId = root.privateId,
+               .mode = root.inodeMode,
+               .name = QStringLiteral("root"),
+               .childOrLinkCount = directChildCount(kApfsRootDirectoryId, files, directories),
+               .extraInternalFlags = directoryAttributeFlags(root),
+               .createdTimeNs = root.createdTimeNs,
+               .modifiedTimeNs = root.modifiedTimeNs,
+               .changedTimeNs = root.changedTimeNs,
+               .accessedTimeNs = root.accessedTimeNs,
+               .writeGenerationCounter = root.writeGenerationCounter,
+               .bsdFlags = root.bsdFlags,
+               .ownerId = root.ownerId,
+               .groupId = root.groupId})},
         {fsKey(kApfsPrivateDirectoryId, kApfsRecordInode),
          inodeValue({.parentId = kApfsTreeRootEntityId,
                      .privateId = kApfsPrivateDirectoryId,
                      .mode = static_cast<uint16_t>(kApfsModeDirectory | 0644),
                      .name = QStringLiteral("private-dir"),
-                     .childOrLinkCount = 0})}};
+                      .childOrLinkCount = 0})}};
+    for (const ApfsRecoveredXattr& xattr : root.xattrs) {
+        records.append(
+            {xattrKey(kApfsRootDirectoryId, xattr.name),
+             xattrEmbeddedValue(static_cast<uint16_t>(xattr.flags | kApfsXattrDataEmbedded),
+                                xattr.xdata)});
+    }
     for (const auto& file : files) {
         appendRootFileRecords(&records, file);
     }
     for (const auto& directory : directories) {
+        if (directory.directoryId == kApfsRootDirectoryId) {
+            continue;
+        }
         appendRootDirectoryRecords(&records,
                                    directory,
                                    directChildCount(directory.directoryId, files, directories));
@@ -6924,8 +6980,20 @@ QHash<uint64_t, ApfsRecoveredInodeState> recoverInodeStates(
             if (type == kApfsRecordXattr) {
                 recoverLeafXattr(node, keyPos, valuePos, &state.xattrs);
             } else if (type == kApfsRecordInode) {
+                state.inodeFound = true;
+                state.privateId = le64(node, valuePos + kApfsInodePrivateIdOffset);
                 state.internalFlags = le64(node, valuePos + kApfsInodeInternalFlagsOffset);
                 state.dstreamLogicalSize = inodeXfieldDstreamSize(node, valuePos);
+                state.inodeMode = le16(node, valuePos + kApfsInodeModeOffset);
+                state.createdTimeNs = le64(node, valuePos + kApfsInodeCreatedTimeOffset);
+                state.modifiedTimeNs = le64(node, valuePos + kApfsInodeModifiedTimeOffset);
+                state.changedTimeNs = le64(node, valuePos + kApfsInodeChangedTimeOffset);
+                state.accessedTimeNs = le64(node, valuePos + kApfsInodeAccessedTimeOffset);
+                state.writeGenerationCounter =
+                    le32(node, valuePos + kApfsInodeWriteGenerationOffset);
+                state.bsdFlags = le32(node, valuePos + kApfsInodeBsdFlagsOffset);
+                state.ownerId = le32(node, valuePos + kApfsInodeOwnerOffset);
+                state.groupId = le32(node, valuePos + kApfsInodeGroupOffset);
             }
         }
     }
@@ -7001,6 +7069,24 @@ bool applyPreservedInodeState(const ApfsRecoveredInodeState& state,
 bool applyPreservedDirectoryState(const ApfsRecoveredInodeState& state,
                                   ApfsRootDirectoryPayload* directory,
                                   QStringList* blockers) {
+    if (!state.inodeFound) {
+        blockers->append(QStringLiteral("APFS preserve: directory inode %1 was not found")
+                             .arg(directory->directoryId));
+        return false;
+    }
+    directory->privateId = state.privateId;
+    directory->inodeMode = state.inodeMode;
+    directory->createdTimeNs = state.createdTimeNs;
+    directory->modifiedTimeNs = state.modifiedTimeNs;
+    directory->changedTimeNs = state.changedTimeNs;
+    directory->accessedTimeNs = state.accessedTimeNs;
+    directory->writeGenerationCounter = state.writeGenerationCounter;
+    directory->bsdFlags = state.bsdFlags;
+    directory->ownerId = state.ownerId;
+    directory->groupId = state.groupId;
+    directory->extraInodeFlags =
+        state.internalFlags & ~(kApfsInodeFlagNoRsrcFork | kApfsInodeFlagHasSecurityEa |
+                                kApfsInodeFlagHasFinderInfo);
     for (const ApfsRecoveredXattr& xattr : state.xattrs) {
         if ((xattr.flags & kApfsXattrDataEmbedded) == 0) {
             blockers->append(
@@ -15904,10 +15990,6 @@ bool collectFullFsTree(const QString& sourcePath,
                                  kApfsRootDirectoryId)) {
         return false;
     }
-    if (directories->isEmpty()) {
-        return true;
-    }
-
     QString openError;
     auto image = openFileOrRawDeviceReadOnly(sourcePath, &openError);
     if (!image) {
@@ -15920,7 +16002,7 @@ bool collectFullFsTree(const QString& sourcePath,
     if (!loadFsCommitContext(image.get(), &ctx, blockers)) {
         return false;
     }
-    QSet<uint64_t> directoryIds;
+    QSet<uint64_t> directoryIds{kApfsRootDirectoryId};
     for (const ApfsRootDirectoryPayload& directory : std::as_const(*directories)) {
         directoryIds.insert(directory.directoryId);
     }
@@ -15929,6 +16011,10 @@ bool collectFullFsTree(const QString& sourcePath,
     if (!blockers->isEmpty()) {
         return false;
     }
+    directories->append({.directoryName = QStringLiteral("root"),
+                         .directoryId = kApfsRootDirectoryId,
+                         .privateId = kApfsRootDirectoryId,
+                         .parentDirectoryId = kApfsTreeRootEntityId});
     for (ApfsRootDirectoryPayload& directory : *directories) {
         const auto state = states.constFind(directory.directoryId);
         if (state == states.cend()) {
@@ -21186,10 +21272,11 @@ PartitionApfsImageCheckpointCommitResult PartitionApfsWriter::commitImageOnlyIno
     result.source_image_path = request.source_image_path.trimmed();
     result.written_image_path = request.written_image_path.trimmed();
     const QString targetName = request.target_name.trimmed();
+    const bool targetVolumeRoot = request.target_is_directory && targetName == QStringLiteral("/");
     const QLatin1StringView purpose("inode-metadata-commit");
-    const bool validName = request.target_is_directory
+    const bool validName = targetVolumeRoot || (request.target_is_directory
                                ? appendRootDirectoryNameBlockers(targetName, purpose, &result.blockers)
-                               : appendRootFileNameBlockers(targetName, purpose, &result.blockers);
+                               : appendRootFileNameBlockers(targetName, purpose, &result.blockers));
     if (!validName || !validateImageOnlyCommitSource(purpose, &result)) {
         return result;
     }
@@ -21198,12 +21285,14 @@ PartitionApfsImageCheckpointCommitResult PartitionApfsWriter::commitImageOnlyIno
     if (!collectFullFsTree(result.source_image_path, &files, &directories, &result.blockers)) {
         return result;
     }
-    uint64_t parentDirectoryId = kApfsRootDirectoryId;
-    if (!resolveParentPath(directories,
-                           request.parent_directory_path,
-                           QStringLiteral("inode-metadata-commit"),
-                           &parentDirectoryId,
-                           &result.blockers) ||
+    uint64_t parentDirectoryId =
+        targetVolumeRoot ? kApfsTreeRootEntityId : kApfsRootDirectoryId;
+    if ((!targetVolumeRoot &&
+         !resolveParentPath(directories,
+                            request.parent_directory_path,
+                            QStringLiteral("inode-metadata-commit"),
+                            &parentDirectoryId,
+                            &result.blockers)) ||
         !copyToScratchImage(
             result.source_image_path, result.written_image_path, purpose, &result.blockers)) {
         return result;
@@ -21216,9 +21305,9 @@ PartitionApfsImageCheckpointCommitResult PartitionApfsWriter::commitImageOnlyIno
     QStringList commitBlockers;
     if (commitInPlaceInodeMetadata(&image,
                                    {files,
-                                    directories,
-                                    targetName,
-                                    parentDirectoryId,
+                                     directories,
+                                     targetVolumeRoot ? QStringLiteral("root") : targetName,
+                                     parentDirectoryId,
                                     request.target_is_directory,
                                     request.metadata},
                                    &commit,
@@ -21498,10 +21587,11 @@ PartitionApfsImageCheckpointCommitResult PartitionApfsWriter::commitRawInodeMeta
     result.source_image_path = request.target_path.trimmed();
     result.written_image_path = request.target_path.trimmed();
     const QString targetName = request.target_name.trimmed();
+    const bool targetVolumeRoot = request.target_is_directory && targetName == QStringLiteral("/");
     const QLatin1StringView purpose("inode-metadata-commit");
-    const bool validName = request.target_is_directory
+    const bool validName = targetVolumeRoot || (request.target_is_directory
                                ? appendRootDirectoryNameBlockers(targetName, purpose, &result.blockers)
-                               : appendRootFileNameBlockers(targetName, purpose, &result.blockers);
+                               : appendRootFileNameBlockers(targetName, purpose, &result.blockers));
     if (!validName) {
         return result;
     }
@@ -21510,8 +21600,10 @@ PartitionApfsImageCheckpointCommitResult PartitionApfsWriter::commitRawInodeMeta
     if (!collectFullFsTree(result.written_image_path, &files, &directories, &result.blockers)) {
         return result;
     }
-    uint64_t parentDirectoryId = kApfsRootDirectoryId;
-    if (!resolveParentPath(directories,
+    uint64_t parentDirectoryId =
+        targetVolumeRoot ? kApfsTreeRootEntityId : kApfsRootDirectoryId;
+    if (!targetVolumeRoot &&
+        !resolveParentPath(directories,
                            request.parent_directory_path,
                            QStringLiteral("raw inode-metadata-commit"),
                            &parentDirectoryId,
@@ -21532,8 +21624,8 @@ PartitionApfsImageCheckpointCommitResult PartitionApfsWriter::commitRawInodeMeta
     QStringList commitBlockers;
     if (commitInPlaceInodeMetadata(target.get(),
                                    {files,
-                                    directories,
-                                    targetName,
+                                     directories,
+                                     targetVolumeRoot ? QStringLiteral("root") : targetName,
                                     parentDirectoryId,
                                     request.target_is_directory,
                                     request.metadata},
