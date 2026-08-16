@@ -151,6 +151,14 @@ constexpr uint16_t kApfsDirTypeSymlink = 10;
 constexpr uint64_t kApfsRootDirectoryId = 2;
 constexpr uint8_t kApfsInodeDstreamField = 8;
 constexpr qsizetype kApfsInodePrivateIdOffset = 0x08;
+constexpr qsizetype kApfsInodeCreatedTimeOffset = 0x10;
+constexpr qsizetype kApfsInodeModifiedTimeOffset = 0x18;
+constexpr qsizetype kApfsInodeChangedTimeOffset = 0x20;
+constexpr qsizetype kApfsInodeAccessedTimeOffset = 0x28;
+constexpr qsizetype kApfsInodeWriteGenerationOffset = 0x40;
+constexpr qsizetype kApfsInodeBsdFlagsOffset = 0x44;
+constexpr qsizetype kApfsInodeOwnerOffset = 0x48;
+constexpr qsizetype kApfsInodeGroupOffset = 0x4C;
 constexpr qsizetype kApfsInodeModeOffset = 0x50;
 constexpr qsizetype kApfsInodeInternalFlagsOffset = 0x30;
 constexpr uint64_t kApfsInodeFlagSparse = 0x00'00'02'00;  // APFS_INODE_IS_SPARSE
@@ -437,6 +445,14 @@ struct InodeRecord {
     uint64_t private_id{0};
     uint64_t size{0};
     uint16_t mode{0};
+    uint64_t created_time_ns{0};
+    uint64_t modified_time_ns{0};
+    uint64_t changed_time_ns{0};
+    uint64_t accessed_time_ns{0};
+    uint32_t write_generation_counter{0};
+    uint32_t bsd_flags{0};
+    uint32_t owner_id{0};
+    uint32_t group_id{0};
     bool sparse{false};  // A7 (A-h): INODE_IS_SPARSE -- a trailing/embedded hole reads as zeros
 };
 
@@ -662,6 +678,14 @@ public:
         result.inode_private_id = inode->private_id;
         result.inode_size = inode->size;
         result.inode_mode = inode->mode;
+        result.inode_created_time_ns = inode->created_time_ns;
+        result.inode_modified_time_ns = inode->modified_time_ns;
+        result.inode_changed_time_ns = inode->changed_time_ns;
+        result.inode_accessed_time_ns = inode->accessed_time_ns;
+        result.inode_write_generation_counter = inode->write_generation_counter;
+        result.inode_bsd_flags = inode->bsd_flags;
+        result.inode_owner_id = inode->owner_id;
+        result.inode_group_id = inode->group_id;
         result.inode_sparse = inode->sparse;
 
         const auto decmpfs = decmpfsByInode_.constFind(record->file_id);
@@ -1804,6 +1828,15 @@ private:
         InodeRecord record;
         record.object_id = objectId;
         record.private_id = le64(node, entry.value_offset + kApfsInodePrivateIdOffset);
+        record.created_time_ns = le64(node, entry.value_offset + kApfsInodeCreatedTimeOffset);
+        record.modified_time_ns = le64(node, entry.value_offset + kApfsInodeModifiedTimeOffset);
+        record.changed_time_ns = le64(node, entry.value_offset + kApfsInodeChangedTimeOffset);
+        record.accessed_time_ns = le64(node, entry.value_offset + kApfsInodeAccessedTimeOffset);
+        record.write_generation_counter =
+            le32(node, entry.value_offset + kApfsInodeWriteGenerationOffset);
+        record.bsd_flags = le32(node, entry.value_offset + kApfsInodeBsdFlagsOffset);
+        record.owner_id = le32(node, entry.value_offset + kApfsInodeOwnerOffset);
+        record.group_id = le32(node, entry.value_offset + kApfsInodeGroupOffset);
         record.mode = le16(node, entry.value_offset + kApfsInodeModeOffset);
         record.size = inodeDstreamSize(node, entry);
         record.sparse = (le64(node, entry.value_offset + kApfsInodeInternalFlagsOffset) &
@@ -1946,6 +1979,17 @@ private:
         entry.path = childPath(parentPath, record.name);
         entry.object_id = record.file_id;
         entry.size_bytes = inode == inodeById_.cend() ? 0 : inode->size;
+        if (inode != inodeById_.cend()) {
+            entry.created_time_ns = inode->created_time_ns;
+            entry.modified_time_ns = inode->modified_time_ns;
+            entry.changed_time_ns = inode->changed_time_ns;
+            entry.accessed_time_ns = inode->accessed_time_ns;
+            entry.write_generation_counter = inode->write_generation_counter;
+            entry.bsd_flags = inode->bsd_flags;
+            entry.owner_id = inode->owner_id;
+            entry.group_id = inode->group_id;
+            entry.inode_mode = inode->mode;
+        }
         // A compressed file has no data stream (inode size 0); report its logical
         // size from the decmpfs header so listings show the real size.
         const auto decmpfs = decmpfsByInode_.constFind(record.file_id);

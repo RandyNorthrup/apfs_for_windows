@@ -210,6 +210,14 @@ constexpr uint32_t kApfsObjEncryptedFlag = 0x10'00'00'00;
 // compressed file sets UF_COMPRESSED in the former and pairs a non-zero size in
 // the latter with APFS_INODE_HAS_UNCOMPRESSED_SIZE in internal_flags @0x30.
 constexpr qsizetype kApfsInodeBsdFlagsOffset = 0x44;
+constexpr qsizetype kApfsInodeCreatedTimeOffset = 0x10;
+constexpr qsizetype kApfsInodeModifiedTimeOffset = 0x18;
+constexpr qsizetype kApfsInodeChangedTimeOffset = 0x20;
+constexpr qsizetype kApfsInodeAccessedTimeOffset = 0x28;
+constexpr qsizetype kApfsInodeChildOrLinkCountOffset = 0x38;
+constexpr qsizetype kApfsInodeWriteGenerationOffset = 0x40;
+constexpr qsizetype kApfsInodeOwnerOffset = 0x48;
+constexpr qsizetype kApfsInodeGroupOffset = 0x4C;
 constexpr qsizetype kApfsInodeUncompressedSizeOffset = 0x54;
 constexpr qsizetype kApfsInodeInternalFlagsOffset = 0x30;
 // A7 (A-h) j_inode_val internal_flags (apfs/raw.h): a named-attribute or sparse
@@ -242,8 +250,10 @@ constexpr uint64_t kApfsPrivateDirectoryId = 3;
 constexpr uint64_t kApfsFirstUserObjectId = 16;
 constexpr uint8_t kApfsInodeNameField = 4;
 constexpr int kApfsObjTypeShift = 60;
+constexpr uint16_t kApfsModeTypeMask = 0170000;
 constexpr uint16_t kApfsModeDirectory = 0040000;
 constexpr uint16_t kApfsModeRegularFile = 0100000;
+constexpr uint16_t kApfsModeSymlink = 0120000;
 constexpr qsizetype kApfsObjectOidOffset = 0x08;
 constexpr qsizetype kApfsObjectXidOffset = 0x10;
 constexpr qsizetype kApfsObjectTypeOffset = 0x18;
@@ -533,6 +543,8 @@ constexpr qsizetype kApfsDrecFileIdOffset = 0;
 constexpr qsizetype kApfsDrecTypeOffset = 16;
 constexpr uint16_t kApfsDirTypeDirectory = 4;
 constexpr uint16_t kApfsDirTypeRegularFile = 8;
+constexpr uint16_t kApfsDirTypeSymlink = 10;
+constexpr char kApfsXattrNameSymlink[] = "com.apple.fs.symlink";
 constexpr uint8_t kApfsInodeDstreamField = 8;
 constexpr qsizetype kApfsXfieldHeaderBytes = 4;
 constexpr qsizetype kApfsXfieldDataBytesOffset = 2;
@@ -1395,6 +1407,19 @@ struct ApfsRootFilePayload {
     QByteArray perFileKey;      // 32 raw bytes; encrypts the data blocks (never on disk)
     QByteArray wrappedFileKey;  // 40 bytes = RFC3394(VEK, perFileKey); the on-disk key
     uint32_t protectionClass{0};
+    // Non-directory entry kind. Defaults preserve every existing regular-file
+    // initializer; Apple symbolic links override both and carry their target in
+    // the com.apple.fs.symlink xattr rather than a data stream.
+    uint16_t inodeMode{kApfsModeRegularFile};
+    uint16_t directoryType{kApfsDirTypeRegularFile};
+    uint64_t createdTimeNs{kApfsGeneratedTimestamp};
+    uint64_t modifiedTimeNs{kApfsGeneratedTimestamp};
+    uint64_t changedTimeNs{kApfsGeneratedTimestamp};
+    uint64_t accessedTimeNs{kApfsGeneratedTimestamp};
+    uint32_t writeGenerationCounter{0};
+    uint32_t bsdFlags{0};
+    uint32_t ownerId{0};
+    uint32_t groupId{0};
 };
 
 // Group ascending block addresses into contiguous runs, assigning each run its
@@ -1422,6 +1447,15 @@ struct ApfsRootDirectoryPayload {
     // byte-identical to the certified layout; nested directories carry their real
     // parent's object id.
     uint64_t parentDirectoryId{kApfsRootDirectoryId};
+    uint16_t inodeMode{kApfsModeDirectory};
+    uint64_t createdTimeNs{kApfsGeneratedTimestamp};
+    uint64_t modifiedTimeNs{kApfsGeneratedTimestamp};
+    uint64_t changedTimeNs{kApfsGeneratedTimestamp};
+    uint64_t accessedTimeNs{kApfsGeneratedTimestamp};
+    uint32_t writeGenerationCounter{0};
+    uint32_t bsdFlags{0};
+    uint32_t ownerId{0};
+    uint32_t groupId{0};
 };
 
 uint32_t crc32cWord(uint32_t crc, uint32_t word) {
@@ -1568,6 +1602,14 @@ struct ApfsInodeParams {
     // default_protection_class (offset 0x3C). 0 = unencrypted (byte-identical).
     uint64_t cryptoId = 0;
     uint32_t protectionClass = 0;
+    uint64_t createdTimeNs = kApfsGeneratedTimestamp;
+    uint64_t modifiedTimeNs = kApfsGeneratedTimestamp;
+    uint64_t changedTimeNs = kApfsGeneratedTimestamp;
+    uint64_t accessedTimeNs = kApfsGeneratedTimestamp;
+    uint32_t writeGenerationCounter = 0;
+    uint32_t bsdFlags = 0;
+    uint32_t ownerId = 0;
+    uint32_t groupId = 0;
 };
 
 // internal_flags base is APFS_INODE_NO_RSRC_FORK (0x8000) for a file with no resource
@@ -1587,7 +1629,9 @@ void stampCompressedInodeFields(QByteArray* value, bool compressed, uint64_t unc
     if (!compressed) {
         return;
     }
-    writeLe32(value, kApfsInodeBsdFlagsOffset, kApfsInodeBsdCompressed);
+    writeLe32(value,
+              kApfsInodeBsdFlagsOffset,
+              le32(*value, kApfsInodeBsdFlagsOffset) | kApfsInodeBsdCompressed);
     writeLe64(value, kApfsInodeUncompressedSizeOffset, uncompressedSize);
 }
 
@@ -1672,10 +1716,18 @@ QByteArray inodeValue(const ApfsInodeParams& params) {
                  extraInternalFlags,
                  allocedSizeBytes,
                  cryptoId,
-                 protectionClass] = params;
+                 protectionClass,
+                 createdTimeNs,
+                 modifiedTimeNs,
+                 changedTimeNs,
+                 accessedTimeNs,
+                 writeGenerationCounter,
+                 bsdFlags,
+                 ownerId,
+                 groupId] = params;
     // A compressed regular file carries the NAME xfield only (its bytes live in the
     // decmpfs xattr); an uncompressed regular file additionally carries a DSTREAM.
-    const bool regularFile = (mode & kApfsModeRegularFile) == kApfsModeRegularFile;
+    const bool regularFile = (mode & kApfsModeTypeMask) == kApfsModeRegularFile;
     const bool hasDstream = regularFile && !compressed;
     // A sparse regular file carries an extra INO_EXT_TYPE_SPARSE_BYTES xfield.
     const bool sparse = hasDstream && (extraInternalFlags & kApfsInodeFlagIsSparse) != 0;
@@ -1692,15 +1744,21 @@ QByteArray inodeValue(const ApfsInodeParams& params) {
     QByteArray value(valueBytes, '\0');
     writeLe64(&value, 0, parentId);
     writeLe64(&value, kApfsInodePrivateIdOffset, privateId);
-    writeLe64(&value, 0x10, kApfsGeneratedTimestamp);
-    writeLe64(&value, 0x18, kApfsGeneratedTimestamp);
-    writeLe64(&value, 0x20, kApfsGeneratedTimestamp);
-    writeLe64(&value, 0x28, kApfsGeneratedTimestamp);
+    writeLe64(&value, kApfsInodeCreatedTimeOffset, createdTimeNs);
+    writeLe64(&value, kApfsInodeModifiedTimeOffset, modifiedTimeNs);
+    writeLe64(&value, kApfsInodeChangedTimeOffset, changedTimeNs);
+    writeLe64(&value, kApfsInodeAccessedTimeOffset, accessedTimeNs);
     writeLe64(&value,
               kApfsInodeInternalFlagsOffset,
               inodeInternalFlags(compressed, extraInternalFlags));
-    writeLe32(&value, 0x38, static_cast<uint32_t>(childOrLinkCount));
+    writeLe32(&value,
+              kApfsInodeChildOrLinkCountOffset,
+              static_cast<uint32_t>(childOrLinkCount));
     writeLe32(&value, kApfsInodeDefaultProtectionClassOffset, protectionClass);
+    writeLe32(&value, kApfsInodeWriteGenerationOffset, writeGenerationCounter);
+    writeLe32(&value, kApfsInodeBsdFlagsOffset, bsdFlags);
+    writeLe32(&value, kApfsInodeOwnerOffset, ownerId);
+    writeLe32(&value, kApfsInodeGroupOffset, groupId);
     const uint16_t permissions = (mode & 0777) ? 0 : (regularFile ? 0644 : 0755);
     writeLe16(&value, kApfsInodeModeOffset, mode | permissions);
     stampCompressedInodeFields(&value, compressed, uncompressedSize);
@@ -1949,8 +2007,11 @@ uint64_t fileAllocedBytes(const ApfsRootFilePayload& file, uint32_t blockSize) {
 // xattrs); each value rides embedded in the record (XATTR_DATA_EMBEDDED).
 void appendInodeXattrs(QVector<ApfsBtreeKeyValue>* records, const ApfsRootFilePayload& file) {
     for (const auto& [name, value] : file.xattrs) {
-        records->append(
-            {xattrKey(file.fileId, name), xattrEmbeddedValue(kApfsXattrDataEmbedded, value)});
+        const uint16_t flags =
+            file.directoryType == kApfsDirTypeSymlink && name == QByteArray(kApfsXattrNameSymlink)
+                ? static_cast<uint16_t>(kApfsXattrDataEmbedded | kApfsXattrFileSystemOwned)
+                : kApfsXattrDataEmbedded;
+        records->append({xattrKey(file.fileId, name), xattrEmbeddedValue(flags, value)});
     }
 }
 
@@ -2058,7 +2119,7 @@ void appendRootFileRecords(QVector<ApfsBtreeKeyValue>* records, const ApfsRootFi
         {fsKey(file.fileId, kApfsRecordInode),
          inodeValue({.parentId = file.parentDirectoryId,
                      .privateId = file.privateId,
-                     .mode = kApfsModeRegularFile,
+                     .mode = file.inodeMode,
                      .name = file.fileName,
                      .sizeBytes = logicalSize,
                      .childOrLinkCount = linkCount,
@@ -2070,12 +2131,20 @@ void appendRootFileRecords(QVector<ApfsBtreeKeyValue>* records, const ApfsRootFi
                      // matches its physical extents. Equals the rounded size for a normal file.
                      .allocedSizeBytes = fileAllocedBytes(file, kSupportedApfsBlockSizeBytes),
                      .cryptoId = file.cryptoId,
-                     .protectionClass = file.protectionClass})});
+                     .protectionClass = file.protectionClass,
+                     .createdTimeNs = file.createdTimeNs,
+                     .modifiedTimeNs = file.modifiedTimeNs,
+                     .changedTimeNs = file.changedTimeNs,
+                     .accessedTimeNs = file.accessedTimeNs,
+                     .writeGenerationCounter = file.writeGenerationCounter,
+                     .bsdFlags = file.bsdFlags,
+                     .ownerId = file.ownerId,
+                     .groupId = file.groupId})});
     records->append({directoryEntryKey(file.parentDirectoryId, file.fileName),
                      file.additionalLinks.isEmpty()
-                         ? directoryEntryValue(file.fileId, kApfsDirTypeRegularFile)
+                         ? directoryEntryValue(file.fileId, file.directoryType)
                          : directoryEntryValueWithSibling(
-                               file.fileId, kApfsDirTypeRegularFile, file.primarySiblingId)});
+                               file.fileId, file.directoryType, file.primarySiblingId)});
     appendHardLinkRecords(records, file);
     if (file.compressed) {
         // A transparently-compressed file's inode is UF_COMPRESSED with no data-stream
@@ -2092,7 +2161,9 @@ void appendRootFileRecords(QVector<ApfsBtreeKeyValue>* records, const ApfsRootFi
         appendDataStreamXattrs(records, file);
         return;
     }
-    appendFileDataStreamRecords(records, file);
+    if ((file.inodeMode & kApfsModeTypeMask) == kApfsModeRegularFile) {
+        appendFileDataStreamRecords(records, file);
+    }
     appendInodeXattrs(records, file);
     appendDataStreamXattrs(records, file);
 }
@@ -2103,9 +2174,17 @@ void appendRootDirectoryRecords(QVector<ApfsBtreeKeyValue>* records,
     records->append({fsKey(directory.directoryId, kApfsRecordInode),
                      inodeValue({.parentId = directory.parentDirectoryId,
                                  .privateId = directory.privateId,
-                                 .mode = kApfsModeDirectory,
+                                 .mode = directory.inodeMode,
                                  .name = directory.directoryName,
-                                 .childOrLinkCount = childCount})});
+                                 .childOrLinkCount = childCount,
+                                 .createdTimeNs = directory.createdTimeNs,
+                                 .modifiedTimeNs = directory.modifiedTimeNs,
+                                 .changedTimeNs = directory.changedTimeNs,
+                                 .accessedTimeNs = directory.accessedTimeNs,
+                                 .writeGenerationCounter = directory.writeGenerationCounter,
+                                 .bsdFlags = directory.bsdFlags,
+                                 .ownerId = directory.ownerId,
+                                 .groupId = directory.groupId})});
     records->append({directoryEntryKey(directory.parentDirectoryId, directory.directoryName),
                      directoryEntryValue(directory.directoryId, kApfsDirTypeDirectory)});
 }
@@ -6868,7 +6947,7 @@ bool applyPreservedInodeState(const ApfsRecoveredInodeState& state,
             // extents are owned by xattr_obj_id and its byte length is the dstream size.
             file->resourceForkXattrObjId = le64(x.xdata, 0);
             file->logicalSizeOverride = le64(x.xdata, kApfsXattrDstreamSizeOffset);
-        } else if (x.flags == kApfsXattrDataEmbedded) {
+        } else if ((x.flags & kApfsXattrDataEmbedded) != 0) {
             file->xattrs.append({x.name, x.xdata});
         } else {
             // A large (data-stream) xattr: its value lives in a stream owned by le64 @0 of the
@@ -8193,10 +8272,14 @@ struct ApfsFileInsertRequest {
     // byte-identical. Placed last so the positional aggregate init stays valid.
     QString streamPath;
     uint64_t streamSize{0};
+    bool symbolicLink{false};
 
     // The payload's effective logical size (streamed size when streaming, else the
     // in-memory buffer size).
     [[nodiscard]] uint64_t payloadSize() const {
+        if (symbolicLink) {
+            return 0;
+        }
         return streamPath.isEmpty() ? static_cast<uint64_t>(fileData.size()) : streamSize;
     }
     // The pull source the block-write loop consumes.
@@ -8337,7 +8420,11 @@ void appendInsertedFile(const ApfsChainedListInput& in,
                    .xattrs = in.request.xattrs,
                    .sparse = in.request.sparse,
                    .sparseLogicalSize = in.request.sparseLogicalSize,
-                   .logicalSizeOverride = streamed ? in.request.streamSize : 0});
+                   .logicalSizeOverride = streamed ? in.request.streamSize : 0,
+                   .inodeMode = in.request.symbolicLink ? kApfsModeSymlink
+                                                        : kApfsModeRegularFile,
+                   .directoryType = in.request.symbolicLink ? kApfsDirTypeSymlink
+                                                             : kApfsDirTypeRegularFile});
 }
 
 bool buildChainedFileList(const ApfsChainedListInput& in,
@@ -8428,6 +8515,10 @@ struct ApfsFileInsertBuildInputs {
     // com.apple.ResourceFork data stream. LZBITMAP is resource-only (no inline form), so this
     // always uses a resource fork; highest precedence, being an explicit algorithm request.
     bool compressLzbitmap{false};
+    // Image-only Apple-compatible symbolic-link insertion used by regression
+    // coverage. Empty means regular file. Target is stored NUL-terminated in
+    // com.apple.fs.symlink and no data stream is emitted.
+    QString symbolicLinkTarget;
 };
 
 // Build the embedded com.apple.decmpfs value for an inline LZFSE-compressed file: the 16-byte
@@ -8674,6 +8765,11 @@ bool buildFileInsertRequest(const ApfsFileInsertBuildInputs& in,
     request->cloneSourcePrivateId = in.cloneSourcePrivateId;
     request->cloneLogicalSize = in.cloneLogicalSize;
     request->hardlinkTargetId = in.hardlinkTargetId;
+    if (!in.symbolicLinkTarget.isEmpty()) {
+        request->symbolicLink = true;
+        request->xattrs.append(
+            {QByteArray(kApfsXattrNameSymlink), in.symbolicLinkTarget.toUtf8() + '\0'});
+    }
     // A trailing-hole sparse file: extents cover fileData, the inode logical size is
     // sparseLogicalSize, and the gap reads as zeros. Must exceed the data size.
     if (in.sparseLogicalSize > static_cast<uint64_t>(in.fileData.size())) {
@@ -15415,17 +15511,41 @@ bool collectDirectorySubtree(const ApfsTreeCollect& sink,
             sink.directories->append({.directoryName = entry.name,
                                       .directoryId = entry.object_id,
                                       .privateId = entry.object_id,
-                                      .parentDirectoryId = dirObjectId});
+                                      .parentDirectoryId = dirObjectId,
+                                      .inodeMode = entry.inode_mode != 0 ? entry.inode_mode
+                                                                        : kApfsModeDirectory,
+                                      .createdTimeNs = entry.created_time_ns,
+                                      .modifiedTimeNs = entry.modified_time_ns,
+                                      .changedTimeNs = entry.changed_time_ns,
+                                      .accessedTimeNs = entry.accessed_time_ns,
+                                      .writeGenerationCounter = entry.write_generation_counter,
+                                      .bsdFlags = entry.bsd_flags,
+                                      .ownerId = entry.owner_id,
+                                      .groupId = entry.group_id});
             const QString childPath = (dirPath == QStringLiteral("/") ? QString() : dirPath) +
                                       QStringLiteral("/") + entry.name;
             if (!collectDirectorySubtree(sink, childPath, entry.object_id)) {
                 return false;
             }
-        } else if (entry.regular_file) {
+        } else if (entry.regular_file || entry.symlink) {
             sink.files->append({.fileName = entry.name,
                                 .data = QByteArray(static_cast<qsizetype>(entry.size_bytes), '\0'),
                                 .parentDirectoryId = dirObjectId,
-                                .fileId = entry.object_id});
+                                .fileId = entry.object_id,
+                                .inodeMode = entry.inode_mode != 0
+                                                 ? entry.inode_mode
+                                                 : (entry.symlink ? kApfsModeSymlink
+                                                                  : kApfsModeRegularFile),
+                                .directoryType = entry.symlink ? kApfsDirTypeSymlink
+                                                               : kApfsDirTypeRegularFile,
+                                .createdTimeNs = entry.created_time_ns,
+                                .modifiedTimeNs = entry.modified_time_ns,
+                                .changedTimeNs = entry.changed_time_ns,
+                                .accessedTimeNs = entry.accessed_time_ns,
+                                .writeGenerationCounter = entry.write_generation_counter,
+                                .bsdFlags = entry.bsd_flags,
+                                .ownerId = entry.owner_id,
+                                .groupId = entry.group_id});
         }
     }
     return true;
@@ -20368,6 +20488,14 @@ PartitionApfsImageCheckpointCommitResult PartitionApfsWriter::commitImageOnlyFil
             QStringLiteral("APFS file-insert-commit payload exceeds the current size cap"));
         return result;
     }
+    if (!request.symbolic_link_target.isEmpty() &&
+        (!request.file_data.isEmpty() || request.compress_zlib || request.compress_lzfse ||
+         request.compress_lzvn || request.compress_lzbitmap || request.sparse_logical_size != 0)) {
+        result.blockers.append(QStringLiteral(
+            "APFS symbolic-link insert requires empty file data, no compression, and no sparse "
+            "payload"));
+        return result;
+    }
     if (!validateImageOnlyCommitSource(QLatin1StringView("file-insert-commit"), &result)) {
         return result;
     }
@@ -20412,7 +20540,8 @@ PartitionApfsImageCheckpointCommitResult PartitionApfsWriter::commitImageOnlyFil
                                 .parentDirectoryId = parentDirectoryId,
                                 .compressLzfse = request.compress_lzfse,
                                 .compressLzvn = request.compress_lzvn,
-                                .compressLzbitmap = request.compress_lzbitmap},
+                                .compressLzbitmap = request.compress_lzbitmap,
+                                .symbolicLinkTarget = request.symbolic_link_target},
                                &result);
     image.close();
     result.ok = result.blockers.isEmpty();

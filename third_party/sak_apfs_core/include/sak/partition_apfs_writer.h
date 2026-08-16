@@ -356,6 +356,10 @@ struct PartitionApfsImageFileInsertCommitRequest {
     // trailing hole -- its extents cover file_data and the gap up to this logical
     // size reads as zeros (INODE_IS_SPARSE).
     uint64_t sparse_logical_size{0};
+    // Image-only Apple-compatible symbolic-link insertion. Empty creates a
+    // regular file. A non-empty target requires empty file_data, no compression,
+    // and no sparse payload; target is stored in com.apple.fs.symlink.
+    QString symbolic_link_target;
     PartitionApfsWriteOptions options;
 };
 

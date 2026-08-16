@@ -251,6 +251,27 @@ Exit gate: non-technical user can mount/unmount APFS from UI without command lin
 
 Exit gate: release checklist passes with artifacts under this repo.
 
+## Current Milestone Status
+
+- M0 complete: independent repo, copied core, build, tests, provenance, license,
+  installer, and release packaging exist here. Source checkout remains read-only.
+- M1 complete for current tested media: Explorer/PowerShell listing, reads, hashes,
+  read-only denial, raw image, and physical APFS partition mounts pass.
+- M2 complete for current file/directory transaction surface: arbitrary nested
+  create/write/rename/move/delete, generation refresh, and rollback/crash lanes pass.
+- M3 file-content and namespace exit gate passes on disposable image, physical USB,
+  and native macOS round-trip media. Full Windows metadata mutation is not complete:
+  `SetBasicInfo` and `SetSecurity` remain compatibility no-ops, and Windows-native
+  symlink target/xattr creation is not exposed.
+- M4 install/service/startup implementation passes without reboot. Automatic service,
+  recovery policy, Start Menu, Apps & Features, tray startup, and installed binary
+  hashes pass. Actual host post-reboot proof remains prohibited by user instruction.
+- M5 discovery/manager/tray implementation passes current automated lanes. Real
+  physical surprise-unplug behavior remains unproven.
+- M6 passes local CTest, crash recovery, installed service, current 30 GB USB,
+  Unicode/long-path/Robocopy/concurrent-read, and native Apple round-trip lanes.
+  Remaining certification work is listed under Blockers.
+
 ## Must-Fix Before Public RW Claim
 
 - Resolve any remaining large-container cap mismatch in source/docs and import one
@@ -781,9 +802,10 @@ Exit gate: release checklist passes with artifacts under this repo.
 - Basic serial/signature-pinned physical USB RW now passes as normal user on the
   current hybrid MBR Partition 1 APFS target at `V:`. Remaining work before
   public RW default: longer repeat/soak, real APFS basic-info/security metadata
-  writes, xattr/symlink/hardlink mutation coverage, physical raw-media
-  crash/power-loss recovery proof, real surprise-unplug behavior, and
-  Apple/macOS validation. Deterministic image worker crash recovery now passes.
+  writes, Windows-native xattr/symlink-target creation or mutation, physical
+  raw-media crash/power-loss recovery proof, and real surprise-unplug behavior.
+  Apple-created xattr/symlink/hardlink preservation now passes a native macOS
+  round trip. Deterministic image worker crash recovery also passes.
   `\\.\PhysicalDrive2` remains read-only.
 - Current local state is safe to pause: no UAC prompt is pending, no USB verifier
   process remains, service is Automatic/running, installed binaries match the
@@ -951,3 +973,33 @@ Exit gate: release checklist passes with artifacts under this repo.
   root, and CTest now passes 12/12.
 - No reboot was performed. Actual post-reboot/logon proof remains blocked by
   explicit instruction not to restart this PC.
+- Copied reader/writer now preserves fixed Apple inode metadata during tree-wide
+  copy-on-write rebuilds: create/modify/change/access times, write generation,
+  BSD flags, owner/group, exact inode mode, file payload, and directory payload.
+- Tree collection now includes Apple-created symbolic links. Symlink xattrs accept
+  Apple flag combinations, keep `com.apple.fs.symlink` filesystem-owned, preserve
+  exact `0120755` type/mode, and emit no regular-file data stream or extent.
+- `apfs_core_selftest` creates a symbolic link and proves it survives a later COW
+  mutation. `apfs_probe --debug-file` now reports fixed inode metadata used by the
+  cross-platform preservation assertion.
+- `scripts\verify-apple-vm-roundtrip.ps1` is a credential-free tracked harness:
+  host, user, and ignored password file are runtime inputs; credential material is
+  never copied into source or proof JSON. Parameterized shell helpers live under
+  `scripts\apple-vm`.
+- Automated Windows -> macOS -> Windows -> macOS proof passed on 2026-08-16 in
+  30.321 seconds during the integrated certification. macOS created a hard link,
+  symbolic link, xattr, fixed mode, and
+  fixed mtime; Windows read both links, created/renamed/deleted content, removed one
+  hard-link name, and preserved remaining inode metadata exactly. Final macOS mount
+  verified all hashes, symlink target, xattr, link count, mode, and mtime. Native
+  `fsck_apfs -n` passed before and after both macOS mounts. Sanitized evidence:
+  `docs\evidence\apple-vm-roundtrip-2026-08-16.json`.
+- Integrated no-reboot certification passed 28 steps from
+  `2026-08-16T19:35:20Z` through `2026-08-16T19:37:42Z`: all required local,
+  installed-service, native Apple, direct mounted-drive, alias-deduplication,
+  serial-pinned USB RW, Unicode, 394-character path, Robocopy, concurrent-read,
+  cleanup, and read-only restoration gates passed. Repair was intentionally a
+  separate passing elevated step immediately before the non-admin certification.
+  Release ZIP SHA-256 is
+  `22CA47EBF465286F9E61A67E6AE96171AEA8AE0FC85C1578C4FC99CDA7721907`.
+  Sanitized evidence: `docs\evidence\no-reboot-certification-2026-08-16.json`.

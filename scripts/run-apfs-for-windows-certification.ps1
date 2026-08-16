@@ -8,12 +8,17 @@ param(
     [switch]$RunRepair,
     [switch]$RunUsbMountedFileActions,
     [switch]$RunUsbWriteProof,
+    [switch]$RunAppleVmRoundTrip,
+    [string]$AppleVmHost,
+    [string]$AppleVmUser,
+    [string]$AppleVmPasswordFile,
+    [string]$AppleVmHostKey,
     [int]$UsbDiskNumber = 1,
-    [int]$UsbPartitionNumber = 2,
+    [int]$UsbPartitionNumber = 1,
     [string]$UsbExpectedSerial = "067D19C65080",
     [UInt64]$UsbMinimumDiskBytes = 30000000000,
     [UInt64]$UsbMaximumDiskBytes = 33000000000,
-    [string]$UsbMount = "Y:"
+    [string]$UsbMount = "V:"
 )
 
 $ErrorActionPreference = "Stop"
@@ -200,6 +205,32 @@ $steps += Invoke-CertificationStep -Name "local_worker_large_existing_fileops" -
 
 $steps += Invoke-CertificationStep -Name "local_worker_crash_recovery" -Script {
     powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-local-worker-crash-recovery.ps1
+}
+
+if ($RunAppleVmRoundTrip) {
+    if (-not $AppleVmHost -or -not $AppleVmUser -or -not $AppleVmPasswordFile) {
+        throw "Apple VM round-trip requires -AppleVmHost, -AppleVmUser, and -AppleVmPasswordFile."
+    }
+    $steps += Invoke-CertificationStep -Name "apple_vm_roundtrip" -Script {
+        $arguments = @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", ".\scripts\verify-apple-vm-roundtrip.ps1",
+            "-MacHost", $AppleVmHost,
+            "-MacUser", $AppleVmUser,
+            "-PasswordFile", $AppleVmPasswordFile
+        )
+        if ($AppleVmHostKey) {
+            $arguments += @("-HostKey", $AppleVmHostKey)
+        }
+        powershell @arguments
+    }
+} else {
+    $steps += [pscustomobject][ordered]@{
+        name = "apple_vm_roundtrip"
+        ok = $false
+        skipped = $true
+        reason = "Run with -RunAppleVmRoundTrip and VM connection parameters for native macOS mutation/fsck proof."
+    }
 }
 
 $steps += Invoke-CertificationStep -Name "service_control_ipc" -Script {
@@ -403,6 +434,7 @@ $sakSourceBoundaryOk = @($steps | Where-Object { $_.name -eq "sak_source_boundar
 $licenseNoticesOk = @($steps | Where-Object { $_.name -eq "license_notices" -and $_.payload_ok -eq $true }).Count -gt 0
 $releasePackageOk = @($steps | Where-Object { $_.name -eq "release_package_verification" -and $_.payload_ok -eq $true }).Count -gt 0
 $localWorkerCrashRecoveryOk = @($steps | Where-Object { $_.name -eq "local_worker_crash_recovery" -and $_.payload_ok -eq $true }).Count -gt 0
+$appleVmRoundTripOk = @($steps | Where-Object { $_.name -eq "apple_vm_roundtrip" -and $_.payload_ok -eq $true }).Count -gt 0
 $serviceRecoveryPolicyOk = @($steps | Where-Object { $_.name -eq "service_recovery_policy" -and $_.payload_ok -eq $true }).Count -gt 0
 $startMenuEntriesOk = @($steps | Where-Object { $_.name -eq "start_menu_entries" -and $_.payload_ok -eq $true }).Count -gt 0
 $installedAppRegistrationOk = @($steps | Where-Object { $_.name -eq "installed_app_registration" -and $_.payload_ok -eq $true }).Count -gt 0
@@ -424,16 +456,20 @@ $usbRequirementOk = if ($RunUsbWriteProof) {
 }
 $mountedUsbRequirementOk = if ($RunUsbMountedFileActions) { $mountedUsbFileActionsOk } else { $true }
 
+$appleRequirementOk = if ($RunAppleVmRoundTrip) { $appleVmRoundTripOk } else { $true }
+
 $result = [ordered]@{
     component = "apfs_for_windows"
     check = "certification_orchestrator"
-    ok = [bool]($localOk -and $installedPersistenceOk -and $usbRequirementOk -and $mountedUsbRequirementOk)
+    ok = [bool]($localOk -and $installedPersistenceOk -and $usbRequirementOk -and $mountedUsbRequirementOk -and $appleRequirementOk)
     local_code_gates_ok = [bool]$localOk
     winfsp_prerequisite_ok = [bool]$winfspPrerequisiteOk
     sak_source_boundary_ok = [bool]$sakSourceBoundaryOk
     license_notices_ok = [bool]$licenseNoticesOk
     release_package_ok = [bool]$releasePackageOk
     local_worker_crash_recovery_ok = [bool]$localWorkerCrashRecoveryOk
+    apple_vm_roundtrip_requested = [bool]$RunAppleVmRoundTrip
+    apple_vm_roundtrip_ok = [bool]$appleVmRoundTripOk
     service_recovery_policy_ok = [bool]$serviceRecoveryPolicyOk
     start_menu_entries_ok = [bool]$startMenuEntriesOk
     installed_app_registration_ok = [bool]$installedAppRegistrationOk

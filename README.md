@@ -59,7 +59,9 @@ Current state:
   temporary images and a file-backed raw target: format/list/read, root and
   nested file write/rename/delete, directory create/delete/rename/move, raw
   streaming nested file write, raw file rename/move/delete, and preservation of
-  an existing 16 MiB file.
+  an existing 16 MiB file. It also creates an Apple-compatible symbolic link and
+  proves a later copy-on-write mutation preserves its directory type, inode mode,
+  and `com.apple.fs.symlink` xattr.
 - Copied SAK APFS source is Randy-authored project code imported into this
   repo. Copied source-app license tags and branding notices were removed from
   code/docs per owner direction. Third-party notices remain for Qt, WinFsp, and
@@ -132,6 +134,7 @@ Verify installed service and APFS USB mount state:
 .\scripts\verify-local-worker-fileops.ps1
 .\scripts\verify-local-worker-robocopy-stress.ps1
 .\scripts\verify-local-worker-large-existing-fileops.ps1
+.\scripts\verify-apple-vm-roundtrip.ps1 -MacHost <host> -MacUser <user> -PasswordFile <ignored-path>
 .\scripts\verify-service-control-ipc.ps1
 .\scripts\verify-sak-source-boundary.ps1
 .\scripts\verify-license-notices.ps1
@@ -156,6 +159,13 @@ Verify installed service and APFS USB mount state:
 .\scripts\verify-usb-raw-rw.ps1
 .\scripts\verify-usb-normal-user-rw.ps1 -NoDiagnostics
 ```
+
+Apple VM round-trip verification accepts connection data only as runtime
+parameters. No password, key, or password-file content is copied into source or
+proof JSON. It creates a Windows APFS image, mutates and checks it with the macOS
+kernel plus `fsck_apfs`, mutates it again through WinFsp on Windows, then runs a
+second native macOS mount and `fsck_apfs` pair. The latest sanitized evidence is
+`docs/evidence/apple-vm-roundtrip-2026-08-16.json`.
 
 Serial-pinned normal-user USB write/delete proof is current. The verifier keeps
 file actions in the non-admin parent process, uses service IPC only to switch
@@ -377,11 +387,13 @@ Verified USB evidence:
   `artifacts\certification\apfs-for-windows-certification.json`. It runs build,
   CTest, script parse, local worker, service IPC, package, license, WinFsp,
   copied-core, installed-state, raw-alias, direct mounted-drive USB file-action,
-  deterministic image crash recovery, and serial-pinned USB RW proof gates.
+  deterministic image crash recovery, and serial-pinned USB RW proof gates. With
+  `-RunAppleVmRoundTrip`, it also requires native macOS mutation, kernel mount,
+  and four clean `fsck_apfs` passes.
   Treat that artifact as the authoritative result for the checked-out build.
-  Broader public-certification gates still need physical raw-media power-loss
-  recovery, Apple/macOS validation, surprise-unplug, real APFS basic-info/security
-  metadata writes, and xattr/link coverage.
+  Broader public-RW gates still need physical raw-media power-loss recovery,
+  surprise-unplug, longer soak, real APFS basic-info/security metadata writes,
+  and Windows-native xattr/symlink-target mutation coverage.
 
 Verified copied-core mutation evidence:
 

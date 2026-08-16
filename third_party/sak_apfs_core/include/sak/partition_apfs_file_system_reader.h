@@ -29,6 +29,18 @@ struct PartitionApfsFileEntry {
     bool directory{false};
     bool regular_file{false};
     bool symlink{false};
+    // Fixed j_inode_val metadata. Exposed so copied-core COW mutations can
+    // preserve Apple-created inode identity details instead of replacing them
+    // with generated-image defaults.
+    uint64_t created_time_ns{0};
+    uint64_t modified_time_ns{0};
+    uint64_t changed_time_ns{0};
+    uint64_t accessed_time_ns{0};
+    uint32_t write_generation_counter{0};
+    uint32_t bsd_flags{0};
+    uint32_t owner_id{0};
+    uint32_t group_id{0};
+    uint16_t inode_mode{0};
 };
 
 struct PartitionApfsFileReadResult {
@@ -80,6 +92,14 @@ struct PartitionApfsFileDebugResult {
     uint64_t inode_private_id{0};
     uint64_t inode_size{0};
     uint16_t inode_mode{0};
+    uint64_t inode_created_time_ns{0};
+    uint64_t inode_modified_time_ns{0};
+    uint64_t inode_changed_time_ns{0};
+    uint64_t inode_accessed_time_ns{0};
+    uint32_t inode_write_generation_counter{0};
+    uint32_t inode_bsd_flags{0};
+    uint32_t inode_owner_id{0};
+    uint32_t inode_group_id{0};
     bool inode_sparse{false};
     bool has_decmpfs{false};
     uint32_t decmpfs_algo{0};

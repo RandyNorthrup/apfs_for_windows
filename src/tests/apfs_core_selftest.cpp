@@ -60,6 +60,59 @@ bool rootHas(const sak::PartitionApfsFileReadResult& listing,
     return false;
 }
 
+bool rootHasSymlink(const sak::PartitionApfsFileReadResult& listing, const QString& name) {
+    for (const auto& entry : listing.entries) {
+        if (entry.name == name && entry.symlink) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int verifySymlink(const QString& imagePath,
+                  const QString& path,
+                  const QString& expectedName,
+                  const QString& expectedTarget,
+                  QJsonArray* proofs) {
+    const auto listing = sak::PartitionApfsFileSystemReader::listDirectoryFromImage(
+        imagePath, QStringLiteral("/"), 100);
+    if (!listing.ok || !rootHasSymlink(listing, expectedName)) {
+        return fail(QStringLiteral("verify symlink %1").arg(path),
+                    QStringLiteral("symbolic-link directory entry missing"),
+                    listing.blockers);
+    }
+    QFile image(imagePath);
+    if (!image.open(QIODevice::ReadOnly)) {
+        return fail(QStringLiteral("verify symlink %1").arg(path),
+                    QStringLiteral("unable to open image"));
+    }
+    const auto debug = sak::PartitionApfsFileSystemReader::debugFile(&image, path);
+    bool targetXattr = false;
+    const uint64_t targetBytes = static_cast<uint64_t>(expectedTarget.toUtf8().size() + 1);
+    for (const auto& xattr : debug.xattrs) {
+        if (xattr.name == QStringLiteral("com.apple.fs.symlink") &&
+            xattr.size_bytes == targetBytes) {
+            targetXattr = true;
+            break;
+        }
+    }
+    constexpr uint16_t modeTypeMask = 0170000;
+    constexpr uint16_t symlinkMode = 0120000;
+    if (!debug.ok || debug.directory_type != 10 ||
+        (debug.inode_mode & modeTypeMask) != symlinkMode ||
+        (debug.inode_mode & 0777) != 0755 || !targetXattr) {
+        return fail(QStringLiteral("verify symlink %1").arg(path),
+                    QStringLiteral("symbolic-link inode or target xattr mismatch"),
+                    debug.blockers);
+    }
+    appendProof(proofs,
+                QStringLiteral("verify symlink %1").arg(path),
+                {{QStringLiteral("directory_type"), debug.directory_type},
+                 {QStringLiteral("inode_mode"), debug.inode_mode},
+                 {QStringLiteral("target_bytes"), QString::number(targetBytes)}});
+    return 0;
+}
+
 int verifyRead(const QString& imagePath,
                const QString& path,
                const QByteArray& expected,
@@ -388,6 +441,49 @@ int main(int argc, char* argv[]) {
         return rc;
     }
     if (const int rc = verifyRead(insertedImage, QStringLiteral("/seed.txt"), seedData, &proofs);
+        rc != 0) {
+        return rc;
+    }
+
+    const QString symlinkImage = tempDir.filePath(QStringLiteral("symlink.apfs"));
+    const QString symlinkTarget = QStringLiteral("seed.txt");
+    const auto symlinkInsert = sak::PartitionApfsWriter::commitImageOnlyFileInsert(
+        {.source_image_path = insertedImage,
+         .written_image_path = symlinkImage,
+         .file_name = QStringLiteral("seed-link"),
+         .symbolic_link_target = symlinkTarget,
+         .options = options});
+    if (!symlinkInsert.ok) {
+        return fail(QStringLiteral("commit symbolic link insert"),
+                    QStringLiteral("commitImageOnlyFileInsert failed"),
+                    symlinkInsert.blockers);
+    }
+    if (const int rc = verifySymlink(symlinkImage,
+                                     QStringLiteral("/seed-link"),
+                                     QStringLiteral("seed-link"),
+                                     symlinkTarget,
+                                     &proofs);
+        rc != 0) {
+        return rc;
+    }
+    const QString symlinkPreservedImage =
+        tempDir.filePath(QStringLiteral("symlink-preserved.apfs"));
+    const auto preserveSymlink = sak::PartitionApfsWriter::commitImageOnlyFileInsert(
+        {.source_image_path = symlinkImage,
+         .written_image_path = symlinkPreservedImage,
+         .file_name = QStringLiteral("after-link.txt"),
+         .file_data = QByteArray("mutation after symbolic link"),
+         .options = options});
+    if (!preserveSymlink.ok) {
+        return fail(QStringLiteral("preserve symbolic link across mutation"),
+                    QStringLiteral("commitImageOnlyFileInsert failed"),
+                    preserveSymlink.blockers);
+    }
+    if (const int rc = verifySymlink(symlinkPreservedImage,
+                                     QStringLiteral("/seed-link"),
+                                     QStringLiteral("seed-link"),
+                                     symlinkTarget,
+                                     &proofs);
         rc != 0) {
         return rc;
     }
