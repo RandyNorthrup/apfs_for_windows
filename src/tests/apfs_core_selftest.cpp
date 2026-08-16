@@ -15,6 +15,7 @@
 #include <QTemporaryDir>
 #include <QTextStream>
 
+#include <algorithm>
 #include <cstdint>
 
 namespace {
@@ -67,6 +68,16 @@ bool rootHasSymlink(const sak::PartitionApfsFileReadResult& listing, const QStri
         }
     }
     return false;
+}
+
+const sak::PartitionApfsFileEntry* findEntry(const sak::PartitionApfsFileReadResult& listing,
+                                             const QString& name) {
+    for (const auto& entry : listing.entries) {
+        if (entry.name == name) {
+            return &entry;
+        }
+    }
+    return nullptr;
 }
 
 int verifySymlink(const QString& imagePath,
@@ -487,6 +498,185 @@ int main(int argc, char* argv[]) {
         rc != 0) {
         return rc;
     }
+
+    const QString metadataImage = tempDir.filePath(QStringLiteral("metadata.apfs"));
+    const auto metadata = sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
+        {.source_image_path = symlinkPreservedImage,
+         .written_image_path = metadataImage,
+         .target_name = QStringLiteral("seed.txt"),
+         .metadata = {.update_created_time = true,
+                      .created_time_ns = 1'600'000'000'100'000'000ULL,
+                      .update_modified_time = true,
+                      .modified_time_ns = 1'600'000'000'200'000'000ULL,
+                      .update_changed_time = true,
+                      .changed_time_ns = 1'600'000'000'300'000'000ULL,
+                      .update_accessed_time = true,
+                      .accessed_time_ns = 1'600'000'000'400'000'000ULL,
+                      .update_inode_mode = true,
+                      .inode_mode = 0600,
+                      .update_bsd_flags = true,
+                      .bsd_flags = 0x00008002U,
+                      .update_owner_id = true,
+                      .owner_id = 501,
+                      .update_group_id = true,
+                      .group_id = 20},
+         .options = options});
+    if (!metadata.ok) {
+        return fail(QStringLiteral("commit inode metadata"),
+                    QStringLiteral("commitImageOnlyInodeMetadata failed"),
+                    metadata.blockers);
+    }
+    const auto metadataListing = sak::PartitionApfsFileSystemReader::listDirectoryFromImage(
+        metadataImage, QStringLiteral("/"), 100);
+    const auto* metadataEntry = findEntry(metadataListing, QStringLiteral("seed.txt"));
+    if (!metadataListing.ok || metadataEntry == nullptr ||
+        metadataEntry->created_time_ns != 1'600'000'000'100'000'000ULL ||
+        metadataEntry->modified_time_ns != 1'600'000'000'200'000'000ULL ||
+        metadataEntry->changed_time_ns != 1'600'000'000'300'000'000ULL ||
+        metadataEntry->accessed_time_ns != 1'600'000'000'400'000'000ULL ||
+        (metadataEntry->inode_mode & 0777) != 0600 || metadataEntry->bsd_flags != 0x00008002U ||
+        metadataEntry->owner_id != 501 || metadataEntry->group_id != 20) {
+        return fail(QStringLiteral("verify inode metadata"),
+                    QStringLiteral("inode metadata mismatch"),
+                    metadataListing.blockers);
+    }
+    if (const int rc = verifyRead(metadataImage, QStringLiteral("/seed.txt"), seedData, &proofs);
+        rc != 0) {
+        return rc;
+    }
+    appendProof(&proofs,
+                QStringLiteral("verify inode metadata"),
+                {{QStringLiteral("mode"), metadataEntry->inode_mode},
+                 {QStringLiteral("bsd_flags"), QString::number(metadataEntry->bsd_flags)},
+                 {QStringLiteral("owner"), QString::number(metadataEntry->owner_id)},
+                 {QStringLiteral("group"), QString::number(metadataEntry->group_id)}});
+
+    const QString xattrImage = tempDir.filePath(QStringLiteral("xattr.apfs"));
+    sak::PartitionApfsInodeMetadataUpdate xattrUpdate;
+    xattrUpdate.xattr_mutations.append(
+        {.name = QStringLiteral("user.apfswin_roundtrip"),
+         .value = QByteArray("Windows EA payload")});
+    const auto xattrSet = sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
+        {.source_image_path = metadataImage,
+         .written_image_path = xattrImage,
+         .target_name = QStringLiteral("seed.txt"),
+         .metadata = xattrUpdate,
+         .options = options});
+    if (!xattrSet.ok) {
+        return fail(QStringLiteral("commit embedded xattr"),
+                    QStringLiteral("commitImageOnlyInodeMetadata failed"),
+                    xattrSet.blockers);
+    }
+    const auto xattrRead = sak::PartitionApfsFileSystemReader::readFileFromImage(
+        xattrImage, QStringLiteral("/seed.txt"), static_cast<uint64_t>(seedData.size()));
+    const bool xattrPresent = std::any_of(
+        xattrRead.xattrs.cbegin(), xattrRead.xattrs.cend(), [](const auto& xattr) {
+            return xattr.first == QStringLiteral("user.apfswin_roundtrip") &&
+                   xattr.second == QByteArray("Windows EA payload");
+        });
+    if (!xattrRead.ok || !xattrPresent || xattrRead.data != seedData) {
+        return fail(QStringLiteral("verify embedded xattr"),
+                    QStringLiteral("xattr or file payload mismatch"),
+                    xattrRead.blockers);
+    }
+    appendProof(&proofs,
+                QStringLiteral("verify embedded xattr"),
+                {{QStringLiteral("name"), QStringLiteral("user.apfswin_roundtrip")},
+                 {QStringLiteral("bytes"), 18}});
+
+    const QString xattrRemovedImage = tempDir.filePath(QStringLiteral("xattr-removed.apfs"));
+    sak::PartitionApfsInodeMetadataUpdate xattrRemove;
+    xattrRemove.xattr_mutations.append(
+        {.name = QStringLiteral("user.apfswin_roundtrip"), .remove = true});
+    const auto xattrDelete = sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
+        {.source_image_path = xattrImage,
+         .written_image_path = xattrRemovedImage,
+         .target_name = QStringLiteral("seed.txt"),
+         .metadata = xattrRemove,
+         .options = options});
+    const auto afterXattrDelete = sak::PartitionApfsFileSystemReader::readFileFromImage(
+        xattrRemovedImage, QStringLiteral("/seed.txt"), static_cast<uint64_t>(seedData.size()));
+    const bool xattrStillPresent = std::any_of(
+        afterXattrDelete.xattrs.cbegin(), afterXattrDelete.xattrs.cend(), [](const auto& xattr) {
+            return xattr.first == QStringLiteral("user.apfswin_roundtrip");
+        });
+    if (!xattrDelete.ok || !afterXattrDelete.ok || xattrStillPresent ||
+        afterXattrDelete.data != seedData) {
+        return fail(QStringLiteral("delete embedded xattr"),
+                    QStringLiteral("xattr delete or file preservation failed"),
+                    xattrDelete.blockers + afterXattrDelete.blockers);
+    }
+    appendProof(&proofs, QStringLiteral("delete embedded xattr"));
+
+    sak::PartitionApfsInodeMetadataUpdate protectedXattr;
+    protectedXattr.xattr_mutations.append(
+        {.name = QStringLiteral("com.apple.decmpfs"), .value = QByteArray("blocked")});
+    const auto protectedResult = sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
+        {.source_image_path = xattrRemovedImage,
+         .written_image_path = tempDir.filePath(QStringLiteral("protected-xattr.apfs")),
+         .target_name = QStringLiteral("seed.txt"),
+         .metadata = protectedXattr,
+         .options = options});
+    if (protectedResult.ok || protectedResult.blockers.isEmpty()) {
+        return fail(QStringLiteral("reject content-critical xattr"),
+                    QStringLiteral("protected xattr mutation did not fail closed"));
+    }
+    appendProof(&proofs, QStringLiteral("reject content-critical xattr"));
+
+    const QString emptyImage = tempDir.filePath(QStringLiteral("empty-for-link.apfs"));
+    const auto emptyInsert = sak::PartitionApfsWriter::commitImageOnlyFileInsert(
+        {.source_image_path = xattrRemovedImage,
+         .written_image_path = emptyImage,
+         .file_name = QStringLiteral("converted-link"),
+         .options = options});
+    if (!emptyInsert.ok) {
+        return fail(QStringLiteral("insert empty link placeholder"),
+                    QStringLiteral("commitImageOnlyFileInsert failed"),
+                    emptyInsert.blockers);
+    }
+    const QString convertedLinkImage = tempDir.filePath(QStringLiteral("converted-link.apfs"));
+    const auto convertedLink = sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
+        {.source_image_path = emptyImage,
+         .written_image_path = convertedLinkImage,
+         .target_name = QStringLiteral("converted-link"),
+         .metadata = {.update_symbolic_link_target = true,
+                      .symbolic_link_target = QStringLiteral("seed.txt")},
+         .options = options});
+    if (!convertedLink.ok) {
+        return fail(QStringLiteral("convert file to symbolic link"),
+                    QStringLiteral("commitImageOnlyInodeMetadata failed"),
+                    convertedLink.blockers);
+    }
+    if (const int rc = verifySymlink(convertedLinkImage,
+                                     QStringLiteral("/converted-link"),
+                                     QStringLiteral("converted-link"),
+                                     QStringLiteral("seed.txt"),
+                                     &proofs);
+        rc != 0) {
+        return rc;
+    }
+    const QString clearedLinkImage = tempDir.filePath(QStringLiteral("cleared-link.apfs"));
+    const auto clearedLink = sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
+        {.source_image_path = convertedLinkImage,
+         .written_image_path = clearedLinkImage,
+         .target_name = QStringLiteral("converted-link"),
+         .metadata = {.update_symbolic_link_target = true},
+         .options = options});
+    if (!clearedLink.ok) {
+        return fail(QStringLiteral("clear symbolic link"),
+                    QStringLiteral("commitImageOnlyInodeMetadata failed"),
+                    clearedLink.blockers);
+    }
+    const auto clearedListing = sak::PartitionApfsFileSystemReader::listDirectoryFromImage(
+        clearedLinkImage, QStringLiteral("/"), 100);
+    const auto* clearedEntry = findEntry(clearedListing, QStringLiteral("converted-link"));
+    if (!clearedListing.ok || clearedEntry == nullptr || !clearedEntry->regular_file ||
+        clearedEntry->symlink || clearedEntry->size_bytes != 0) {
+        return fail(QStringLiteral("verify cleared symbolic link"),
+                    QStringLiteral("cleared link is not an empty regular file"),
+                    clearedListing.blockers);
+    }
+    appendProof(&proofs, QStringLiteral("verify cleared symbolic link"));
 
     if (insert.checkpoint_map_block == 0 || insert.superblock_block == 0 ||
         insert.checkpoint_map_block == insert.superblock_block) {

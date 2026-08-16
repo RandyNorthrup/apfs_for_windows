@@ -259,18 +259,20 @@ Exit gate: release checklist passes with artifacts under this repo.
   read-only denial, raw image, and physical APFS partition mounts pass.
 - M2 complete for current file/directory transaction surface: arbitrary nested
   create/write/rename/move/delete, generation refresh, and rollback/crash lanes pass.
-- M3 file-content and namespace exit gate passes on disposable image, physical USB,
-  and native macOS round-trip media. Full Windows metadata mutation is not complete:
-  `SetBasicInfo` and `SetSecurity` remain compatibility no-ops, and Windows-native
-  symlink target/xattr creation is not exposed.
+- M3 file-content, namespace, basic-info, POSIX security metadata, symbolic-link,
+  and supported regular-file EA exit gates pass on disposable image, physical
+  USB, and native macOS round-trip media. Hard-link creation plus directory,
+  non-ASCII-name, and large stream-backed xattr mutation remain outside the
+  current Windows callback surface.
 - M4 exit gate passes in a clean Windows 11 VM. Package install, Automatic service,
-  saved mount restoration across two reboots, Start Menu, Apps & Features, one
+  saved mount restoration across a reboot, Start Menu, Apps & Features, one
   interactive tray process, installed hashes, and complete uninstall cleanup pass.
   Actual host post-reboot proof remains prohibited by user instruction.
 - M5 discovery/manager/tray implementation passes current automated lanes. Real
   physical surprise-unplug behavior remains unproven.
 - M6 passes local CTest, crash recovery, installed service, current 30 GB USB,
-  Unicode/long-path/Robocopy/concurrent-read, and native Apple round-trip lanes.
+  Unicode/long-path/Robocopy/concurrent-read, a 100-iteration Robocopy soak, and
+  native Apple round-trip lanes.
   Remaining certification work is listed under Blockers.
 
 ## Must-Fix Before Public RW Claim
@@ -490,11 +492,15 @@ Exit gate: release checklist passes with artifacts under this repo.
   service-control IPC proof, installed-service mode preflight, current-state
   preflight, and USB RW preflight. Direct mounted-drive USB file actions only run with explicit
   `-RunUsbMountedFileActions`; full USB mutation proof only runs with explicit
-  `-RunUsbWriteProof` after preflight is ready. Current full no-reboot run
-  completed on `2026-08-16` with `ok=true`,
+  `-RunUsbWriteProof` after preflight is ready. Current full no-reboot run used
+  `-SkipBuild` after the same Release build and CTest suite had passed, then
+  completed from `2026-08-16T22:10:16Z` through
+  `2026-08-16T22:13:07Z` with `ok=true`,
   `local_code_gates_ok=true`, `installed_persistence_ok=true`,
-  `mounted_usb_file_actions_ok=true`, `usb_preflight_ready=true`, and
-  `full_usb_rw_ok=true`. It verified build, CTest, script parse, WinFsp,
+  `local_worker_metadata_links_ok=true`, `apple_vm_roundtrip_ok=true`,
+  `mounted_usb_file_actions_ok=true`, `usb_preflight_ready=true`,
+  `full_usb_rw_ok=true`, and `extended_usb_file_actions_ok=true`. It verified
+  CTest, script parse, WinFsp,
   copied-core boundary, license/package gates, installed-state preflight,
   direct mounted-drive USB file actions, and serial-pinned USB normal-user RW
   proof through `verify-usb-normal-user-rw.ps1 -NoDiagnostics`. It used Disk 1
@@ -808,13 +814,16 @@ Exit gate: release checklist passes with artifacts under this repo.
 
 - Source checkout remains off-limits for edits; APFS core changes for this
   project are made only in the copied tree under `third_party\sak_apfs_core`.
-- Basic serial/signature-pinned physical USB RW now passes as normal user on the
-  current hybrid MBR Partition 1 APFS target at `V:`. Remaining work before
-  public RW default: longer repeat/soak, real APFS basic-info/security metadata
-  writes, Windows-native xattr/symlink-target creation or mutation, physical
-  raw-media crash/power-loss recovery proof, and real surprise-unplug behavior.
-  Apple-created xattr/symlink/hardlink preservation now passes a native macOS
-  round trip. Deterministic image worker crash recovery also passes.
+- Serial/signature-pinned physical USB RW passes as normal user on the current
+  hybrid MBR Partition 1 APFS target at `V:`. Real APFS timestamp/BSD-flag/POSIX
+  security metadata writes, read-only enforcement, Windows symbolic-link
+  creation/follow/delete, and supported regular-file EA create/read/update/delete
+  now pass on that raw target. Remaining work before public RW default: hard-link
+  creation; directory, non-ASCII-name, and large stream-backed xattr mutation;
+  physical raw-media crash/power-loss recovery proof; and real surprise-unplug
+  behavior. Apple-created xattr/symlink/hardlink preservation and supported EA
+  mutation pass a native macOS round trip. Deterministic image worker crash
+  recovery also passes.
   `\\.\PhysicalDrive2` remains read-only.
 - Current local state is safe to pause: no UAC prompt is pending, no USB verifier
   process remains, service is Automatic/running, installed binaries match the
@@ -826,6 +835,12 @@ Exit gate: release checklist passes with artifacts under this repo.
   `Unable to write C:/ProgramData/APFS for Windows/mounts.json`.
 - Current build adds service-owned config IPC for safe post-install policy
   changes, and the installed service/worker/probe now match the current build.
+- Software PnP disable could not simulate surprise removal because Windows reports
+  the pinned USB device is pending a system reboot and does not support that
+  command on this OS product. Host restart remains prohibited. The failed attempt
+  performed no file mutation, left the service process alive, and restored `V:`
+  read-only with raw writes disabled. Real physical unplug/replug and raw-media
+  power-loss recovery remain unproven.
 - `scripts\repair-apfs-for-windows-install.ps1` now packages that admin recovery
   as one auditable command, reaps lingering installed worker processes before
   copying binaries, and proves the result in
@@ -833,9 +848,9 @@ Exit gate: release checklist passes with artifacts under this repo.
 - Installed binaries match the current build for service, worker, manager, and
   probe. Installed-service image policy proof and normal-user USB RW proof have
   current passing artifacts.
-- The handle table is now bounded by a deferred-retirement quarantine and has
-  local handle-lifetime plus 10-iteration Robocopy stress proof. Longer
-  Explorer/Robocopy soak still remains before public RW claim.
+- The handle table is bounded by a deferred-retirement quarantine. Local
+  handle-lifetime proof plus 10- and 100-iteration Robocopy stress runs pass with
+  matching hashes, edits, replacements, recursive cleanup, and no leaked mount.
 - Service-start APFS whole-device/GPT/MBR signature discovery, live config/device resync,
   drive-letter changes, remove-mount, automount enable/disable policy, and
   deterministic target-loss cleanup are proven without reboot. The service now
@@ -843,7 +858,7 @@ Exit gate: release checklist passes with artifacts under this repo.
   real physical surprise-unplug proof.
 - Host PC has not been rebooted because it must not be restarted. A clean Windows
   11 VM now proves Automatic service startup, saved `R:` mount restoration, exact
-  file hash, and read-only enforcement across two VM reboots. Host evidence still
+  file hash, and read-only enforcement across a VM reboot. Host evidence still
   uses current-state/no-reboot lanes only.
 - The previous USB read blocker was classified and removed. `apfs_probe
   --debug-file icons8-jester.svg` showed no decmpfs/resource-fork data and an
@@ -913,10 +928,11 @@ Exit gate: release checklist passes with artifacts under this repo.
   diagnostics for one APFS path, which was used to classify the stale USB
   `icons8-jester.svg` entry as corrupt metadata rather than a compression or
   resource-fork reader gap.
-- `apfs_winfs_worker` writable mounts now accept `SetSecurity` as a no-op,
-  matching the existing `SetBasicInfo` behavior. This prevents normal Windows
-  delete flows from failing before `CanDelete`/`CleanupDelete` on writable APFS
-  mounts when Explorer or PowerShell touches security metadata.
+- Historical note: `SetBasicInfo` and `SetSecurity` originally returned success as
+  compatibility no-ops. The current worker supersedes that behavior with real APFS
+  metadata commits. `SetSecurity` persists POSIX mode/owner/group; `GetSecurity`
+  intentionally returns a permissive mount compatibility ACL so Explorer access
+  does not depend on mapping Apple numeric identities to local Windows accounts.
 - `scripts\verify-usb-normal-user-rw.ps1` now waits for live mounted root
   ACL/attribute mode to match the requested read-only/read-write policy instead
   of trusting config health before the service has restarted the worker.
@@ -981,6 +997,13 @@ Exit gate: release checklist passes with artifacts under this repo.
   root, and CTest now passes 12/12.
 - No host reboot was performed; explicit instruction not to restart this PC
   remains in force. Windows VM reboot/logon proof is tracked separately.
+- `scripts\verify-usb-pnp-loss-recovery.ps1` pins the USB device by disk, serial,
+  size, bus, and PnP instance before attempting a software disable/enable cycle.
+  Windows blocked the current attempt because the device has a pending reboot
+  operation and this OS product does not support the requested `pnputil` action.
+  No media mutation occurred; service PID remained stable and `V:` recovered
+  read-only/raw-disabled. Physical surprise unplug and power-loss proof remain
+  open without restarting the host.
 - Copied reader/writer now preserves fixed Apple inode metadata during tree-wide
   copy-on-write rebuilds: create/modify/change/access times, write generation,
   BSD flags, owner/group, exact inode mode, file payload, and directory payload.
@@ -990,29 +1013,43 @@ Exit gate: release checklist passes with artifacts under this repo.
 - `apfs_core_selftest` creates a symbolic link and proves it survives a later COW
   mutation. `apfs_probe --debug-file` now reports fixed inode metadata used by the
   cross-platform preservation assertion.
+- Copied writer metadata updates now atomically create, replace, or delete
+  embedded regular-file xattrs while preserving unrelated embedded and stream
+  xattrs. WinFsp `GetEa`/`SetEa` exposes printable ASCII names from 1 through 127
+  bytes and values up to the APFS embedded limit of 3,804 bytes. Protected
+  `com.apple.decmpfs`, `com.apple.ResourceFork`, and `com.apple.fs.symlink`
+  attributes fail closed. Directory, non-ASCII-name, and large stream-backed
+  xattr mutation remain outside current scope.
+- Local WinFsp proof passed EA create/read, restart persistence, update, and
+  delete. Physical `V:` proof passed the same operations using
+  `user.apfswin_usb`, then removed its proof tree. `apfs_core_selftest` also
+  verifies copied-core set/read/delete and protected-name rejection.
 - `scripts\verify-apple-vm-roundtrip.ps1` is a credential-free tracked harness:
   host, user, and ignored password file are runtime inputs; credential material is
   never copied into source or proof JSON. Parameterized shell helpers live under
   `scripts\apple-vm`.
 - Automated Windows -> macOS -> Windows -> macOS proof passed on 2026-08-16 in
-  32.6 seconds during the final integrated certification. macOS created a hard link,
-  symbolic link, xattr, fixed mode, and
-  fixed mtime; Windows read both links, created/renamed/deleted content, removed one
-  hard-link name, and preserved remaining inode metadata exactly. Final macOS mount
-  verified all hashes, symlink target, xattr, link count, mode, and mtime. Native
-  `fsck_apfs -n` passed before and after both macOS mounts. Sanitized evidence:
+  37.134 seconds during the latest integrated certification. Windows created an
+  EA; macOS read and updated it, created two more xattrs, a hard link, and a
+  symbolic link; Windows read both macOS xattrs, updated one, deleted the other,
+  and replaced its original EA; final macOS verified every expected value and
+  deletion. Windows also removed one hard-link name while preserving the
+  surviving inode metadata exactly. Native `fsck_apfs -n` passed before and
+  after both macOS mounts. Final image SHA-256 was
+  `1FAACA888FDCE373A01B54D7D0DF97C90181F2303971134E7C78EAB669A8F374`.
+  Sanitized evidence:
   `docs\evidence\apple-vm-roundtrip-2026-08-16.json`.
-- Integrated no-reboot certification passed 28 steps from
-  `2026-08-16T20:19:08Z` through `2026-08-16T20:21:47Z`: all required local,
+- Integrated no-host-reboot certification passed 28 steps with `-SkipBuild` from
+  `2026-08-16T22:10:16Z` through `2026-08-16T22:13:07Z` after the same Release
+  build and 12-test CTest suite had already passed. All required local,
   installed-service, native Apple, direct mounted-drive, alias-deduplication,
   serial-pinned USB RW, Unicode, 394-character path, Robocopy, concurrent-read,
-  cleanup, and read-only restoration gates passed. Repair was intentionally a
-  separate passing elevated step immediately before the non-admin certification.
-  Release ZIP SHA-256 is
-  `28065BA2C9BEE49E6A61985F21F597A586247D3F7D9767A53F2E26E680AC31B0`.
+  metadata/ACL/symbolic-link/EA, cleanup, and read-only restoration gates passed.
+  Repair was intentionally a separate passing elevated step before certification.
   Sanitized evidence: `docs\evidence\no-reboot-certification-2026-08-16.json`.
-- Exact release ZIP Windows 11 VM lifecycle passed on 2026-08-16. Archive
-  `28065BA2C9BEE49E6A61985F21F597A586247D3F7D9767A53F2E26E680AC31B0`
+- Exact release ZIP Windows 11 VM lifecycle passed from
+  `2026-08-16T22:23:24Z` through `2026-08-16T22:26:21Z`. Archive
+  `DBC359604FE7DA66866966B702520914885C3FE32320F279BD9FD7F41DC16445`
   installed using package-local Qt, restored saved `R:` automatically after VM
   reboot, matched the expected file hash, denied writes in read-only mode, ran
   one interactive tray with `Open` and `Exit`, and matched installed binary
@@ -1020,3 +1057,8 @@ Exit gate: release checklist passes with artifacts under this repo.
   Run fallback, Start Menu, Apps & Features registration, and install root while
   preserving WinFsp and the APFS fixture. Sanitized evidence:
   `docs\evidence\windows-vm-install-lifecycle-2026-08-16.json`.
+- `scripts\verify-windows-vm-package-lifecycle.ps1` and
+  `scripts\windows-vm\run-package-lifecycle-phase.ps1` replace the earlier
+  ignored one-off VM commands with a credential-free reusable harness. Host,
+  user, and ignored password file remain runtime inputs; the harness restarts
+  only the named VM and cleans its remote validation directory after uninstall.

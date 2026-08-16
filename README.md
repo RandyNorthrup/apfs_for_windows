@@ -63,6 +63,18 @@ Current state:
   an existing 16 MiB file. It also creates an Apple-compatible symbolic link and
   proves a later copy-on-write mutation preserves its directory type, inode mode,
   and `com.apple.fs.symlink` xattr.
+- Writable mounts commit Windows basic-info changes to APFS create/access/modify/
+  change times and BSD flags. Windows security changes persist APFS POSIX mode,
+  owner, and group while a compatibility ACL keeps the mounted drive usable by
+  the interactive user and service account.
+- WinFsp reparse callbacks expose Apple symbolic links and create, follow,
+  retarget, clear, or delete relative and same-volume absolute symbolic links.
+  External absolute targets fail closed.
+- WinFsp `GetEa`/`SetEa` callbacks expose regular-file APFS extended attributes
+  with printable ASCII names from 1 through 127 bytes and embedded values up to
+  3,804 bytes. Create, read, restart persistence, update, and delete pass on
+  local images, the physical USB target, and native macOS round trips. Content-
+  critical filesystem attributes remain hidden from this generic interface.
 - Copied SAK APFS source is Randy-authored project code imported into this
   repo. Copied source-app license tags and branding notices were removed from
   code/docs per owner direction. Third-party notices remain for Qt, WinFsp, and
@@ -246,7 +258,7 @@ notices, and APFS core provenance note are present. Package verification also
 runs install and repair payload-only validation from the staged directory.
 
 Windows 11 VM lifecycle certification now covers clean package install,
-Automatic service start, saved `R:` mount restoration across two VM reboots,
+Automatic service start, saved `R:` mount restoration across a VM reboot,
 exact file hash and read-only enforcement, one interactive tray process with
 `Open` and `Exit`, and packaged uninstall with no product residue. WinFsp and the
 APFS fixture remain after uninstall. Sanitized proof is tracked at
@@ -405,9 +417,13 @@ Verified USB evidence:
   `-RunAppleVmRoundTrip`, it also requires native macOS mutation, kernel mount,
   and four clean `fsck_apfs` passes.
   Treat that artifact as the authoritative result for the checked-out build.
-  Broader public-RW gates still need physical raw-media power-loss recovery,
-  surprise-unplug, longer soak, real APFS basic-info/security metadata writes,
-  and Windows-native xattr/symlink-target mutation coverage.
+  Current local proof includes a 100-iteration Robocopy soak and real APFS
+  basic-info/security, symbolic-link, and supported file-EA mutation on both
+  disposable images and the serial-pinned physical USB. Remaining public-RW
+  gates are physical raw-media power-loss recovery, real surprise-unplug,
+  hard-link creation, and directory/non-ASCII-name/large stream-backed xattr
+  mutation. Existing Apple hard links remain preserved across Windows
+  mutations.
 
 Verified copied-core mutation evidence:
 

@@ -59,10 +59,22 @@ windows_hash=$(shasum -a 256 "$mount_point/WinProof/Nested/windows-renamed-back-
 unicode_hash=$(shasum -a 256 "$unicode_file" | awk '{print toupper($1)}')
 hardlink_hash=$(shasum -a 256 "$mount_point/MacProof/mac-hardlink.txt" | awk '{print toupper($1)}')
 return_hash=$(shasum -a 256 "$mount_point/WindowsReturn/Nested/final.txt" | awk '{print toupper($1)}')
+windows_link="$mount_point/WinProof/windows-created-symlink"
+[ -L "$windows_link" ] || fail "Windows-created symbolic link missing"
+windows_link_target=$(readlink "$windows_link")
+windows_link_hash=$(shasum -a 256 "$windows_link" | awk '{print toupper($1)}')
+windows_birth_epoch=$(stat -f '%B' "$mount_point/WinProof/Nested/windows-renamed-back-by-windows.txt")
+windows_mtime_epoch=$(stat -f '%m' "$mount_point/WinProof/Nested/windows-renamed-back-by-windows.txt")
+windows_bsd_flags=$(stat -f '%f' "$mount_point/WinProof/Nested/windows-renamed-back-by-windows.txt")
+windows_xattr=$(xattr -p user.apfswin_windows "$mount_point/WinProof/Nested/windows-renamed-back-by-windows.txt")
 symlink_path="$mount_point/MacProof/windows-symlink"
 [ -L "$symlink_path" ] || fail "symbolic link missing"
 symlink_target=$(readlink "$symlink_path")
 xattr_value=$(xattr -p user.apfswin_roundtrip "$mount_point/MacProof/mac-hardlink.txt")
+updated_xattr=$(xattr -p user.apfswin_rw "$mount_point/MacProof/xattr-roundtrip.txt")
+if xattr -p user.apfswin_delete "$mount_point/MacProof/xattr-roundtrip.txt" >/dev/null 2>&1; then
+    fail "Windows-deleted xattr remains"
+fi
 link_count=$(stat -f '%l' "$mount_point/MacProof/mac-hardlink.txt")
 file_mode=$(stat -f '%Sp' "$mount_point/MacProof/mac-hardlink.txt")
 owner_group=$(stat -f '%u:%g' "$mount_point/MacProof/mac-hardlink.txt")
@@ -73,8 +85,15 @@ assert_equal "$windows_hash" "B58EE1D8BF6C0FF48A5D0AB28DCC938E941CE9AC9091E9C103
 assert_equal "$unicode_hash" "D15C89BA02965E34B5E292AEB8D7B7D0A12B538FB6DC623DD998327D3F118DBC" "Unicode file hash"
 assert_equal "$hardlink_hash" "76FD91615F8B856AB498A543707EE1BAC16AD6F56E597584538A0356389281DB" "hard-link hash"
 assert_equal "$return_hash" "A4DDBF29B458AABD9FA5E69BDDF059C7C61A3E1779E6B1E6954CEFEECF580964" "return file hash"
+assert_equal "$windows_link_target" "Nested/windows-renamed-back-by-windows.txt" "Windows-created symlink target"
+assert_equal "$windows_link_hash" "$windows_hash" "Windows-created symlink hash"
+assert_equal "$windows_birth_epoch" "1612325106" "Windows-created birth time"
+assert_equal "$windows_mtime_epoch" "1680674828" "Windows-created mtime"
+assert_equal "$windows_bsd_flags" "98304" "Windows-created BSD flags"
+assert_equal "$windows_xattr" "Windows final EA payload" "Windows final xattr"
 assert_equal "$symlink_target" "../WinProof/Nested/windows-renamed-by-macos.txt" "symlink target"
 assert_equal "$xattr_value" "macOS xattr payload" "xattr value"
+assert_equal "$updated_xattr" "Windows updated xattr payload" "updated xattr value"
 assert_equal "$link_count" "1" "hard-link count"
 assert_equal "$file_mode" "-rw-r--r--" "file mode"
 assert_equal "$mtime" "2020-01-02T03:04:05-0800" "mtime"
@@ -91,10 +110,18 @@ APPLE_RETURN_OK=1
 IMAGE_SHA256=$image_hash
 WINDOWS_SHA256=$windows_hash
 UNICODE_SHA256=$unicode_hash
+WINDOWS_LINK_TARGET=$windows_link_target
+WINDOWS_LINK_SHA256=$windows_link_hash
+WINDOWS_BIRTH_EPOCH=$windows_birth_epoch
+WINDOWS_MTIME_EPOCH=$windows_mtime_epoch
+WINDOWS_BSD_FLAGS=$windows_bsd_flags
+WINDOWS_XATTR=$windows_xattr
 HARDLINK_SHA256=$hardlink_hash
 RETURN_SHA256=$return_hash
 SYMLINK_TARGET=$symlink_target
 XATTR_VALUE=$xattr_value
+UPDATED_XATTR_VALUE=$updated_xattr
+DELETED_XATTR_ABSENT=1
 LINK_COUNT=$link_count
 FILE_MODE=$file_mode
 OWNER_GROUP=$owner_group

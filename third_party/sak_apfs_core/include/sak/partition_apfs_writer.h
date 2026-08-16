@@ -424,6 +424,55 @@ struct PartitionApfsImageFileRenameCommitRequest {
     PartitionApfsWriteOptions options;
 };
 
+/// @brief One embedded APFS extended-attribute change. Removal is explicit so
+///        an empty value remains representable to non-Windows callers.
+struct PartitionApfsXattrMutation {
+    QString name;
+    QByteArray value;
+    bool remove{false};
+};
+
+/// @brief Selective APFS inode metadata changes. Update flags make zero-valued
+///        timestamps, ids, mode bits, and BSD flags representable.
+struct PartitionApfsInodeMetadataUpdate {
+    bool update_created_time{false};
+    uint64_t created_time_ns{0};
+    bool update_modified_time{false};
+    uint64_t modified_time_ns{0};
+    bool update_changed_time{false};
+    uint64_t changed_time_ns{0};
+    bool update_accessed_time{false};
+    uint64_t accessed_time_ns{0};
+    bool update_inode_mode{false};
+    uint16_t inode_mode{0};
+    bool update_bsd_flags{false};
+    uint32_t bsd_flags{0};
+    bool update_owner_id{false};
+    uint32_t owner_id{0};
+    bool update_group_id{false};
+    uint32_t group_id{0};
+    // Atomic embedded-xattr edits. Data-stream xattrs and content-critical
+    // filesystem-owned names fail closed; unrelated attributes are preserved.
+    QVector<PartitionApfsXattrMutation> xattr_mutations;
+    // Non-empty converts an empty regular file to an Apple symbolic link or
+    // updates an existing link. Empty converts a symbolic link to an empty
+    // regular file. The target is stored in com.apple.fs.symlink.
+    bool update_symbolic_link_target{false};
+    QString symbolic_link_target;
+};
+
+/// @brief Update one file or directory inode without changing its object id,
+///        name, data extents, unrelated xattrs, or surrounding tree.
+struct PartitionApfsImageInodeMetadataCommitRequest {
+    QString source_image_path;
+    QString written_image_path;
+    QString target_name;
+    QString parent_directory_path;
+    bool target_is_directory{false};
+    PartitionApfsInodeMetadataUpdate metadata;
+    PartitionApfsWriteOptions options;
+};
+
 /// @brief Request to rename one file inside a root directory (same parent) in a
 ///        generated APFS container with an in-place copy-on-write commit (A2-3.2).
 struct PartitionApfsImageRootDirectoryFileRenameRequest {
@@ -533,6 +582,19 @@ struct PartitionApfsRawDirectoryMutationCommitRequest {
     // Parent directory path for create/delete; empty = container root,
     // "/docs" or "/docs/sub" targets nested directories.
     QString parent_directory_path;
+    bool target_mutation_confirmed{false};
+    bool allow_raw_device_target{false};
+    PartitionApfsWriteOptions options;
+};
+
+/// @brief Raw-device form of PartitionApfsImageInodeMetadataCommitRequest.
+struct PartitionApfsRawInodeMetadataCommitRequest {
+    QString target_path;
+    uint64_t target_container_bytes{0};
+    QString target_name;
+    QString parent_directory_path;
+    bool target_is_directory{false};
+    PartitionApfsInodeMetadataUpdate metadata;
     bool target_mutation_confirmed{false};
     bool allow_raw_device_target{false};
     PartitionApfsWriteOptions options;
@@ -980,6 +1042,8 @@ public:
         const PartitionApfsImageFileDeleteCommitRequest& request);
     [[nodiscard]] static PartitionApfsImageCheckpointCommitResult commitImageOnlyFileRename(
         const PartitionApfsImageFileRenameCommitRequest& request);
+    [[nodiscard]] static PartitionApfsImageCheckpointCommitResult commitImageOnlyInodeMetadata(
+        const PartitionApfsImageInodeMetadataCommitRequest& request);
     /// @brief In-place COW file write/insert/delete/rename commit applied directly to a
     ///        generated APFS container on a confirmed raw device (the on-hardware
     ///        analogue of the commitImageOnly* family; no scratch clone). commitRawFileWrite
@@ -992,6 +1056,8 @@ public:
         const PartitionApfsRawFileDeleteCommitRequest& request);
     [[nodiscard]] static PartitionApfsImageCheckpointCommitResult commitRawFileRename(
         const PartitionApfsRawFileRenameCommitRequest& request);
+    [[nodiscard]] static PartitionApfsImageCheckpointCommitResult commitRawInodeMetadata(
+        const PartitionApfsRawInodeMetadataCommitRequest& request);
     /// @brief In-place COW directory mutations applied directly to a generated APFS
     ///        container on a confirmed raw device (the on-hardware analogue of the
     ///        commitImageOnlyDirectory* family; no scratch clone).

@@ -16,6 +16,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "lib\native-ea.ps1")
 
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -58,6 +59,43 @@ function Get-FileSha256 {
         return $null
     }
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+}
+
+function Test-TimeNear {
+    param(
+        [Parameter(Mandatory = $true)][datetime]$Actual,
+        [Parameter(Mandatory = $true)][datetime]$Expected
+    )
+    [Math]::Abs(($Actual.ToUniversalTime() - $Expected.ToUniversalTime()).TotalSeconds) -le 1
+}
+
+function New-NativeFileSymbolicLink {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Target
+    )
+    if (-not ("ApfsForWindows.SymbolicLinkOps" -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+namespace ApfsForWindows {
+    public static class SymbolicLinkOps {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern bool CreateSymbolicLink(string linkPath, string targetPath, int flags);
+
+        public static void CreateFile(string linkPath, string targetPath) {
+            const int SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE = 0x2;
+            if (!CreateSymbolicLink(linkPath, targetPath,
+                SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+    }
+}
+"@
+    }
+    [ApfsForWindows.SymbolicLinkOps]::CreateFile($Path, $Target)
 }
 
 function Invoke-FsMutationWithRetry {
@@ -169,13 +207,25 @@ $testName = "$ProofPrefix$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
 $testDir = Join-Path $mountRoot $testName
 $filePath = Join-Path $testDir "native-write.txt"
 $renamedPath = Join-Path $testDir "native-rename.txt"
+$metadataPath = Join-Path $testDir "metadata.txt"
+$symbolicLinkPath = Join-Path $testDir "metadata-link"
 $payload = [Text.Encoding]::UTF8.GetBytes("APFS mounted file action proof $testName`r`n")
 $payload2 = [Text.Encoding]::UTF8.GetBytes("APFS mounted file action proof updated $testName`r`n")
+$metadataText = "APFS raw metadata and symbolic-link proof $testName"
+$metadataPayload = [Text.Encoding]::UTF8.GetBytes($metadataText)
+$metadataCreation = [datetime]::SpecifyKind([datetime]"2021-02-03T04:05:06", "Utc")
+$metadataAccess = [datetime]::SpecifyKind([datetime]"2022-03-04T05:06:07", "Utc")
+$metadataWrite = [datetime]::SpecifyKind([datetime]"2023-04-05T06:07:08", "Utc")
 $expectedHash = ([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($payload))).Replace("-", "")
 $expectedHash2 = ([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($payload2))).Replace("-", "")
 $writeHash = $null
 $renameHash = $null
 $overwriteHash = $null
+$metadataState = $null
+$symbolicLinkState = $null
+$readonlyWriteBlocked = $false
+$aclExitCode = $null
+$eaState = $null
 
 $normalIdentity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $serviceHealth = $null
@@ -260,6 +310,68 @@ try {
             [IO.File]::WriteAllBytes($renamedPath, $payload2)
         }
         $overwriteHash = (Get-FileHash -LiteralPath $renamedPath -Algorithm SHA256).Hash
+        Invoke-FsMutationWithRetry -Name "write metadata proof file" -Timeout $TimeoutSeconds -Operation {
+            [IO.File]::WriteAllBytes($metadataPath, $metadataPayload)
+        }
+        [IO.File]::SetCreationTimeUtc($metadataPath, $metadataCreation)
+        [IO.File]::SetLastAccessTimeUtc($metadataPath, $metadataAccess)
+        [IO.File]::SetLastWriteTimeUtc($metadataPath, $metadataWrite)
+        [IO.File]::SetAttributes(
+            $metadataPath,
+            [IO.FileAttributes]::Hidden -bor [IO.FileAttributes]::Archive -bor
+            [IO.FileAttributes]::ReadOnly)
+        try {
+            [IO.File]::AppendAllText($metadataPath, "blocked")
+        } catch {
+            $readonlyWriteBlocked = $true
+        }
+        [IO.File]::SetAttributes(
+            $metadataPath,
+            [IO.FileAttributes]::Hidden -bor [IO.FileAttributes]::Archive)
+        & icacls.exe $metadataPath /inheritance:r /grant:r "$normalIdentity`:(M)" | Out-Null
+        $aclExitCode = $LASTEXITCODE
+        if ($aclExitCode -ne 0) {
+            throw "metadata proof icacls failed with exit code $aclExitCode"
+        }
+        $eaName = "user.apfswin_usb"
+        Set-NativeExtendedAttribute -Path $metadataPath -Name $eaName `
+            -Value ([Text.Encoding]::UTF8.GetBytes("USB Windows EA payload"))
+        $eaFirst = [Text.Encoding]::UTF8.GetString([byte[]](
+            Get-NativeExtendedAttribute -Path $metadataPath -Name $eaName))
+        Set-NativeExtendedAttribute -Path $metadataPath -Name $eaName `
+            -Value ([Text.Encoding]::UTF8.GetBytes("USB updated EA payload"))
+        $eaUpdated = [Text.Encoding]::UTF8.GetString([byte[]](
+            Get-NativeExtendedAttribute -Path $metadataPath -Name $eaName))
+        Remove-NativeExtendedAttribute -Path $metadataPath -Name $eaName
+        $eaState = [ordered]@{
+            name = $eaName
+            first_value = $eaFirst
+            updated_value = $eaUpdated
+            absent_after_delete = [bool](-not (Test-NativeExtendedAttribute `
+                -Path $metadataPath -Name $eaName))
+        }
+        $metadataItem = Get-Item -LiteralPath $metadataPath -Force
+        $metadataState = [ordered]@{
+            creation_utc = $metadataItem.CreationTimeUtc.ToString("O")
+            access_utc = $metadataItem.LastAccessTimeUtc.ToString("O")
+            write_utc = $metadataItem.LastWriteTimeUtc.ToString("O")
+            hidden = [bool](($metadataItem.Attributes -band [IO.FileAttributes]::Hidden) -ne 0)
+            archive = [bool](($metadataItem.Attributes -band [IO.FileAttributes]::Archive) -ne 0)
+            length = [int64]$metadataItem.Length
+        }
+        New-NativeFileSymbolicLink -Path $symbolicLinkPath -Target "metadata.txt"
+        $symbolicLinkItem = Get-Item -LiteralPath $symbolicLinkPath -Force
+        $symbolicLinkState = [ordered]@{
+            reparse = [bool](($symbolicLinkItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+            target = @($symbolicLinkItem.Target) -join ""
+            content = [string](Get-Content -LiteralPath $symbolicLinkPath -Raw)
+        }
+        Remove-Item -LiteralPath $symbolicLinkPath -Force
+        if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) {
+            throw "Deleting symbolic link deleted metadata proof target."
+        }
+        [IO.File]::SetAttributes($metadataPath, [IO.FileAttributes]::Normal)
+        Remove-Item -LiteralPath $metadataPath -Force
         Invoke-FsMutationWithRetry -Name "delete proof file" -Timeout $TimeoutSeconds -Operation {
             Remove-Item -LiteralPath $renamedPath -Force
         }
@@ -327,6 +439,20 @@ $ok = ($preflightOk -or ($rootReady -and
     ($writeHash -ieq $expectedHash) -and
     ($renameHash -ieq $expectedHash) -and
     ($overwriteHash -ieq $expectedHash2) -and
+    $readonlyWriteBlocked -and
+    ($aclExitCode -eq 0) -and
+    ($eaState.first_value -eq "USB Windows EA payload") -and
+    ($eaState.updated_value -eq "USB updated EA payload") -and
+    $eaState.absent_after_delete -and
+    $metadataState.hidden -and
+    $metadataState.archive -and
+    ($metadataState.length -eq $metadataPayload.Length) -and
+    (Test-TimeNear ([datetime]$metadataState.creation_utc) $metadataCreation) -and
+    (Test-TimeNear ([datetime]$metadataState.access_utc) $metadataAccess) -and
+    (Test-TimeNear ([datetime]$metadataState.write_utc) $metadataWrite) -and
+    $symbolicLinkState.reparse -and
+    ($symbolicLinkState.target -eq "metadata.txt") -and
+    ($symbolicLinkState.content -eq $metadataText) -and
     $renamedFileAbsent -and
     $proofDirectoryAbsent -and
     $staleCleanupDurable))
@@ -371,6 +497,11 @@ $result = [ordered]@{
         path = $buildWorkerPath
         sha256 = $buildWorkerHash
     }
+    metadata = $metadataState
+    acl_exit_code = $aclExitCode
+    extended_attribute = $eaState
+    readonly_write_blocked = [bool]$readonlyWriteBlocked
+    symbolic_link = $symbolicLinkState
     service_health_error = $serviceHealthError
     final_service_health_error = $finalServiceHealthError
     mount_policy = if ($mountPolicy) {

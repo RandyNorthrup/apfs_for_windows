@@ -55,22 +55,42 @@ unicode_file="$mount_point/WinProof/Unicode-Resume-placeholder/roundtrip.txt"
 unicode_file=${unicode_file/Unicode-Resume-placeholder/Unicode-Résumé-日本語}
 windows_hash=$(shasum -a 256 "$windows_file" | awk '{print toupper($1)}')
 unicode_hash=$(shasum -a 256 "$unicode_file" | awk '{print toupper($1)}')
+windows_link="$mount_point/WinProof/windows-created-symlink"
+[ -L "$windows_link" ] || fail "Windows-created symbolic link missing"
+windows_link_target=$(readlink "$windows_link")
+windows_link_hash=$(shasum -a 256 "$windows_link" | awk '{print toupper($1)}')
+windows_birth_epoch=$(stat -f '%B' "$windows_file")
+windows_mtime_epoch=$(stat -f '%m' "$windows_file")
+windows_bsd_flags=$(stat -f '%f' "$windows_file")
+windows_xattr=$(xattr -p user.apfswin_windows "$windows_file")
 assert_equal "$windows_hash" "B58EE1D8BF6C0FF48A5D0AB28DCC938E941CE9AC9091E9C103D85C3784C1E4FC" "Windows origin hash"
 assert_equal "$unicode_hash" "D15C89BA02965E34B5E292AEB8D7B7D0A12B538FB6DC623DD998327D3F118DBC" "Unicode origin hash"
+assert_equal "$windows_link_target" "Nested/windows.txt" "Windows-created symlink target"
+assert_equal "$windows_link_hash" "$windows_hash" "Windows-created symlink hash"
+assert_equal "$windows_birth_epoch" "1612325106" "Windows-created birth time"
+assert_equal "$windows_mtime_epoch" "1680674828" "Windows-created mtime"
+assert_equal "$windows_bsd_flags" "98304" "Windows-created BSD flags"
+assert_equal "$windows_xattr" "Windows EA payload" "Windows-created xattr"
+xattr -w user.apfswin_windows 'macOS updated Windows EA payload' "$windows_file"
 
 mac_dir="$mount_point/MacProof"
 mac_file="$mac_dir/Nested/mac.txt"
 hardlink="$mac_dir/mac-hardlink.txt"
+xattr_file="$mac_dir/xattr-roundtrip.txt"
 symlink="$mac_dir/windows-symlink"
 renamed_windows="$mount_point/WinProof/Nested/windows-renamed-by-macos.txt"
 mkdir -p "$mac_dir/Nested"
 printf '%s' 'macOS native APFS round-trip payload' >"$mac_file"
+printf '%s' 'macOS xattr carrier' >"$xattr_file"
 ln "$mac_file" "$hardlink"
 ln -s '../WinProof/Nested/windows-renamed-by-macos.txt' "$symlink"
 xattr -w user.apfswin_roundtrip 'macOS xattr payload' "$hardlink"
+xattr -w user.apfswin_rw 'macOS xattr payload' "$xattr_file"
+xattr -w user.apfswin_delete 'delete this in Windows' "$xattr_file"
 chmod 0644 "$hardlink"
 TZ=America/Los_Angeles touch -t 202001020304.05 "$hardlink"
 mv "$windows_file" "$renamed_windows"
+ln -snf 'Nested/windows-renamed-by-macos.txt' "$windows_link"
 sync
 
 mac_hash=$(shasum -a 256 "$mac_file" | awk '{print toupper($1)}')
@@ -99,6 +119,12 @@ cat <<EOF
 APPLE_MUTATION_OK=1
 WINDOWS_SHA256=$windows_hash
 UNICODE_SHA256=$unicode_hash
+WINDOWS_LINK_TARGET=$windows_link_target
+WINDOWS_LINK_SHA256=$windows_link_hash
+WINDOWS_BIRTH_EPOCH=$windows_birth_epoch
+WINDOWS_MTIME_EPOCH=$windows_mtime_epoch
+WINDOWS_BSD_FLAGS=$windows_bsd_flags
+WINDOWS_XATTR=$windows_xattr
 MAC_SHA256=$mac_hash
 SYMLINK_TARGET=$symlink_target
 XATTR_VALUE=$xattr_value

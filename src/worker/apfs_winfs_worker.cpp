@@ -2,6 +2,7 @@
 
 #include "sak/partition_apfs_file_system_reader.h"
 #include "sak/partition_apfs_writer.h"
+#include "sak/apfs_compression.h"
 #include "sak/partition_file_system_detector.h"
 #include "sak/partition_raw_device_io.h"
 
@@ -53,10 +54,37 @@ constexpr uint64_t kFallbackProbeBytes = 1024ULL * 1024ULL * 1024ULL;
 constexpr uint64_t kDefaultMaxFileReadBytes = std::numeric_limits<uint64_t>::max();
 constexpr uint64_t kDefaultMaxMutationBytes = 64ULL * 1024ULL * 1024ULL;
 constexpr uint64_t kAllocationUnit = 4096;
+constexpr uint64_t kWindowsEpochOffset100Ns = 116'444'736'000'000'000ULL;
+constexpr uint32_t kBsdFlagUserImmutable = 0x00000002U;
+constexpr uint32_t kBsdFlagUserHidden = 0x00008000U;
+constexpr uint32_t kBsdFlagUserArchive = 0x00010000U;
 constexpr qint64 kMaxTraceBytes = 8LL * 1024LL * 1024LL;
 constexpr int kTestFaultExitCode = 197;
 constexpr QLatin1StringView kTestFaultBeforeImageReplace("before-image-replace");
 constexpr QLatin1StringView kTestFaultAfterImageReplace("after-image-replace");
+constexpr int kWindowsEaMaxNameBytes = 127;
+
+bool isContentCriticalXattr(const QByteArray& name) {
+    return name == QByteArray(sak::kApfsXattrNameCompressed) ||
+           name == QByteArray(sak::kApfsXattrNameResourceFork) ||
+           name == QByteArray("com.apple.fs.symlink");
+}
+
+bool isWindowsEaName(const QString& name, QByteArray* bytes = nullptr) {
+    const QByteArray latin1 = name.toLatin1();
+    if (latin1.isEmpty() || latin1.size() > kWindowsEaMaxNameBytes || latin1.contains('\0') ||
+        QString::fromLatin1(latin1) != name ||
+        std::any_of(latin1.cbegin(), latin1.cend(), [](char value) {
+            const auto byte = static_cast<unsigned char>(value);
+            return byte < 0x20 || byte > 0x7e;
+        })) {
+        return false;
+    }
+    if (bytes) {
+        *bytes = latin1;
+    }
+    return true;
+}
 
 QString normalizeApfsPath(const QString& input) {
     QString path = input.trimmed();
@@ -248,6 +276,25 @@ uint64_t currentFileTime() {
     return value.QuadPart;
 }
 
+uint64_t fileTimeFromUnixNs(uint64_t unixNs) {
+    const uint64_t ticks = unixNs / 100;
+    if (ticks > std::numeric_limits<uint64_t>::max() - kWindowsEpochOffset100Ns) {
+        return std::numeric_limits<uint64_t>::max();
+    }
+    return ticks + kWindowsEpochOffset100Ns;
+}
+
+uint64_t unixNsFromFileTime(uint64_t fileTime) {
+    if (fileTime <= kWindowsEpochOffset100Ns) {
+        return 0;
+    }
+    const uint64_t ticks = fileTime - kWindowsEpochOffset100Ns;
+    if (ticks > std::numeric_limits<uint64_t>::max() / 100) {
+        return std::numeric_limits<uint64_t>::max();
+    }
+    return ticks * 100;
+}
+
 std::wstring wide(const QString& value) {
     return value.toStdWString();
 }
@@ -275,6 +322,15 @@ struct ResolvedEntry {
     bool symlink{false};
     uint64_t objectId{1};
     uint64_t sizeBytes{0};
+    uint64_t createdTimeNs{0};
+    uint64_t modifiedTimeNs{0};
+    uint64_t changedTimeNs{0};
+    uint64_t accessedTimeNs{0};
+    uint32_t writeGenerationCounter{0};
+    uint32_t bsdFlags{0};
+    uint32_t ownerId{0};
+    uint32_t groupId{0};
+    uint16_t inodeMode{0};
 };
 
 struct FileContext {
@@ -289,6 +345,34 @@ struct FileContext {
     QString stagedWritePath;
     bool stagedWriteFileBacked{false};
 };
+
+struct EaMutationCollectContext {
+    QVector<sak::PartitionApfsXattrMutation> mutations;
+};
+
+NTSTATUS collectEaMutation(FSP_FILE_SYSTEM*,
+                           PVOID contextValue,
+                           PFILE_FULL_EA_INFORMATION ea) {
+    if (!contextValue || !ea || ea->EaNameLength == 0 || ea->Flags != 0) {
+        return STATUS_EA_LIST_INCONSISTENT;
+    }
+    const QByteArray name(ea->EaName, ea->EaNameLength);
+    const QString decodedName = QString::fromLatin1(name);
+    QByteArray validatedName;
+    if (!isWindowsEaName(decodedName, &validatedName) || validatedName != name ||
+        isContentCriticalXattr(name)) {
+        return STATUS_EA_LIST_INCONSISTENT;
+    }
+    if (ea->EaValueLength > sak::kApfsXattrMaxEmbeddedSize) {
+        return STATUS_EA_TOO_LARGE;
+    }
+    const auto* value = reinterpret_cast<const char*>(ea->EaName) + ea->EaNameLength + 1;
+    auto* context = static_cast<EaMutationCollectContext*>(contextValue);
+    context->mutations.append({.name = decodedName,
+                               .value = QByteArray(value, ea->EaValueLength),
+                               .remove = ea->EaValueLength == 0});
+    return STATUS_SUCCESS;
+}
 
 class ApfsMountState {
 public:
@@ -380,6 +464,8 @@ public:
 
         return STATUS_SUCCESS;
     }
+
+    void setMountPoint(const QString& mountPoint) { mountPoint_ = QDir::toNativeSeparators(mountPoint); }
 
     NTSTATUS volumeInfo(FSP_FSCTL_VOLUME_INFO* info) const {
         info->TotalSize = totalBytes_;
@@ -490,10 +576,12 @@ public:
         if (attributes) {
             *attributes = attributesFor(entry);
         }
-        return copySecurity(descriptor, descriptorSize);
+        return copySecurity(entry, descriptor, descriptorSize);
     }
 
-    NTSTATUS copySecurity(PSECURITY_DESCRIPTOR descriptor, SIZE_T* descriptorSize) const {
+    NTSTATUS copySecurity(const ResolvedEntry&,
+                          PSECURITY_DESCRIPTOR descriptor,
+                          SIZE_T* descriptorSize) const {
         if (!descriptorSize) {
             return STATUS_SUCCESS;
         }
@@ -513,12 +601,17 @@ public:
         info->FileAttributes = attributesFor(entry);
         info->AllocationSize = alignAllocation(entry.sizeBytes);
         info->FileSize = entry.sizeBytes;
-        info->CreationTime = createdTime_;
-        info->LastAccessTime = createdTime_;
-        info->LastWriteTime = createdTime_;
-        info->ChangeTime = createdTime_;
+        info->CreationTime = entry.createdTimeNs != 0 ? fileTimeFromUnixNs(entry.createdTimeNs)
+                                                       : createdTime_;
+        info->LastAccessTime = entry.accessedTimeNs != 0 ? fileTimeFromUnixNs(entry.accessedTimeNs)
+                                                         : createdTime_;
+        info->LastWriteTime = entry.modifiedTimeNs != 0 ? fileTimeFromUnixNs(entry.modifiedTimeNs)
+                                                        : createdTime_;
+        info->ChangeTime = entry.changedTimeNs != 0 ? fileTimeFromUnixNs(entry.changedTimeNs)
+                                                    : createdTime_;
         info->IndexNumber = entry.objectId == 0 ? 1 : entry.objectId;
         info->HardLinks = 1;
+        info->ReparseTag = entry.symlink ? IO_REPARSE_TAG_SYMLINK : 0;
     }
 
     uint32_t serialNumber() const {
@@ -972,6 +1065,61 @@ public:
         return status;
     }
 
+    NTSTATUS setBasicInfoCallback(FileContext* context,
+                                  UINT32 fileAttributes,
+                                  UINT64 creationTime,
+                                  UINT64 lastAccessTime,
+                                  UINT64 lastWriteTime,
+                                  UINT64 changeTime,
+                                  FSP_FSCTL_FILE_INFO* fileInfo) {
+        return setBasicInfo(context,
+                            fileAttributes,
+                            creationTime,
+                            lastAccessTime,
+                            lastWriteTime,
+                            changeTime,
+                            fileInfo);
+    }
+
+    NTSTATUS setSecurityCallback(FileContext* context,
+                                 SECURITY_INFORMATION securityInformation,
+                                 PSECURITY_DESCRIPTOR modificationDescriptor) {
+        return setSecurity(context, securityInformation, modificationDescriptor);
+    }
+
+    NTSTATUS getEaCallback(FileContext* context,
+                           PFILE_FULL_EA_INFORMATION ea,
+                           ULONG eaLength,
+                           PULONG bytesTransferred) {
+        return getEa(context, ea, eaLength, bytesTransferred);
+    }
+
+    NTSTATUS setEaCallback(FSP_FILE_SYSTEM* fileSystem,
+                           FileContext* context,
+                           PFILE_FULL_EA_INFORMATION ea,
+                           ULONG eaLength,
+                           FSP_FSCTL_FILE_INFO* fileInfo) {
+        return setEa(fileSystem, context, ea, eaLength, fileInfo);
+    }
+
+    NTSTATUS getReparsePointByNameCallback(const QString& path,
+                                           PVOID buffer,
+                                           PSIZE_T size) {
+        return getReparsePointByName(path, buffer, size);
+    }
+
+    NTSTATUS getReparsePointCallback(const FileContext* context, PVOID buffer, PSIZE_T size) {
+        return getReparsePoint(context, buffer, size);
+    }
+
+    NTSTATUS setReparsePointCallback(FileContext* context, PVOID buffer, SIZE_T size) {
+        return setReparsePoint(context, buffer, size);
+    }
+
+    NTSTATUS deleteReparsePointCallback(FileContext* context, PVOID buffer, SIZE_T size) {
+        return deleteReparsePoint(context, buffer, size);
+    }
+
 private:
     static NTSTATUS readBytes(const QByteArray& data,
                               uint64_t offset,
@@ -1144,7 +1292,8 @@ private:
                                           .regularFile = false,
                                           .symlink = false,
                                           .objectId = 1,
-                                          .sizeBytes = 0};
+                                          .sizeBytes = 0,
+                                          .inodeMode = 0040755};
             }
             return STATUS_SUCCESS;
         }
@@ -1181,7 +1330,16 @@ private:
                                       .regularFile = entry.regular_file,
                                       .symlink = entry.symlink,
                                       .objectId = entry.object_id,
-                                      .sizeBytes = entry.size_bytes};
+                                      .sizeBytes = entry.size_bytes,
+                                      .createdTimeNs = entry.created_time_ns,
+                                      .modifiedTimeNs = entry.modified_time_ns,
+                                      .changedTimeNs = entry.changed_time_ns,
+                                      .accessedTimeNs = entry.accessed_time_ns,
+                                      .writeGenerationCounter = entry.write_generation_counter,
+                                      .bsdFlags = entry.bsd_flags,
+                                      .ownerId = entry.owner_id,
+                                      .groupId = entry.group_id,
+                                      .inodeMode = entry.inode_mode};
         }
         return STATUS_SUCCESS;
     }
@@ -1786,6 +1944,480 @@ private:
         return resolvePathNoLock(normalizedNew, updated);
     }
 
+    NTSTATUS commitInodeMetadata(const QString& path,
+                                 bool directory,
+                                 const sak::PartitionApfsInodeMetadataUpdate& metadata,
+                                 ResolvedEntry* updated) {
+        const QString normalized = normalizeApfsPath(path);
+        QString parentDirectoryPath;
+        QString targetName;
+        if (!splitDirectoryCreatePath(normalized, &parentDirectoryPath, &targetName)) {
+            return STATUS_NOT_SUPPORTED;
+        }
+
+        QMutexLocker locker(&ioMutex_);
+        readerSession_.reset();
+        device_.reset();
+        QString tempPath;
+        sak::PartitionApfsImageCheckpointCommitResult result;
+        if (rawTarget_) {
+            result = sak::PartitionApfsWriter::commitRawInodeMetadata(
+                {.target_path = target_,
+                 .target_container_bytes = targetContainerBytes_,
+                 .target_name = targetName,
+                 .parent_directory_path = parentDirectoryPath,
+                 .target_is_directory = directory,
+                 .metadata = metadata,
+                 .target_mutation_confirmed = allowRawWrites_,
+                 .allow_raw_device_target = allowRawWrites_,
+                 .options = writerOptions()});
+        } else {
+            tempPath = mutationTempPathNoLock(QStringLiteral("metadata"));
+            result = sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
+                {.source_image_path = target_,
+                 .written_image_path = tempPath,
+                 .target_name = targetName,
+                 .parent_directory_path = parentDirectoryPath,
+                 .target_is_directory = directory,
+                 .metadata = metadata,
+                 .options = writerOptions()});
+            if (result.ok) {
+                QString replaceError;
+                if (!replaceTargetWithTempNoLock(tempPath, &replaceError)) {
+                    trace(QStringLiteral("metadata replace failed: %1").arg(replaceError));
+                    reloadTargetNoLock();
+                    return STATUS_ACCESS_DENIED;
+                }
+            } else {
+                QFile::remove(tempPath);
+            }
+        }
+
+        const NTSTATUS mutationStatus = resultStatus(QStringLiteral("inode-metadata"), result);
+        QString reloadError;
+        const NTSTATUS reloadStatus = reloadTargetNoLock(&reloadError);
+        if (!NT_SUCCESS(reloadStatus)) {
+            trace(QStringLiteral("reload after metadata update failed: %1").arg(reloadError));
+            return reloadStatus;
+        }
+        if (!NT_SUCCESS(mutationStatus)) {
+            return mutationStatus;
+        }
+        return resolvePathNoLock(normalized, updated);
+    }
+
+    NTSTATUS setBasicInfo(FileContext* context,
+                          UINT32 fileAttributes,
+                          UINT64 creationTime,
+                          UINT64 lastAccessTime,
+                          UINT64 lastWriteTime,
+                          UINT64 changeTime,
+                          FSP_FSCTL_FILE_INFO* fileInfo) {
+        if (readOnly_) {
+            return STATUS_MEDIA_WRITE_PROTECTED;
+        }
+        if (!context) {
+            return STATUS_INVALID_PARAMETER;
+        }
+        sak::PartitionApfsInodeMetadataUpdate update;
+        if (fileAttributes != INVALID_FILE_ATTRIBUTES) {
+            uint32_t bsdFlags = context->entry.bsdFlags;
+            const auto assignFlag = [&bsdFlags, fileAttributes](uint32_t windowsFlag,
+                                                                uint32_t bsdFlag) {
+                if ((fileAttributes & windowsFlag) != 0) {
+                    bsdFlags |= bsdFlag;
+                } else {
+                    bsdFlags &= ~bsdFlag;
+                }
+            };
+            assignFlag(FILE_ATTRIBUTE_READONLY, kBsdFlagUserImmutable);
+            assignFlag(FILE_ATTRIBUTE_HIDDEN, kBsdFlagUserHidden);
+            assignFlag(FILE_ATTRIBUTE_ARCHIVE, kBsdFlagUserArchive);
+            update.update_bsd_flags = bsdFlags != context->entry.bsdFlags;
+            update.bsd_flags = bsdFlags;
+        }
+        if (creationTime != 0) {
+            update.update_created_time = true;
+            update.created_time_ns = unixNsFromFileTime(creationTime);
+        }
+        if (lastAccessTime != 0) {
+            update.update_accessed_time = true;
+            update.accessed_time_ns = unixNsFromFileTime(lastAccessTime);
+        }
+        if (lastWriteTime != 0) {
+            update.update_modified_time = true;
+            update.modified_time_ns = unixNsFromFileTime(lastWriteTime);
+        }
+        if (changeTime != 0) {
+            update.update_changed_time = true;
+            update.changed_time_ns = unixNsFromFileTime(changeTime);
+        }
+        const bool changed = update.update_bsd_flags || update.update_created_time ||
+                             update.update_accessed_time || update.update_modified_time ||
+                             update.update_changed_time;
+        if (changed) {
+            const NTSTATUS status =
+                commitInodeMetadata(context->entry.path, context->entry.directory, update, &context->entry);
+            if (!NT_SUCCESS(status)) {
+                return status;
+            }
+        }
+        fillFileInfo(context->entry, fileInfo);
+        return STATUS_SUCCESS;
+    }
+
+    NTSTATUS setSecurity(FileContext* context,
+                         SECURITY_INFORMATION securityInformation,
+                         PSECURITY_DESCRIPTOR modificationDescriptor) {
+        if (readOnly_) {
+            return STATUS_MEDIA_WRITE_PROTECTED;
+        }
+        if (!context || !modificationDescriptor) {
+            return STATUS_INVALID_PARAMETER;
+        }
+        PSECURITY_DESCRIPTOR merged = nullptr;
+        NTSTATUS status = FspSetSecurityDescriptor(
+            securityDescriptor_, securityInformation, modificationDescriptor, &merged);
+        if (!NT_SUCCESS(status)) {
+            return status;
+        }
+        uint32_t ownerId = 0;
+        uint32_t groupId = 0;
+        uint32_t mode = 0;
+        status = FspPosixMapSecurityDescriptorToPermissions(
+            merged, &ownerId, &groupId, &mode);
+        FspDeleteSecurityDescriptor(merged, (NTSTATUS(*)())FspSetSecurityDescriptor);
+        if (!NT_SUCCESS(status)) {
+            return status;
+        }
+        sak::PartitionApfsInodeMetadataUpdate update;
+        update.update_inode_mode = true;
+        update.inode_mode = static_cast<uint16_t>(mode);
+        update.update_owner_id = true;
+        update.owner_id = ownerId;
+        update.update_group_id = true;
+        update.group_id = groupId;
+        update.update_changed_time = true;
+        update.changed_time_ns = unixNsFromFileTime(currentFileTime());
+        return commitInodeMetadata(
+            context->entry.path, context->entry.directory, update, &context->entry);
+    }
+
+    NTSTATUS getEa(FileContext* context,
+                   PFILE_FULL_EA_INFORMATION ea,
+                   ULONG eaLength,
+                   PULONG bytesTransferred) {
+        if (!context || !bytesTransferred) {
+            return STATUS_INVALID_PARAMETER;
+        }
+        *bytesTransferred = 0;
+        QVector<QPair<QString, QByteArray>> attributes;
+        {
+            QMutexLocker locker(&ioMutex_);
+            const auto read = readerSession_->readXattrs(context->entry.path);
+            if (!read.ok || !read.blockers.isEmpty()) {
+                trace(QStringLiteral("read EAs failed: %1")
+                          .arg(read.blockers.join(QStringLiteral("; "))));
+                return STATUS_ACCESS_DENIED;
+            }
+            for (const auto& attribute : read.xattrs) {
+                QByteArray name;
+                if (isWindowsEaName(attribute.first, &name) && !isContentCriticalXattr(name) &&
+                    attribute.second.size() <= std::numeric_limits<USHORT>::max()) {
+                    attributes.append(attribute);
+                }
+            }
+        }
+        std::sort(attributes.begin(), attributes.end(), [](const auto& left, const auto& right) {
+            return left.first.compare(right.first, Qt::CaseInsensitive) < 0;
+        });
+        for (const auto& attribute : attributes) {
+            const QByteArray name = attribute.first.toLatin1();
+            const ULONG singleLength = static_cast<ULONG>(
+                FIELD_OFFSET(FILE_FULL_EA_INFORMATION, EaName) + name.size() + 1 +
+                attribute.second.size());
+            QByteArray storage(static_cast<qsizetype>(singleLength), '\0');
+            auto* single = reinterpret_cast<PFILE_FULL_EA_INFORMATION>(storage.data());
+            single->Flags = 0;
+            single->EaNameLength = static_cast<UCHAR>(name.size());
+            single->EaValueLength = static_cast<USHORT>(attribute.second.size());
+            std::memcpy(single->EaName, name.constData(), static_cast<size_t>(name.size()));
+            std::memcpy(single->EaName + name.size() + 1,
+                        attribute.second.constData(),
+                        static_cast<size_t>(attribute.second.size()));
+            if (!FspFileSystemAddEa(single, ea, eaLength, bytesTransferred)) {
+                return STATUS_SUCCESS;
+            }
+        }
+        FspFileSystemAddEa(nullptr, ea, eaLength, bytesTransferred);
+        return STATUS_SUCCESS;
+    }
+
+    NTSTATUS setEa(FSP_FILE_SYSTEM* fileSystem,
+                   FileContext* context,
+                   PFILE_FULL_EA_INFORMATION ea,
+                   ULONG eaLength,
+                   FSP_FSCTL_FILE_INFO* fileInfo) {
+        if (readOnly_) {
+            return STATUS_MEDIA_WRITE_PROTECTED;
+        }
+        if (!context || !fileInfo || (eaLength != 0 && !ea)) {
+            return STATUS_INVALID_PARAMETER;
+        }
+        if (context->entry.directory) {
+            return STATUS_NOT_SUPPORTED;
+        }
+        EaMutationCollectContext collected;
+        const NTSTATUS parseStatus =
+            FspFileSystemEnumerateEa(fileSystem, collectEaMutation, &collected, ea, eaLength);
+        if (!NT_SUCCESS(parseStatus)) {
+            return parseStatus;
+        }
+        if (!collected.mutations.isEmpty()) {
+            sak::PartitionApfsInodeMetadataUpdate update;
+            update.update_changed_time = true;
+            update.changed_time_ns = unixNsFromFileTime(currentFileTime());
+            update.xattr_mutations = std::move(collected.mutations);
+            const NTSTATUS status = commitInodeMetadata(
+                context->entry.path, false, update, &context->entry);
+            if (!NT_SUCCESS(status)) {
+                return status;
+            }
+        }
+        fillFileInfo(context->entry, fileInfo);
+        return STATUS_SUCCESS;
+    }
+
+    NTSTATUS readSymbolicLinkTarget(const ResolvedEntry& entry, QString* target) {
+        if (!entry.symlink) {
+            return STATUS_NOT_A_REPARSE_POINT;
+        }
+        QMutexLocker locker(&ioMutex_);
+        const auto read = readerSession_->readXattrs(entry.path);
+        if (!read.ok || !read.blockers.isEmpty()) {
+            trace(QStringLiteral("read symbolic-link target failed: %1")
+                      .arg(read.blockers.join(QStringLiteral("; "))));
+            return STATUS_ACCESS_DENIED;
+        }
+        for (const auto& xattr : read.xattrs) {
+            if (xattr.first != QStringLiteral("com.apple.fs.symlink")) {
+                continue;
+            }
+            QByteArray value = xattr.second;
+            while (value.endsWith('\0')) {
+                value.chop(1);
+            }
+            *target = QString::fromUtf8(value);
+            return target->isEmpty() ? STATUS_IO_REPARSE_DATA_INVALID : STATUS_SUCCESS;
+        }
+        return STATUS_IO_REPARSE_DATA_INVALID;
+    }
+
+    NTSTATUS buildSymbolicLinkReparseData(const ResolvedEntry& entry, QByteArray* bytes) {
+        QString target;
+        NTSTATUS status = readSymbolicLinkTarget(entry, &target);
+        if (!NT_SUCCESS(status)) {
+            return status;
+        }
+        const bool relative = !target.startsWith(QLatin1Char('/'));
+        QString printName;
+        QString substituteName;
+        if (relative) {
+            printName = QDir::toNativeSeparators(target);
+            substituteName = printName;
+        } else {
+            if (mountPoint_.isEmpty()) {
+                return STATUS_IO_REPARSE_TAG_NOT_HANDLED;
+            }
+            QString mount = mountPoint_;
+            while (mount.endsWith(QLatin1Char('\\'))) {
+                mount.chop(1);
+            }
+            printName = mount + QDir::toNativeSeparators(target);
+            substituteName = QStringLiteral("\\??\\") + printName;
+        }
+        const std::wstring substitute = wide(substituteName);
+        const std::wstring print = wide(printName);
+        const size_t pathBytes = (substitute.size() + print.size()) * sizeof(wchar_t);
+        const size_t fixedBytes =
+            FIELD_OFFSET(REPARSE_DATA_BUFFER, SymbolicLinkReparseBuffer.PathBuffer);
+        if (pathBytes > std::numeric_limits<USHORT>::max() ||
+            fixedBytes + pathBytes > std::numeric_limits<USHORT>::max()) {
+            return STATUS_NAME_TOO_LONG;
+        }
+        bytes->resize(static_cast<qsizetype>(fixedBytes + pathBytes));
+        bytes->fill('\0');
+        auto* data = reinterpret_cast<PREPARSE_DATA_BUFFER>(bytes->data());
+        data->ReparseTag = IO_REPARSE_TAG_SYMLINK;
+        data->ReparseDataLength =
+            static_cast<USHORT>(bytes->size() - REPARSE_DATA_BUFFER_HEADER_SIZE);
+        data->SymbolicLinkReparseBuffer.SubstituteNameOffset = 0;
+        data->SymbolicLinkReparseBuffer.SubstituteNameLength =
+            static_cast<USHORT>(substitute.size() * sizeof(wchar_t));
+        data->SymbolicLinkReparseBuffer.PrintNameOffset =
+            data->SymbolicLinkReparseBuffer.SubstituteNameLength;
+        data->SymbolicLinkReparseBuffer.PrintNameLength =
+            static_cast<USHORT>(print.size() * sizeof(wchar_t));
+        data->SymbolicLinkReparseBuffer.Flags = relative ? SYMLINK_FLAG_RELATIVE : 0;
+        wchar_t* pathBuffer = data->SymbolicLinkReparseBuffer.PathBuffer;
+        std::memcpy(pathBuffer,
+                    substitute.data(),
+                    data->SymbolicLinkReparseBuffer.SubstituteNameLength);
+        std::memcpy(reinterpret_cast<char*>(pathBuffer) +
+                        data->SymbolicLinkReparseBuffer.PrintNameOffset,
+                    print.data(),
+                    data->SymbolicLinkReparseBuffer.PrintNameLength);
+        return STATUS_SUCCESS;
+    }
+
+    NTSTATUS getReparsePointByName(const QString& path, PVOID buffer, PSIZE_T size) {
+        ResolvedEntry entry;
+        const NTSTATUS resolveStatus = resolvePath(path, &entry);
+        if (!NT_SUCCESS(resolveStatus)) {
+            return resolveStatus;
+        }
+        if (!entry.symlink) {
+            return STATUS_NOT_A_REPARSE_POINT;
+        }
+        if (!buffer) {
+            return STATUS_SUCCESS;
+        }
+        QByteArray data;
+        const NTSTATUS status = buildSymbolicLinkReparseData(entry, &data);
+        if (!NT_SUCCESS(status)) {
+            return status;
+        }
+        if (!size || data.size() > static_cast<qsizetype>(*size)) {
+            return STATUS_BUFFER_TOO_SMALL;
+        }
+        *size = static_cast<SIZE_T>(data.size());
+        std::memcpy(buffer, data.constData(), data.size());
+        return STATUS_SUCCESS;
+    }
+
+    NTSTATUS getReparsePoint(const FileContext* context, PVOID buffer, PSIZE_T size) {
+        if (!context) {
+            return STATUS_INVALID_PARAMETER;
+        }
+        QByteArray data;
+        const NTSTATUS status = buildSymbolicLinkReparseData(context->entry, &data);
+        if (!NT_SUCCESS(status)) {
+            return status;
+        }
+        if (!size || data.size() > static_cast<qsizetype>(*size)) {
+            return STATUS_BUFFER_TOO_SMALL;
+        }
+        *size = static_cast<SIZE_T>(data.size());
+        std::memcpy(buffer, data.constData(), data.size());
+        return STATUS_SUCCESS;
+    }
+
+    NTSTATUS parseSymbolicLinkReparseData(PVOID buffer, SIZE_T size, QString* target) const {
+        const size_t fixedBytes =
+            FIELD_OFFSET(REPARSE_DATA_BUFFER, SymbolicLinkReparseBuffer.PathBuffer);
+        if (!buffer || size < fixedBytes) {
+            return STATUS_IO_REPARSE_DATA_INVALID;
+        }
+        const auto* data = reinterpret_cast<PREPARSE_DATA_BUFFER>(buffer);
+        if (data->ReparseTag != IO_REPARSE_TAG_SYMLINK ||
+            static_cast<size_t>(data->ReparseDataLength) + REPARSE_DATA_BUFFER_HEADER_SIZE > size) {
+            return STATUS_IO_REPARSE_TAG_NOT_HANDLED;
+        }
+        const size_t available = size - fixedBytes;
+        const USHORT printOffset = data->SymbolicLinkReparseBuffer.PrintNameOffset;
+        const USHORT printLength = data->SymbolicLinkReparseBuffer.PrintNameLength;
+        const USHORT substituteOffset = data->SymbolicLinkReparseBuffer.SubstituteNameOffset;
+        const USHORT substituteLength = data->SymbolicLinkReparseBuffer.SubstituteNameLength;
+        const bool usePrint = printLength != 0;
+        const size_t offset = usePrint ? printOffset : substituteOffset;
+        const size_t length = usePrint ? printLength : substituteLength;
+        if ((offset & 1U) != 0 || (length & 1U) != 0 || offset > available ||
+            length > available - offset) {
+            return STATUS_IO_REPARSE_DATA_INVALID;
+        }
+        const auto* path = reinterpret_cast<const wchar_t*>(
+            reinterpret_cast<const char*>(data->SymbolicLinkReparseBuffer.PathBuffer) + offset);
+        QString parsed = QString::fromWCharArray(path, static_cast<qsizetype>(length / sizeof(wchar_t)));
+        if ((data->SymbolicLinkReparseBuffer.Flags & SYMLINK_FLAG_RELATIVE) == 0) {
+            if (parsed.startsWith(QStringLiteral("\\??\\"))) {
+                parsed.remove(0, 4);
+            }
+            QString mount = mountPoint_;
+            while (mount.endsWith(QLatin1Char('\\'))) {
+                mount.chop(1);
+            }
+            if (mount.isEmpty() || !parsed.startsWith(mount, Qt::CaseInsensitive)) {
+                return STATUS_IO_REPARSE_TAG_NOT_HANDLED;
+            }
+            parsed.remove(0, mount.size());
+            if (!parsed.startsWith(QLatin1Char('\\')) && !parsed.startsWith(QLatin1Char('/'))) {
+                parsed.prepend(QLatin1Char('\\'));
+            }
+        }
+        parsed.replace(QLatin1Char('\\'), QLatin1Char('/'));
+        if (parsed.isEmpty() || parsed.contains(QChar::Null)) {
+            return STATUS_IO_REPARSE_DATA_INVALID;
+        }
+        *target = parsed;
+        return STATUS_SUCCESS;
+    }
+
+    NTSTATUS setReparsePoint(FileContext* context, PVOID buffer, SIZE_T size) {
+        if (readOnly_) {
+            return STATUS_MEDIA_WRITE_PROTECTED;
+        }
+        if (!context || context->entry.directory || context->entry.sizeBytes != 0) {
+            return STATUS_INVALID_PARAMETER;
+        }
+        if (context->entry.symlink) {
+            QByteArray current;
+            NTSTATUS status = buildSymbolicLinkReparseData(context->entry, &current);
+            if (!NT_SUCCESS(status)) {
+                return status;
+            }
+            status = FspFileSystemCanReplaceReparsePoint(
+                current.data(), static_cast<SIZE_T>(current.size()), buffer, size);
+            if (!NT_SUCCESS(status)) {
+                return status;
+            }
+        }
+        QString target;
+        NTSTATUS status = parseSymbolicLinkReparseData(buffer, size, &target);
+        if (!NT_SUCCESS(status)) {
+            return status;
+        }
+        sak::PartitionApfsInodeMetadataUpdate update;
+        update.update_changed_time = true;
+        update.changed_time_ns = unixNsFromFileTime(currentFileTime());
+        update.update_symbolic_link_target = true;
+        update.symbolic_link_target = target;
+        return commitInodeMetadata(context->entry.path, false, update, &context->entry);
+    }
+
+    NTSTATUS deleteReparsePoint(FileContext* context, PVOID buffer, SIZE_T size) {
+        if (readOnly_) {
+            return STATUS_MEDIA_WRITE_PROTECTED;
+        }
+        if (!context || !context->entry.symlink) {
+            return STATUS_NOT_A_REPARSE_POINT;
+        }
+        QByteArray current;
+        NTSTATUS status = buildSymbolicLinkReparseData(context->entry, &current);
+        if (!NT_SUCCESS(status)) {
+            return status;
+        }
+        status = FspFileSystemCanReplaceReparsePoint(
+            current.data(), static_cast<SIZE_T>(current.size()), buffer, size);
+        if (!NT_SUCCESS(status)) {
+            return status;
+        }
+        sak::PartitionApfsInodeMetadataUpdate update;
+        update.update_changed_time = true;
+        update.changed_time_ns = unixNsFromFileTime(currentFileTime());
+        update.update_symbolic_link_target = true;
+        return commitInodeMetadata(context->entry.path, false, update, &context->entry);
+    }
+
     NTSTATUS readMutableBytes(const ResolvedEntry& entry, QByteArray* data) {
         data->clear();
         if (entry.sizeBytes > kDefaultMaxMutationBytes) {
@@ -1806,14 +2438,24 @@ private:
     }
 
     uint32_t attributesFor(const ResolvedEntry& entry) const {
-        uint32_t attributes = readOnly_ ? FILE_ATTRIBUTE_READONLY : 0;
+        uint32_t attributes =
+            (readOnly_ || (entry.bsdFlags & kBsdFlagUserImmutable) != 0)
+                ? FILE_ATTRIBUTE_READONLY
+                : 0;
+        if ((entry.bsdFlags & kBsdFlagUserHidden) != 0) {
+            attributes |= FILE_ATTRIBUTE_HIDDEN;
+        }
+        if ((entry.bsdFlags & kBsdFlagUserArchive) != 0) {
+            attributes |= FILE_ATTRIBUTE_ARCHIVE;
+        }
         if (entry.directory) {
             attributes |= FILE_ATTRIBUTE_DIRECTORY;
-        } else {
-            attributes |= FILE_ATTRIBUTE_ARCHIVE;
         }
         if (entry.symlink) {
             attributes |= FILE_ATTRIBUTE_REPARSE_POINT;
+        }
+        if (attributes == 0) {
+            attributes = FILE_ATTRIBUTE_NORMAL;
         }
         return attributes;
     }
@@ -1838,6 +2480,7 @@ private:
     }
 
     QString target_;
+    QString mountPoint_;
     QString volumeLabel_{QStringLiteral("APFS")};
     QString testFaultExitPhase_;
     QString testFaultPath_;
@@ -1864,6 +2507,21 @@ ApfsMountState* stateOf(FSP_FILE_SYSTEM* fileSystem) {
     return reinterpret_cast<ApfsMountState*>(fileSystem->UserContext);
 }
 
+NTSTATUS GetReparsePointByName(FSP_FILE_SYSTEM* fileSystem,
+                               PVOID,
+                               PWSTR fileName,
+                               BOOLEAN,
+                               PVOID buffer,
+                               PSIZE_T size) {
+    const NTSTATUS status =
+        stateOf(fileSystem)->getReparsePointByNameCallback(fromWide(fileName), buffer, size);
+    trace(QStringLiteral("GetReparsePointByName %1 buffer=%2 status=0x%3")
+              .arg(fromWide(fileName))
+              .arg(buffer != nullptr)
+              .arg(static_cast<quint32>(status), 8, 16, QLatin1Char('0')));
+    return status;
+}
+
 NTSTATUS FsGetVolumeInfo(FSP_FILE_SYSTEM* fileSystem, FSP_FSCTL_VOLUME_INFO* volumeInfo) {
     return stateOf(fileSystem)->volumeInfo(volumeInfo);
 }
@@ -1877,10 +2535,16 @@ NTSTATUS FsGetSecurityByName(FSP_FILE_SYSTEM* fileSystem,
                              PUINT32 attributes,
                              PSECURITY_DESCRIPTOR descriptor,
                              SIZE_T* descriptorSize) {
-    return stateOf(fileSystem)->securityByName(fromWide(fileName),
-                                               attributes,
-                                               descriptor,
-                                               descriptorSize);
+    const NTSTATUS status = stateOf(fileSystem)->securityByName(fromWide(fileName),
+                                                                attributes,
+                                                                descriptor,
+                                                                descriptorSize);
+    if (status == STATUS_OBJECT_NAME_NOT_FOUND &&
+        FspFileSystemFindReparsePoint(
+            fileSystem, GetReparsePointByName, nullptr, fileName, attributes)) {
+        return STATUS_REPARSE;
+    }
+    return status;
 }
 
 NTSTATUS FsCreate(FSP_FILE_SYSTEM* fileSystem,
@@ -2048,23 +2712,22 @@ NTSTATUS FsGetFileInfo(FSP_FILE_SYSTEM* fileSystem,
 
 NTSTATUS FsSetBasicInfo(FSP_FILE_SYSTEM* fileSystem,
                         PVOID fileContext,
-                        UINT32,
-                        UINT64,
-                        UINT64,
-                        UINT64,
-                        UINT64,
+                        UINT32 fileAttributes,
+                        UINT64 creationTime,
+                        UINT64 lastAccessTime,
+                        UINT64 lastWriteTime,
+                        UINT64 changeTime,
                         FSP_FSCTL_FILE_INFO* fileInfo) {
     auto* context = reinterpret_cast<FileContext*>(fileContext);
     trace(QStringLiteral("SetBasicInfo %1")
               .arg(context ? context->entry.path : QStringLiteral("<null>")));
-    if (stateOf(fileSystem)->readOnly()) {
-        return STATUS_MEDIA_WRITE_PROTECTED;
-    }
-    if (!context) {
-        return STATUS_INVALID_PARAMETER;
-    }
-    stateOf(fileSystem)->fillFileInfo(context->entry, fileInfo);
-    return STATUS_SUCCESS;
+    return stateOf(fileSystem)->setBasicInfoCallback(context,
+                                                     fileAttributes,
+                                                     creationTime,
+                                                     lastAccessTime,
+                                                     lastWriteTime,
+                                                     changeTime,
+                                                     fileInfo);
 }
 
 NTSTATUS FsSetFileSize(FSP_FILE_SYSTEM* fileSystem,
@@ -2106,26 +2769,110 @@ NTSTATUS FsRename(FSP_FILE_SYSTEM* fileSystem,
 }
 
 NTSTATUS FsGetSecurity(FSP_FILE_SYSTEM* fileSystem,
-                       PVOID,
+                       PVOID fileContext,
                        PSECURITY_DESCRIPTOR descriptor,
                        SIZE_T* descriptorSize) {
-    return stateOf(fileSystem)->copySecurity(descriptor, descriptorSize);
+    const auto* context = reinterpret_cast<FileContext*>(fileContext);
+    if (!context) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    return stateOf(fileSystem)->copySecurity(context->entry, descriptor, descriptorSize);
 }
 
 NTSTATUS FsSetSecurity(FSP_FILE_SYSTEM* fileSystem,
                        PVOID fileContext,
-                       SECURITY_INFORMATION,
-                       PSECURITY_DESCRIPTOR) {
+                       SECURITY_INFORMATION securityInformation,
+                       PSECURITY_DESCRIPTOR modificationDescriptor) {
     auto* context = reinterpret_cast<FileContext*>(fileContext);
     trace(QStringLiteral("SetSecurity %1")
               .arg(context ? context->entry.path : QStringLiteral("<null>")));
-    if (stateOf(fileSystem)->readOnly()) {
-        return STATUS_MEDIA_WRITE_PROTECTED;
-    }
-    if (!context) {
-        return STATUS_INVALID_PARAMETER;
-    }
-    return STATUS_SUCCESS;
+    return stateOf(fileSystem)->setSecurityCallback(
+        context, securityInformation, modificationDescriptor);
+}
+
+NTSTATUS FsGetEa(FSP_FILE_SYSTEM* fileSystem,
+                 PVOID fileContext,
+                 PFILE_FULL_EA_INFORMATION ea,
+                 ULONG eaLength,
+                 PULONG bytesTransferred) {
+    const NTSTATUS status = stateOf(fileSystem)->getEaCallback(
+        reinterpret_cast<FileContext*>(fileContext), ea, eaLength, bytesTransferred);
+    trace(QStringLiteral("GetEa status=0x%1 bytes=%2")
+              .arg(static_cast<quint32>(status), 8, 16, QLatin1Char('0'))
+              .arg(bytesTransferred ? *bytesTransferred : 0));
+    return status;
+}
+
+NTSTATUS FsSetEa(FSP_FILE_SYSTEM* fileSystem,
+                 PVOID fileContext,
+                 PFILE_FULL_EA_INFORMATION ea,
+                 ULONG eaLength,
+                 FSP_FSCTL_FILE_INFO* fileInfo) {
+    const NTSTATUS status = stateOf(fileSystem)->setEaCallback(
+        fileSystem, reinterpret_cast<FileContext*>(fileContext), ea, eaLength, fileInfo);
+    trace(QStringLiteral("SetEa status=0x%1")
+              .arg(static_cast<quint32>(status), 8, 16, QLatin1Char('0')));
+    return status;
+}
+
+NTSTATUS FsResolveReparsePoints(FSP_FILE_SYSTEM* fileSystem,
+                                PWSTR fileName,
+                                UINT32 reparsePointIndex,
+                                BOOLEAN resolveLastPathComponent,
+                                PIO_STATUS_BLOCK ioStatus,
+                                PVOID buffer,
+                                PSIZE_T size) {
+    const NTSTATUS status = FspFileSystemResolveReparsePoints(fileSystem,
+                                                              GetReparsePointByName,
+                                                              nullptr,
+                                                              fileName,
+                                                              reparsePointIndex,
+                                                              resolveLastPathComponent,
+                                                              ioStatus,
+                                                              buffer,
+                                                              size);
+    trace(QStringLiteral("ResolveReparsePoints %1 index=%2 last=%3 status=0x%4")
+              .arg(fromWide(fileName))
+              .arg(reparsePointIndex)
+              .arg(resolveLastPathComponent)
+              .arg(static_cast<quint32>(status), 8, 16, QLatin1Char('0')));
+    return status;
+}
+
+NTSTATUS FsGetReparsePoint(FSP_FILE_SYSTEM* fileSystem,
+                           PVOID fileContext,
+                           PWSTR,
+                           PVOID buffer,
+                           PSIZE_T size) {
+    const NTSTATUS status = stateOf(fileSystem)->getReparsePointCallback(
+        reinterpret_cast<FileContext*>(fileContext), buffer, size);
+    trace(QStringLiteral("GetReparsePoint status=0x%1")
+              .arg(static_cast<quint32>(status), 8, 16, QLatin1Char('0')));
+    return status;
+}
+
+NTSTATUS FsSetReparsePoint(FSP_FILE_SYSTEM* fileSystem,
+                           PVOID fileContext,
+                           PWSTR,
+                           PVOID buffer,
+                           SIZE_T size) {
+    const NTSTATUS status = stateOf(fileSystem)->setReparsePointCallback(
+        reinterpret_cast<FileContext*>(fileContext), buffer, size);
+    trace(QStringLiteral("SetReparsePoint status=0x%1")
+              .arg(static_cast<quint32>(status), 8, 16, QLatin1Char('0')));
+    return status;
+}
+
+NTSTATUS FsDeleteReparsePoint(FSP_FILE_SYSTEM* fileSystem,
+                              PVOID fileContext,
+                              PWSTR,
+                              PVOID buffer,
+                              SIZE_T size) {
+    const NTSTATUS status = stateOf(fileSystem)->deleteReparsePointCallback(
+        reinterpret_cast<FileContext*>(fileContext), buffer, size);
+    trace(QStringLiteral("DeleteReparsePoint status=0x%1")
+              .arg(static_cast<quint32>(status), 8, 16, QLatin1Char('0')));
+    return status;
 }
 
 NTSTATUS FsReadDirectory(FSP_FILE_SYSTEM* fileSystem,
@@ -2174,7 +2921,13 @@ FSP_FILE_SYSTEM_INTERFACE* apfsInterface() {
         iface.Rename = FsRename;
         iface.GetSecurity = FsGetSecurity;
         iface.SetSecurity = FsSetSecurity;
+        iface.GetEa = FsGetEa;
+        iface.SetEa = FsSetEa;
         iface.ReadDirectory = FsReadDirectory;
+        iface.ResolveReparsePoints = FsResolveReparsePoints;
+        iface.GetReparsePoint = FsGetReparsePoint;
+        iface.SetReparsePoint = FsSetReparsePoint;
+        iface.DeleteReparsePoint = FsDeleteReparsePoint;
         initialized = true;
     }
     return &iface;
@@ -2200,6 +2953,7 @@ NTSTATUS runMount(const QString& target,
         QTextStream(stderr) << error << Qt::endl;
         return status;
     }
+    state.setMountPoint(mountPoint);
 
     FSP_FSCTL_VOLUME_PARAMS params{};
     params.Version = sizeof(FSP_FSCTL_VOLUME_PARAMS);
@@ -2213,6 +2967,10 @@ NTSTATUS runMount(const QString& target,
     params.CasePreservedNames = 1;
     params.UnicodeOnDisk = 1;
     params.PersistentAcls = 1;
+    params.ExtendedAttributes = 1;
+    params.CasePreservedExtendedAttributes = 1;
+    params.ReparsePoints = 1;
+    params.ReparsePointsAccessCheck = 0;
     params.ReadOnlyVolume = readOnly ? 1 : 0;
     params.PostCleanupWhenModifiedOnly = 0;
     params.AlwaysUseDoubleBuffering = 1;

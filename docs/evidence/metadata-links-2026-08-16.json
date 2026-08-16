@@ -1,0 +1,98 @@
+{
+  "component": "apfs_for_windows",
+  "check": "metadata_acl_symbolic_link_certification",
+  "ok": true,
+  "no_host_reboot_performed": true,
+  "credential_material_recorded": false,
+  "local_image": {
+    "ok": true,
+    "no_admin_required": true,
+    "remount_persistence_verified": true,
+    "file_times_utc": {
+      "creation": "2021-02-03T04:05:06Z",
+      "access": "2022-03-04T05:06:07Z",
+      "write": "2023-04-05T06:07:08Z"
+    },
+    "directory_times_utc": {
+      "creation": "2020-01-02T03:04:05Z",
+      "write": "2024-05-06T07:08:09Z"
+    },
+    "hidden_archive_persisted": true,
+    "readonly_write_blocked": true,
+    "security_callback_succeeded": true,
+    "relative_symbolic_link_persisted": true,
+    "same_volume_absolute_symbolic_link_persisted": true,
+    "extended_attribute": {
+      "name": "user.apfswin_windows",
+      "create_read": true,
+      "restart_persistence": true,
+      "update": true,
+      "delete": true
+    },
+    "delete_reparse_converted_to_empty_regular_file": true,
+    "cleanup_verified": true
+  },
+  "physical_usb": {
+    "ok": true,
+    "no_admin_required_for_file_actions": true,
+    "current_build_installed": true,
+    "disk_number": 1,
+    "partition_number": 1,
+    "serial": "067D19C65080",
+    "size_bytes": 31042043904,
+    "target": "\\\\?\\GLOBALROOT\\Device\\Harddisk1\\Partition1",
+    "mount": "V:",
+    "metadata_times_persisted": true,
+    "hidden_archive_persisted": true,
+    "readonly_write_blocked": true,
+    "security_callback_succeeded": true,
+    "relative_symbolic_link_create_follow_delete": true,
+    "extended_attribute": {
+      "name": "user.apfswin_usb",
+      "first_value": "USB Windows EA payload",
+      "updated_value": "USB updated EA payload",
+      "absent_after_delete": true
+    },
+    "proof_tree_removed": true,
+    "final_read_only": true,
+    "final_allow_raw_writes": false,
+    "completed_utc": "2026-08-16T22:12:21.1750391Z"
+  },
+  "native_macos_roundtrip": {
+    "ok": true,
+    "windows_created_birth_epoch": 1612325106,
+    "windows_created_mtime_epoch": 1680674828,
+    "windows_created_bsd_flags": 98304,
+    "windows_created_symbolic_link_verified_and_retargeted": true,
+    "apple_hard_link_preserved": true,
+    "apple_xattr_preserved": true,
+    "windows_ea_read_and_updated_by_macos": true,
+    "macos_xattrs_read_updated_and_deleted_by_windows": true,
+    "final_windows_ea": "Windows final EA payload",
+    "final_updated_macos_xattr": "Windows updated xattr payload",
+    "deleted_macos_xattr_absent": true,
+    "native_fsck_before_and_after_each_mount": true,
+    "final_image_sha256": "1FAACA888FDCE373A01B54D7D0DF97C90181F2303971134E7C78EAB669A8F374",
+    "duration_seconds": 37.134,
+    "remote_artifacts_cleaned": true,
+    "completed_utc": "2026-08-16T22:11:45.8540768Z"
+  },
+  "windows_security_claim": {
+    "persisted_to_apfs": [
+      "mode",
+      "owner",
+      "group",
+      "change_time"
+    ],
+    "mount_access_descriptor": "compatibility ACL",
+    "apple_acl_blob_roundtrip": false
+  },
+  "unsupported_mutations": [
+    "directory extended-attribute mutation",
+    "non-ASCII Windows EA names",
+    "large APFS stream-backed xattr mutation",
+    "empty Windows EA value as a distinct value because zero length requests deletion",
+    "content-critical filesystem-owned xattrs through the generic Windows EA callback",
+    "hard-link creation through the installed WinFsp high-level callback interface"
+  ]
+}

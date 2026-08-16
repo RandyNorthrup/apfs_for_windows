@@ -2,56 +2,39 @@
   "component": "apfs_for_windows",
   "check": "windows_vm_install_reboot_uninstall_lifecycle",
   "ok": true,
+  "started_utc": "2026-08-16T22:23:24.8161478Z",
+  "completed_utc": "2026-08-16T22:26:21.3207649Z",
   "environment": {
     "os": "Microsoft Windows 11 Pro",
     "version": "10.0.26200",
-    "build": "26200",
     "winfsp_version": "2.1.25156",
     "host_pc_rebooted": false,
     "windows_vm_rebooted": true
   },
   "release_package": {
     "version": "0.1.0",
-    "sha256": "28065BA2C9BEE49E6A61985F21F597A586247D3F7D9767A53F2E26E680AC31B0",
-    "package_local_qt_install_payload_ok": true,
-    "package_local_qt_repair_payload_ok": true,
-    "exact_archive_installed": true
+    "sha256": "DBC359604FE7DA66866966B702520914885C3FE32320F279BD9FD7F41DC16445",
+    "exact_archive_installed": true,
+    "package_local_qt_payload_used": true
   },
-  "reboot_regression_history": [
-    {
-      "boot_utc": "2026-08-16T19:52:18.5Z",
-      "checked_utc": "2026-08-16T19:53:48.6803875Z",
-      "service_mount_hash_and_read_only_ok": true,
-      "tray_startup_gap_detected": true
-    },
-    {
-      "boot_utc": "2026-08-16T19:59:30.5Z",
-      "checked_utc": "2026-08-16T20:00:46.7243873Z",
-      "service_mount_hash_and_read_only_ok": true,
-      "scheduled_task_fix_ok": true,
-      "interactive_tray_process_count": 1
-    }
-  ],
   "pre_reboot": {
     "ok": true,
-    "checked_utc": "2026-08-16T20:22:55.6392616Z",
-    "boot_utc": "2026-08-16T20:15:02.5Z",
+    "checked_utc": "2026-08-16T22:24:46.8343544Z",
+    "boot_utc": "2026-08-16T22:20:48.5Z",
     "service_state": "Running",
     "service_start_mode": "Auto",
     "mount": "R:",
-    "expected_file": "WinProof/Nested/windows.txt",
-    "expected_sha256": "B58EE1D8BF6C0FF48A5D0AB28DCC938E941CE9AC9091E9C103D85C3784C1E4FC",
-    "actual_sha256": "B58EE1D8BF6C0FF48A5D0AB28DCC938E941CE9AC9091E9C103D85C3784C1E4FC",
+    "expected_file_sha256": "B58EE1D8BF6C0FF48A5D0AB28DCC938E941CE9AC9091E9C103D85C3784C1E4FC",
+    "file_sha256_matches": true,
     "read_only_write_denied": true,
     "installed_binary_hashes_match_package": true,
-    "apps_features_registered": true,
-    "start_menu_entries_present": true,
-    "interactive_tray_process_count": 1
+    "interactive_tray_process_count": 1,
+    "manager_self_test_valid": true
   },
   "post_reboot": {
     "ok": true,
-    "checked_utc": "2026-08-16T20:24:33.5848227Z",
-    "boot_utc": "2026-08-16T20:23:22.5Z",
+    "checked_utc": "2026-08-16T22:26:05.7114184Z",
+    "boot_utc": "2026-08-16T22:25:09.5Z",
     "service_state": "Running",
     "service_start_mode": "Auto",
     "saved_mount_restored": true,
@@ -73,8 +56,7 @@
   },
   "uninstall": {
     "ok": true,
-    "started_utc": "2026-08-16T20:24:50.2345942Z",
-    "completed_utc": "2026-08-16T20:24:57.3625024Z",
+    "completed_utc": "2026-08-16T22:26:18.5194867Z",
     "service_removed": true,
     "mount_removed": true,
     "manager_processes_stopped": true,
@@ -84,8 +66,13 @@
     "start_menu_removed": true,
     "install_root_removed": true,
     "winfsp_preserved": true,
-    "apfs_fixture_preserved": true,
     "independent_product_residue_count": 0
+  },
+  "automation": {
+    "credential_material_recorded": false,
+    "remote_artifacts_cleaned": true,
+    "host_harness": "scripts/verify-windows-vm-package-lifecycle.ps1",
+    "vm_phase_runner": "scripts/windows-vm/run-package-lifecycle-phase.ps1"
   },
   "scope": {
     "claim": "Exact release archive install, VM reboot persistence, interactive tray startup, and complete product uninstall lifecycle.",

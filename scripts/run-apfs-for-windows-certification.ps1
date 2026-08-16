@@ -195,6 +195,10 @@ $steps += Invoke-CertificationStep -Name "local_worker_fileops" -Script {
     powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-local-worker-fileops.ps1
 }
 
+$steps += Invoke-CertificationStep -Name "local_worker_metadata_links" -Script {
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-local-worker-metadata-links.ps1
+}
+
 $steps += Invoke-CertificationStep -Name "local_worker_robocopy_stress" -Script {
     powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-local-worker-robocopy-stress.ps1
 }
@@ -414,6 +418,7 @@ $requiredLocalNames = @(
     "winfsp_prerequisite",
     "local_worker_rw_smoke",
     "local_worker_fileops",
+    "local_worker_metadata_links",
     "local_worker_robocopy_stress",
     "local_worker_large_existing_fileops",
     "local_worker_crash_recovery",
@@ -434,6 +439,7 @@ $sakSourceBoundaryOk = @($steps | Where-Object { $_.name -eq "sak_source_boundar
 $licenseNoticesOk = @($steps | Where-Object { $_.name -eq "license_notices" -and $_.payload_ok -eq $true }).Count -gt 0
 $releasePackageOk = @($steps | Where-Object { $_.name -eq "release_package_verification" -and $_.payload_ok -eq $true }).Count -gt 0
 $localWorkerCrashRecoveryOk = @($steps | Where-Object { $_.name -eq "local_worker_crash_recovery" -and $_.payload_ok -eq $true }).Count -gt 0
+$localWorkerMetadataLinksOk = @($steps | Where-Object { $_.name -eq "local_worker_metadata_links" -and $_.payload_ok -eq $true }).Count -gt 0
 $appleVmRoundTripOk = @($steps | Where-Object { $_.name -eq "apple_vm_roundtrip" -and $_.payload_ok -eq $true }).Count -gt 0
 $serviceRecoveryPolicyOk = @($steps | Where-Object { $_.name -eq "service_recovery_policy" -and $_.payload_ok -eq $true }).Count -gt 0
 $startMenuEntriesOk = @($steps | Where-Object { $_.name -eq "start_menu_entries" -and $_.payload_ok -eq $true }).Count -gt 0
@@ -468,6 +474,7 @@ $result = [ordered]@{
     license_notices_ok = [bool]$licenseNoticesOk
     release_package_ok = [bool]$releasePackageOk
     local_worker_crash_recovery_ok = [bool]$localWorkerCrashRecoveryOk
+    local_worker_metadata_links_ok = [bool]$localWorkerMetadataLinksOk
     apple_vm_roundtrip_requested = [bool]$RunAppleVmRoundTrip
     apple_vm_roundtrip_ok = [bool]$appleVmRoundTripOk
     service_recovery_policy_ok = [bool]$serviceRecoveryPolicyOk

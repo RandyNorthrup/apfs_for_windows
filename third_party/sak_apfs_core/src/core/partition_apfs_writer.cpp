@@ -15350,6 +15350,263 @@ bool commitInPlaceDirectoryRename(QIODevice* image,
                             blockers);
 }
 
+struct ApfsInodeMetadataRequest {
+    QVector<ApfsRootFilePayload> existingFiles;
+    QVector<ApfsRootDirectoryPayload> existingDirectories;
+    QString targetName;
+    uint64_t parentDirectoryId{kApfsRootDirectoryId};
+    bool targetIsDirectory{false};
+    PartitionApfsInodeMetadataUpdate metadata;
+};
+
+void applyCommonInodeMetadata(const PartitionApfsInodeMetadataUpdate& update,
+                              uint16_t* inodeMode,
+                              uint64_t* createdTimeNs,
+                              uint64_t* modifiedTimeNs,
+                              uint64_t* changedTimeNs,
+                              uint64_t* accessedTimeNs,
+                              uint32_t* writeGenerationCounter,
+                              uint32_t* bsdFlags,
+                              uint32_t* ownerId,
+                              uint32_t* groupId) {
+    if (update.update_created_time) {
+        *createdTimeNs = update.created_time_ns;
+    }
+    if (update.update_modified_time) {
+        *modifiedTimeNs = update.modified_time_ns;
+    }
+    if (update.update_changed_time) {
+        *changedTimeNs = update.changed_time_ns;
+    }
+    if (update.update_accessed_time) {
+        *accessedTimeNs = update.accessed_time_ns;
+    }
+    if (update.update_inode_mode) {
+        *inodeMode = static_cast<uint16_t>((*inodeMode & kApfsModeTypeMask) |
+                                           (update.inode_mode & ~kApfsModeTypeMask));
+    }
+    if (update.update_bsd_flags) {
+        *bsdFlags = update.bsd_flags;
+    }
+    if (update.update_owner_id) {
+        *ownerId = update.owner_id;
+    }
+    if (update.update_group_id) {
+        *groupId = update.group_id;
+    }
+    if (*writeGenerationCounter != std::numeric_limits<uint32_t>::max()) {
+        ++*writeGenerationCounter;
+    }
+}
+
+bool metadataTargetMatches(const ApfsRootFilePayload& file,
+                           uint64_t parentDirectoryId,
+                           const QString& targetName) {
+    if (file.parentDirectoryId == parentDirectoryId && file.fileName == targetName) {
+        return true;
+    }
+    return std::any_of(file.additionalLinks.cbegin(),
+                       file.additionalLinks.cend(),
+                       [parentDirectoryId, &targetName](const ApfsHardLinkName& link) {
+                           return link.parentId == parentDirectoryId && link.name == targetName;
+                       });
+}
+
+bool applySymbolicLinkMetadata(const PartitionApfsInodeMetadataUpdate& update,
+                               ApfsRootFilePayload* file,
+                               QStringList* blockers) {
+    if (!update.update_symbolic_link_target) {
+        return true;
+    }
+    const QByteArray xattrName(kApfsXattrNameSymlink);
+    file->xattrs.erase(std::remove_if(file->xattrs.begin(),
+                                     file->xattrs.end(),
+                                     [&xattrName](const auto& xattr) {
+                                         return xattr.first == xattrName;
+                                     }),
+                       file->xattrs.end());
+    if (update.symbolic_link_target.isEmpty()) {
+        file->inodeMode = static_cast<uint16_t>(kApfsModeRegularFile | 0644);
+        file->directoryType = kApfsDirTypeRegularFile;
+        return true;
+    }
+    const QByteArray target = update.symbolic_link_target.toUtf8() + '\0';
+    if (target.size() > kApfsXattrMaxEmbeddedSize) {
+        blockers->append(QStringLiteral(
+            "APFS inode-metadata-commit: symbolic-link target exceeds embedded xattr limit"));
+        return false;
+    }
+    if (fileLogicalSize(*file) != 0 || !fileDataExtents(*file, kSupportedApfsBlockSizeBytes).isEmpty() ||
+        file->compressed || file->resourceFork || file->sparse) {
+        blockers->append(QStringLiteral(
+            "APFS inode-metadata-commit: symbolic-link conversion requires an empty file"));
+        return false;
+    }
+    file->inodeMode = static_cast<uint16_t>(kApfsModeSymlink | 0755);
+    file->directoryType = kApfsDirTypeSymlink;
+    file->xattrs.append({xattrName, target});
+    return true;
+}
+
+bool applyEmbeddedXattrMetadata(const PartitionApfsInodeMetadataUpdate& update,
+                                ApfsRootFilePayload* file,
+                                QStringList* blockers) {
+    if (update.xattr_mutations.isEmpty()) {
+        return true;
+    }
+    QVector<QPair<QByteArray, QByteArray>> updated = file->xattrs;
+    for (const auto& mutation : update.xattr_mutations) {
+        const QByteArray name = mutation.name.toUtf8();
+        if (name.isEmpty() || name.size() > 127 || name.contains('\0')) {
+            blockers->append(QStringLiteral(
+                "APFS inode-metadata-commit: xattr name must be 1-127 non-NUL UTF-8 bytes"));
+            return false;
+        }
+        if (name == QByteArray(kApfsXattrNameCompressed) ||
+            name == QByteArray(kApfsXattrNameResourceFork) ||
+            name == QByteArray(kApfsXattrNameSymlink)) {
+            blockers->append(QStringLiteral(
+                "APFS inode-metadata-commit: content-critical xattr '%1' requires its dedicated mutation path")
+                                 .arg(mutation.name));
+            return false;
+        }
+        if (mutation.value.size() > kApfsXattrMaxEmbeddedSize) {
+            blockers->append(QStringLiteral(
+                "APFS inode-metadata-commit: xattr '%1' exceeds the embedded-value limit")
+                                 .arg(mutation.name));
+            return false;
+        }
+        if (std::any_of(file->streamXattrs.cbegin(),
+                        file->streamXattrs.cend(),
+                        [&name](const ApfsDataStreamXattr& xattr) { return xattr.name == name; })) {
+            blockers->append(QStringLiteral(
+                "APFS inode-metadata-commit: data-stream xattr '%1' is preserved but not mutable")
+                                 .arg(mutation.name));
+            return false;
+        }
+
+        updated.erase(std::remove_if(updated.begin(),
+                                     updated.end(),
+                                     [&name](const auto& xattr) { return xattr.first == name; }),
+                      updated.end());
+        if (!mutation.remove) {
+            updated.append({name, mutation.value});
+        }
+    }
+    file->xattrs = std::move(updated);
+    return true;
+}
+
+bool applyInodeMetadata(const ApfsInodeMetadataRequest& request,
+                        QVector<ApfsRootFilePayload>* files,
+                        QVector<ApfsRootDirectoryPayload>* directories,
+                        QStringList* blockers) {
+    if (request.targetIsDirectory) {
+        if (request.metadata.update_symbolic_link_target) {
+            blockers->append(QStringLiteral(
+                "APFS inode-metadata-commit: a directory cannot become a symbolic link"));
+            return false;
+        }
+        if (!request.metadata.xattr_mutations.isEmpty()) {
+            blockers->append(QStringLiteral(
+                "APFS inode-metadata-commit: directory xattr mutation is not yet supported"));
+            return false;
+        }
+        for (auto& directory : *directories) {
+            if (directory.parentDirectoryId != request.parentDirectoryId ||
+                directory.directoryName != request.targetName) {
+                continue;
+            }
+            applyCommonInodeMetadata(request.metadata,
+                                     &directory.inodeMode,
+                                     &directory.createdTimeNs,
+                                     &directory.modifiedTimeNs,
+                                     &directory.changedTimeNs,
+                                     &directory.accessedTimeNs,
+                                     &directory.writeGenerationCounter,
+                                     &directory.bsdFlags,
+                                     &directory.ownerId,
+                                     &directory.groupId);
+            return true;
+        }
+    } else {
+        for (auto& file : *files) {
+            if (!metadataTargetMatches(file, request.parentDirectoryId, request.targetName)) {
+                continue;
+            }
+            applyCommonInodeMetadata(request.metadata,
+                                     &file.inodeMode,
+                                     &file.createdTimeNs,
+                                     &file.modifiedTimeNs,
+                                     &file.changedTimeNs,
+                                     &file.accessedTimeNs,
+                                     &file.writeGenerationCounter,
+                                     &file.bsdFlags,
+                                     &file.ownerId,
+                                     &file.groupId);
+            return applySymbolicLinkMetadata(request.metadata, &file, blockers) &&
+                   applyEmbeddedXattrMetadata(request.metadata, &file, blockers);
+        }
+    }
+    blockers->append(QStringLiteral("APFS inode-metadata-commit: target '%1' was not found")
+                         .arg(request.targetName));
+    return false;
+}
+
+bool commitInPlaceInodeMetadata(QIODevice* image,
+                                const ApfsInodeMetadataRequest& request,
+                                ApfsInPlaceCheckpointResult* result,
+                                QStringList* blockers) {
+    ApfsFsCommitContext ctx;
+    if (!loadFsCommitContext(image, &ctx, blockers)) {
+        return false;
+    }
+    QVector<ApfsRootFilePayload> files;
+    if (!recoverPreservedFiles(
+            {ctx.image, ctx.geometry, ctx.chain}, request.existingFiles, &files, blockers)) {
+        return false;
+    }
+    QVector<ApfsRootDirectoryPayload> directories = request.existingDirectories;
+    if (!applyInodeMetadata(request, &files, &directories, blockers)) {
+        return false;
+    }
+    QVector<ApfsFsTreeNode> fsNodes;
+    if (!buildFsTreeNodes({ctx.geometry.blockSize,
+                           files,
+                           directories,
+                           ctx.firstLeafOid,
+                           ctx.chain.rootTreeOid},
+                          &fsNodes,
+                          blockers)) {
+        return false;
+    }
+    QVector<uint64_t> newBlocks;
+    uint64_t chunk1Bitmap = 0;
+    if (!allocateFsCommitBlocks(
+            ctx, {fsNodes.size(), 0, 0}, &newBlocks, &chunk1Bitmap, blockers)) {
+        return false;
+    }
+    ApfsDivergeState diverge;
+    if (!computeDivergeState(ctx, &diverge, blockers)) {
+        return false;
+    }
+    return finalizeFsCommit({.ctx = ctx,
+                             .newXid = ctx.live.xid + 1,
+                             .fsNodes = fsNodes,
+                             .newBlocks = newBlocks,
+                             .files = files,
+                             .extentRefNew = 0,
+                             .freedDataBlocks = {},
+                             .dataBlocksNew = 0,
+                             .fileCountDelta = 0,
+                             .directoryCountDelta = 0,
+                             .nextObjIdDelta = 0,
+                             .chunk1BitmapBlock = chunk1Bitmap,
+                             .diverge = diverge},
+                            result,
+                            blockers);
+}
+
 struct ApfsVolumeLabelRequest {
     QVector<ApfsRootFilePayload> existingFiles;  // every file (root + children), preserved
     QVector<ApfsRootDirectoryPayload> existingDirectories;  // every directory, preserved
@@ -20802,6 +21059,60 @@ PartitionApfsImageCheckpointCommitResult PartitionApfsWriter::commitImageOnlyFil
     return result;
 }
 
+PartitionApfsImageCheckpointCommitResult PartitionApfsWriter::commitImageOnlyInodeMetadata(
+    const PartitionApfsImageInodeMetadataCommitRequest& request) {
+    PartitionApfsImageCheckpointCommitResult result;
+    result.source_image_path = request.source_image_path.trimmed();
+    result.written_image_path = request.written_image_path.trimmed();
+    const QString targetName = request.target_name.trimmed();
+    const QLatin1StringView purpose("inode-metadata-commit");
+    const bool validName = request.target_is_directory
+                               ? appendRootDirectoryNameBlockers(targetName, purpose, &result.blockers)
+                               : appendRootFileNameBlockers(targetName, purpose, &result.blockers);
+    if (!validName || !validateImageOnlyCommitSource(purpose, &result)) {
+        return result;
+    }
+    QVector<ApfsRootFilePayload> files;
+    QVector<ApfsRootDirectoryPayload> directories;
+    if (!collectFullFsTree(result.source_image_path, &files, &directories, &result.blockers)) {
+        return result;
+    }
+    uint64_t parentDirectoryId = kApfsRootDirectoryId;
+    if (!resolveParentPath(directories,
+                           request.parent_directory_path,
+                           QStringLiteral("inode-metadata-commit"),
+                           &parentDirectoryId,
+                           &result.blockers) ||
+        !copyToScratchImage(
+            result.source_image_path, result.written_image_path, purpose, &result.blockers)) {
+        return result;
+    }
+    QFile image;
+    if (!openScratchImage(result.written_image_path, purpose, &image, &result.blockers)) {
+        return result;
+    }
+    ApfsInPlaceCheckpointResult commit;
+    QStringList commitBlockers;
+    if (commitInPlaceInodeMetadata(&image,
+                                   {files,
+                                    directories,
+                                    targetName,
+                                    parentDirectoryId,
+                                    request.target_is_directory,
+                                    request.metadata},
+                                   &commit,
+                                   &commitBlockers)) {
+        result.previous_xid = commit.previous_xid;
+        result.new_xid = commit.new_xid;
+        result.checkpoint_map_block = commit.checkpoint_map_block;
+        result.superblock_block = commit.superblock_block;
+    }
+    image.close();
+    result.blockers.append(commitBlockers);
+    result.ok = result.blockers.isEmpty();
+    return result;
+}
+
 // Gate + open a raw in-place commit target: require explicit destructive
 // confirmation + raw opt-in, validate it is a generated APFS container within the
 // in-place commit cap, and open the device read-write. Returns nullptr (with
@@ -21049,6 +21360,64 @@ PartitionApfsImageCheckpointCommitResult PartitionApfsWriter::commitRawFileRenam
                                 {allFiles, oldName, newName, directories, targetParentId},
                                 &commit,
                                 &commitBlockers)) {
+        result.previous_xid = commit.previous_xid;
+        result.new_xid = commit.new_xid;
+        result.checkpoint_map_block = commit.checkpoint_map_block;
+        result.superblock_block = commit.superblock_block;
+    }
+    target->close();
+    result.blockers.append(commitBlockers);
+    result.ok = result.blockers.isEmpty();
+    return result;
+}
+
+PartitionApfsImageCheckpointCommitResult PartitionApfsWriter::commitRawInodeMetadata(
+    const PartitionApfsRawInodeMetadataCommitRequest& request) {
+    PartitionApfsImageCheckpointCommitResult result;
+    result.source_image_path = request.target_path.trimmed();
+    result.written_image_path = request.target_path.trimmed();
+    const QString targetName = request.target_name.trimmed();
+    const QLatin1StringView purpose("inode-metadata-commit");
+    const bool validName = request.target_is_directory
+                               ? appendRootDirectoryNameBlockers(targetName, purpose, &result.blockers)
+                               : appendRootFileNameBlockers(targetName, purpose, &result.blockers);
+    if (!validName) {
+        return result;
+    }
+    QVector<ApfsRootFilePayload> files;
+    QVector<ApfsRootDirectoryPayload> directories;
+    if (!collectFullFsTree(result.written_image_path, &files, &directories, &result.blockers)) {
+        return result;
+    }
+    uint64_t parentDirectoryId = kApfsRootDirectoryId;
+    if (!resolveParentPath(directories,
+                           request.parent_directory_path,
+                           QStringLiteral("raw inode-metadata-commit"),
+                           &parentDirectoryId,
+                           &result.blockers)) {
+        return result;
+    }
+    auto target = openRawInPlaceCommitTarget({.targetPath = result.written_image_path,
+                                              .targetBytes = request.target_container_bytes,
+                                              .confirmed = request.target_mutation_confirmed,
+                                              .allowRawTarget = request.allow_raw_device_target,
+                                              .options = &request.options,
+                                              .purpose = purpose},
+                                             &result.blockers);
+    if (!target) {
+        return result;
+    }
+    ApfsInPlaceCheckpointResult commit;
+    QStringList commitBlockers;
+    if (commitInPlaceInodeMetadata(target.get(),
+                                   {files,
+                                    directories,
+                                    targetName,
+                                    parentDirectoryId,
+                                    request.target_is_directory,
+                                    request.metadata},
+                                   &commit,
+                                   &commitBlockers)) {
         result.previous_xid = commit.previous_xid;
         result.new_xid = commit.new_xid;
         result.checkpoint_map_block = commit.checkpoint_map_block;

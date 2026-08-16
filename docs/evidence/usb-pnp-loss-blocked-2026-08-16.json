@@ -1,0 +1,35 @@
+{
+  "component": "apfs_mount_service",
+  "check": "usb_pnp_loss_recovery",
+  "ok": false,
+  "classification": "blocked test, not a certification pass",
+  "started_utc": "2026-08-16T21:48:17.0584026Z",
+  "completed_utc": "2026-08-16T21:48:26.0053201Z",
+  "no_host_reboot_performed": true,
+  "no_file_mutation_performed": true,
+  "physical_power_removed": false,
+  "pinned_usb": {
+    "disk_number": 1,
+    "serial": "067D19C65080",
+    "size_bytes": 31042043904,
+    "bus_type": "USB",
+    "is_boot": false,
+    "is_system": false
+  },
+  "software_disable_attempted": true,
+  "software_disable_succeeded": false,
+  "blocker": "Windows reports the device is pending a system reboot and the requested pnputil disable action is unsupported on this OS product",
+  "host_reboot_prohibited": true,
+  "safe_final_state": {
+    "service_process_unchanged": true,
+    "mount": "V:",
+    "target": "\\\\?\\GLOBALROOT\\Device\\Harddisk1\\Partition1",
+    "exists": true,
+    "read_only": true,
+    "allow_raw_writes": false
+  },
+  "remaining_scope": [
+    "physical surprise-unplug and replug recovery",
+    "raw-media power-loss recovery"
+  ]
+}

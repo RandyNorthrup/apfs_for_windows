@@ -147,6 +147,9 @@ public:
     [[nodiscard]] PartitionApfsFileReadResult readFileRange(const QString& path,
                                                             uint64_t offset,
                                                             uint64_t length);
+    /// Read named embedded xattrs without requiring a regular-file data stream.
+    /// Works for regular files, directories, and symbolic links.
+    [[nodiscard]] PartitionApfsFileReadResult readXattrs(const QString& path);
 
 private:
     struct Impl;

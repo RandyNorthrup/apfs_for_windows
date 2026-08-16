@@ -2,32 +2,34 @@
   "component": "apfs_for_windows",
   "check": "certification_orchestrator",
   "ok": true,
-  "started_utc": "2026-08-16T20:19:08.0036395Z",
-  "completed_utc": "2026-08-16T20:21:47.1752402Z",
+  "started_utc": "2026-08-16T22:10:16.2980691Z",
+  "completed_utc": "2026-08-16T22:13:07.7063430Z",
   "step_count": 28,
   "failed_steps": [],
   "skipped_steps": [
+    "build_release via -SkipBuild; same current build had already passed",
     "repair_install"
   ],
-  "repair_completed_separately_immediately_before": true,
+  "repair_completed_separately": true,
   "repair_ok": true,
-  "no_reboot_performed": true,
+  "no_host_reboot_performed": true,
   "gates": {
-    "local_code": true,
+    "current_release_build_previously_passed": true,
+    "ctest_12_of_12": true,
+    "powershell_script_parse": true,
     "winfsp_prerequisite": true,
     "copied_source_boundary": true,
-    "license_notices": true,
     "release_package": true,
+    "local_worker_content_namespace": true,
+    "local_worker_metadata_acl_symbolic_links_and_extended_attributes": true,
     "local_worker_crash_recovery": true,
-    "apple_vm_roundtrip": true,
-    "service_recovery_policy": true,
-    "start_menu_entries": true,
-    "installed_app_registration": true,
-    "installed_persistence": true,
+    "apple_vm_roundtrip_extended_attributes_and_four_fsck": true,
+    "installed_service_state": true,
     "raw_alias_deduplication": true,
-    "mounted_usb_file_actions": true,
+    "mounted_usb_metadata_acl_symbolic_links_and_extended_attributes": true,
     "serial_pinned_usb_rw": true,
-    "extended_usb_file_actions": true
+    "extended_usb_file_actions": true,
+    "separate_100_iteration_robocopy_soak": true
   },
   "usb": {
     "disk_number": 1,
@@ -37,6 +39,12 @@
     "physical_size_bytes": 31042043904,
     "apfs_container_bytes": 536870912,
     "normal_user_create_write_hash_rename_delete": true,
+    "timestamps_hidden_archive": true,
+    "readonly_write_blocked": true,
+    "security_callback": true,
+    "relative_symbolic_link_create_follow_delete": true,
+    "extended_attribute_create_read_update_delete": true,
+    "extended_attribute_name": "user.apfswin_usb",
     "unicode_names": true,
     "long_path_characters": 394,
     "robocopy_payload_bytes": 1048576,
@@ -50,28 +58,26 @@
     "service_start_mode": "Auto",
     "installed_binaries_match_build": true,
     "tray_process_count": 1,
-    "tray_startup_task_registered": true,
     "pending_uac_count": 0,
+    "test_worker_count": 0,
     "usb_mount_exists": true,
     "usb_mount_read_only": true,
     "usb_mount_allow_raw_writes": false
   },
   "release": {
     "version": "0.1.0",
-    "zip_size_bytes": 12839605,
-    "zip_sha256": "28065BA2C9BEE49E6A61985F21F597A586247D3F7D9767A53F2E26E680AC31B0"
-  },
-  "raw_artifact_sha256": {
-    "certification": "FF126BEAEA75B62C72BC20FFAF902924ED552693A6CCB493C494B3F2355F5E0F",
-    "repair": "1FABAC61ED4F0CA926958648ABF1917B66AC9DC820170F486D093FABFE75370A",
-    "usb_rw": "26ED7B9B07A4787CEC4D2D3EE3288DF64DAE039EEDDA9890FEE7693CECAA7D4F",
-    "apple_vm": "68FA278E2928738E5754BB1C4D034A4E23CAD2EBEFA564FAE2940420B0274EB1"
+    "file_count": 17,
+    "zip_size_bytes": 12860048,
+    "zip_sha256": "DBC359604FE7DA66866966B702520914885C3FE32320F279BD9FD7F41DC16445",
+    "package_verification_ok": true,
+    "exact_archive_windows_vm_lifecycle_ok": true
   },
   "remaining_scope": [
-    "Windows-native xattr and symbolic-link target creation or mutation",
-    "real APFS basic-info and security metadata writes",
     "physical surprise-unplug and raw-media power-loss recovery",
-    "long-duration mixed-workload soak",
-    "host post-reboot persistence proof"
+    "directory extended-attribute mutation",
+    "non-ASCII Windows EA names",
+    "large APFS stream-backed xattr mutation",
+    "content-critical filesystem-owned xattrs through the generic Windows EA callback",
+    "hard-link creation through the installed WinFsp high-level interface"
   ]
 }

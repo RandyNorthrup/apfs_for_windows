@@ -576,6 +576,26 @@ public:
         return result;
     }
 
+    [[nodiscard]] PartitionApfsFileReadResult readXattrs(const QString& path) {
+        PartitionApfsFileReadResult result;
+        result.file_system = QStringLiteral("APFS");
+        if (!ensureMountedAndScanned(&result)) {
+            return result;
+        }
+        const auto record = resolveFile(cleanPath(path), &result);
+        if (!record.has_value()) {
+            return result;
+        }
+        for (const auto& xattr : xattrsByInode_.values(record->file_id)) {
+            if (xattr.first != QLatin1StringView(kApfsXattrNameCompressed)) {
+                result.xattrs.append(xattr);
+            }
+        }
+        result.volume_name = volumeName_;
+        result.ok = result.blockers.isEmpty();
+        return result;
+    }
+
     [[nodiscard]] PartitionApfsFileReadResult readFileRange(const QString& path,
                                                             uint64_t offset,
                                                             uint64_t length) {
@@ -2510,6 +2530,11 @@ PartitionApfsFileReadResult PartitionApfsFileSystemReaderSession::readFile(
 PartitionApfsFileReadResult PartitionApfsFileSystemReaderSession::readFileRange(
     const QString& path, uint64_t offset, uint64_t length) {
     return impl_->reader.readFileRange(path, offset, length);
+}
+
+PartitionApfsFileReadResult PartitionApfsFileSystemReaderSession::readXattrs(
+    const QString& path) {
+    return impl_->reader.readXattrs(path);
 }
 
 PartitionApfsFileReadResult PartitionApfsFileSystemReader::listDirectory(

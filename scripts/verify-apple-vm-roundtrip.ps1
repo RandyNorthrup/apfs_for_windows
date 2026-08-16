@@ -16,6 +16,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "lib\native-ea.ps1")
 
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -23,6 +24,35 @@ function Resolve-RepoPath {
         return [IO.Path]::GetFullPath($Path)
     }
     return [IO.Path]::GetFullPath((Join-Path $repoRoot $Path))
+}
+
+function New-NativeFileSymbolicLink {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Target
+    )
+    if (-not ("ApfsForWindows.SymbolicLinkOps" -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+namespace ApfsForWindows {
+    public static class SymbolicLinkOps {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern bool CreateSymbolicLink(string linkPath, string targetPath, int flags);
+
+        public static void CreateFile(string linkPath, string targetPath) {
+            const int SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE = 0x2;
+            if (!CreateSymbolicLink(linkPath, targetPath,
+                SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+    }
+}
+"@
+    }
+    [ApfsForWindows.SymbolicLinkOps]::CreateFile($Path, $Target)
 }
 
 function Resolve-Executable {
@@ -269,6 +299,7 @@ try {
 
     $windowsHash = $null
     $unicodeHash = $null
+    $windowsCreatedLinkHash = $null
     $originWorker = $null
     try {
         $originWorker = Start-ApfsWorker -Target $originImage -Name "windows-origin"
@@ -285,13 +316,30 @@ try {
         [IO.File]::WriteAllText($unicodeFile, "Unicode path payload from Windows",
             [Text.UTF8Encoding]::new($false))
         [IO.File]::WriteAllBytes((Join-Path $mountRoot "WinProof\empty.bin"), [byte[]]@())
+        [IO.File]::SetCreationTimeUtc(
+            $windowsFile,
+            [datetime]::SpecifyKind([datetime]"2021-02-03T04:05:06", "Utc"))
+        [IO.File]::SetLastWriteTimeUtc(
+            $windowsFile,
+            [datetime]::SpecifyKind([datetime]"2023-04-05T06:07:08", "Utc"))
+        [IO.File]::SetAttributes(
+            $windowsFile,
+            [IO.FileAttributes]::Hidden -bor [IO.FileAttributes]::Archive)
+        Set-NativeExtendedAttribute -Path $windowsFile -Name "user.apfswin_windows" `
+            -Value ([Text.Encoding]::UTF8.GetBytes("Windows EA payload"))
+        $windowsCreatedLink = Join-Path $mountRoot "WinProof\windows-created-symlink"
+        New-NativeFileSymbolicLink -Path $windowsCreatedLink `
+            -Target "Nested\windows.txt"
         $windowsHash = (Get-FileHash -LiteralPath $windowsFile -Algorithm SHA256).Hash
         $unicodeHash = (Get-FileHash -LiteralPath $unicodeFile -Algorithm SHA256).Hash
+        $windowsCreatedLinkHash =
+            (Get-FileHash -LiteralPath $windowsCreatedLink -Algorithm SHA256).Hash
     } finally {
         Stop-ApfsWorker -Process $originWorker
     }
     if ($windowsHash -ne "B58EE1D8BF6C0FF48A5D0AB28DCC938E941CE9AC9091E9C103D85C3784C1E4FC" -or
-        $unicodeHash -ne "D15C89BA02965E34B5E292AEB8D7B7D0A12B538FB6DC623DD998327D3F118DBC") {
+        $unicodeHash -ne "D15C89BA02965E34B5E292AEB8D7B7D0A12B538FB6DC623DD998327D3F118DBC" -or
+        $windowsCreatedLinkHash -ne $windowsHash) {
         throw "Windows origin payload hashes are not deterministic."
     }
 
@@ -328,12 +376,26 @@ try {
         $returnWorker = Start-ApfsWorker -Target $returnImage -Name "windows-return"
         $macFile = Join-Path $mountRoot "MacProof\Nested\mac.txt"
         $hardLink = Join-Path $mountRoot "MacProof\mac-hardlink.txt"
+        $xattrFile = Join-Path $mountRoot "MacProof\xattr-roundtrip.txt"
         $symlink = Join-Path $mountRoot "MacProof\windows-symlink"
+        $windowsCreatedLink = Join-Path $mountRoot "WinProof\windows-created-symlink"
         $renamedByMac = Join-Path $mountRoot "WinProof\Nested\windows-renamed-by-macos.txt"
         $renamedByWindows = Join-Path $mountRoot "WinProof\Nested\windows-renamed-back-by-windows.txt"
         $macHash = (Get-FileHash -LiteralPath $macFile -Algorithm SHA256).Hash
         $hardLinkHashBefore = (Get-FileHash -LiteralPath $hardLink -Algorithm SHA256).Hash
         $symlinkItemBefore = Get-Item -LiteralPath $symlink -Force
+        $windowsCreatedLinkItemBefore = Get-Item -LiteralPath $windowsCreatedLink -Force
+        $windowsCreatedLinkHashBefore =
+            (Get-FileHash -LiteralPath $windowsCreatedLink -Algorithm SHA256).Hash
+        $windowsEaFromMac = [Text.Encoding]::UTF8.GetString([byte[]](
+            Get-NativeExtendedAttribute -Path $renamedByMac -Name "user.apfswin_windows"))
+        $macEaFromMac = [Text.Encoding]::UTF8.GetString([byte[]](
+            Get-NativeExtendedAttribute -Path $xattrFile -Name "user.apfswin_rw"))
+        $deleteEaPresentBefore = Test-NativeExtendedAttribute `
+            -Path $xattrFile -Name "user.apfswin_delete"
+        Set-NativeExtendedAttribute -Path $xattrFile -Name "user.apfswin_rw" `
+            -Value ([Text.Encoding]::UTF8.GetBytes("Windows updated xattr payload"))
+        Remove-NativeExtendedAttribute -Path $xattrFile -Name "user.apfswin_delete"
         $returnDirectory = Join-Path $mountRoot "WindowsReturn\Nested"
         New-Item -ItemType Directory -Path $returnDirectory -Force | Out-Null
         $returnFile = Join-Path $returnDirectory "final.txt"
@@ -341,9 +403,17 @@ try {
             "Windows return mutation after macOS native write",
             [Text.UTF8Encoding]::new($false))
         Move-Item -LiteralPath $renamedByMac -Destination $renamedByWindows
+        Set-NativeExtendedAttribute -Path $renamedByWindows -Name "user.apfswin_windows" `
+            -Value ([Text.Encoding]::UTF8.GetBytes("Windows final EA payload"))
+        Remove-Item -LiteralPath $windowsCreatedLink -Force
+        New-NativeFileSymbolicLink -Path $windowsCreatedLink `
+            -Target "Nested\windows-renamed-back-by-windows.txt"
         Remove-Item -LiteralPath $macFile -Force
         $hardLinkHashAfter = (Get-FileHash -LiteralPath $hardLink -Algorithm SHA256).Hash
         $symlinkItemAfter = Get-Item -LiteralPath $symlink -Force
+        $windowsCreatedLinkItemAfter = Get-Item -LiteralPath $windowsCreatedLink -Force
+        $windowsCreatedLinkHashAfter =
+            (Get-FileHash -LiteralPath $windowsCreatedLink -Algorithm SHA256).Hash
         $windowsReturn = [ordered]@{
             mac_sha256 = $macHash
             hardlink_sha256_before = $hardLinkHashBefore
@@ -354,6 +424,19 @@ try {
             renamed_file_present = [bool](Test-Path -LiteralPath $renamedByWindows)
             symlink_reparse_before = [bool](($symlinkItemBefore.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
             symlink_reparse_after = [bool](($symlinkItemAfter.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+            windows_created_symlink_reparse_before = [bool](($windowsCreatedLinkItemBefore.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+            windows_created_symlink_reparse_after = [bool](($windowsCreatedLinkItemAfter.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+            windows_created_symlink_sha256_before = $windowsCreatedLinkHashBefore
+            windows_created_symlink_sha256_after = $windowsCreatedLinkHashAfter
+            windows_ea_from_macos = $windowsEaFromMac
+            mac_ea_from_macos = $macEaFromMac
+            delete_ea_present_before = [bool]$deleteEaPresentBefore
+            delete_ea_absent_after = [bool](-not (Test-NativeExtendedAttribute `
+                -Path $xattrFile -Name "user.apfswin_delete"))
+            updated_ea = [Text.Encoding]::UTF8.GetString([byte[]](
+                Get-NativeExtendedAttribute -Path $xattrFile -Name "user.apfswin_rw"))
+            final_windows_ea = [Text.Encoding]::UTF8.GetString([byte[]](
+                Get-NativeExtendedAttribute -Path $renamedByWindows -Name "user.apfswin_windows"))
         }
     } finally {
         Stop-ApfsWorker -Process $returnWorker
@@ -381,7 +464,17 @@ try {
         $windowsReturn.surviving_hardlink_present -and
         $windowsReturn.renamed_file_present -and
         $windowsReturn.symlink_reparse_before -and
-        $windowsReturn.symlink_reparse_after)
+        $windowsReturn.symlink_reparse_after -and
+        $windowsReturn.windows_created_symlink_reparse_before -and
+        $windowsReturn.windows_created_symlink_reparse_after -and
+        $windowsReturn.windows_created_symlink_sha256_before -eq $windowsHash -and
+        $windowsReturn.windows_created_symlink_sha256_after -eq $windowsHash -and
+        $windowsReturn.windows_ea_from_macos -eq "macOS updated Windows EA payload" -and
+        $windowsReturn.mac_ea_from_macos -eq "macOS xattr payload" -and
+        $windowsReturn.delete_ea_present_before -and
+        $windowsReturn.delete_ea_absent_after -and
+        $windowsReturn.updated_ea -eq "Windows updated xattr payload" -and
+        $windowsReturn.final_windows_ea -eq "Windows final EA payload")
     if (-not $metadataPreserved -or -not $symlinkMetadataValid -or -not $windowsMutationValid) {
         throw "Windows return mutation or copied-core metadata preservation failed."
     }
@@ -421,6 +514,7 @@ try {
             image_sha256 = (Get-FileHash -LiteralPath $originImage -Algorithm SHA256).Hash
             windows_sha256 = $windowsHash
             unicode_sha256 = $unicodeHash
+            windows_created_symlink_sha256 = $windowsCreatedLinkHash
         }
         macos_mutation = $remoteMutation
         windows_return = $windowsReturn
