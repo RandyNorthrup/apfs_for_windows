@@ -20,6 +20,7 @@
 #include <QMutex>
 #include <QMutexLocker>
 #include <QProcess>
+#include <QRegularExpression>
 #include <QString>
 #include <QStringList>
 #include <QTextStream>
@@ -53,6 +54,9 @@ constexpr uint64_t kDefaultMaxFileReadBytes = std::numeric_limits<uint64_t>::max
 constexpr uint64_t kDefaultMaxMutationBytes = 64ULL * 1024ULL * 1024ULL;
 constexpr uint64_t kAllocationUnit = 4096;
 constexpr qint64 kMaxTraceBytes = 8LL * 1024LL * 1024LL;
+constexpr int kTestFaultExitCode = 197;
+constexpr QLatin1StringView kTestFaultBeforeImageReplace("before-image-replace");
+constexpr QLatin1StringView kTestFaultAfterImageReplace("after-image-replace");
 
 QString normalizeApfsPath(const QString& input) {
     QString path = input.trimmed();
@@ -179,6 +183,19 @@ uint64_t alignAllocation(uint64_t size) {
 
 QMutex gTraceMutex;
 
+bool processIsAlive(qint64 processId) {
+    if (processId <= 0 || processId > std::numeric_limits<DWORD>::max()) {
+        return false;
+    }
+    HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(processId));
+    if (!process) {
+        return GetLastError() == ERROR_ACCESS_DENIED;
+    }
+    const DWORD wait = WaitForSingleObject(process, 0);
+    CloseHandle(process);
+    return wait == WAIT_TIMEOUT;
+}
+
 void trace(const QString& message) {
     const QString path = QString::fromLocal8Bit(qgetenv("APFS_WORKER_TRACE"));
     if (path.isEmpty()) {
@@ -285,6 +302,8 @@ public:
                         uint64_t maxFileReadBytes,
                         bool readOnly,
                         bool allowRawWrites,
+                        const QString& testFaultExitPhase,
+                        const QString& testFaultPath,
                         QString* error) {
         target_ = target;
         readOnly_ = readOnly;
@@ -292,6 +311,11 @@ public:
         maxFileReadBytes_ = maxFileReadBytes == 0 ? kDefaultMaxFileReadBytes : maxFileReadBytes;
         createdTime_ = currentFileTime();
         rawTarget_ = looksLikeWindowsRawTarget(target_);
+        testFaultExitPhase_ = testFaultExitPhase;
+        testFaultPath_ = normalizeApfsPath(testFaultPath);
+        if (!rawTarget_) {
+            recoverAndCleanImageMutationTemps();
+        }
         if (!readOnly_ && rawTarget_ && !allowRawWrites_) {
             if (error) {
                 *error = QStringLiteral(
@@ -600,19 +624,17 @@ public:
             !splitMutableFilePath(context->entry.path, &directoryName, &fileName)) {
             return STATUS_NOT_SUPPORTED;
         }
-        if (context->createdByThisHandle) {
-            context->stagedWriteActive = true;
-            context->stagedWriteDirty = context->entry.sizeBytes != 0;
-            context->stagedWriteData.clear();
-            context->entry.sizeBytes = 0;
-            fillFileInfo(context->entry, info);
-            return STATUS_SUCCESS;
+        if (context->stagedWriteFileBacked && !context->stagedWritePath.isEmpty()) {
+            QFile::remove(context->stagedWritePath);
         }
-        NTSTATUS status = commitFileWrite(context->entry.path, {}, &context->entry);
-        if (NT_SUCCESS(status)) {
-            fillFileInfo(context->entry, info);
-        }
-        return status;
+        context->stagedWriteActive = true;
+        context->stagedWriteDirty = context->entry.sizeBytes != 0;
+        context->stagedWriteData.clear();
+        context->stagedWritePath.clear();
+        context->stagedWriteFileBacked = false;
+        context->entry.sizeBytes = 0;
+        fillFileInfo(context->entry, info);
+        return STATUS_SUCCESS;
     }
 
     NTSTATUS writeFile(FileContext* context,
@@ -1179,9 +1201,50 @@ private:
     QString mutationTempPathNoLock(const QString& operation) const {
         const QFileInfo targetInfo(target_);
         const QString dir = targetInfo.absoluteDir().absolutePath();
-        const QString name = QStringLiteral(".%1-%2-%3.apfs")
-                                 .arg(targetInfo.fileName(), operation, QUuid::createUuid().toString(QUuid::Id128));
+        const QString name = QStringLiteral(".%1-%2-%3-%4.apfs")
+                                 .arg(targetInfo.fileName(), operation)
+                                 .arg(QCoreApplication::applicationPid())
+                                 .arg(QUuid::createUuid().toString(QUuid::Id128));
         return QDir(dir).filePath(name);
+    }
+
+    void recoverAndCleanImageMutationTemps() const {
+        const QFileInfo targetInfo(target_);
+        QDir directory(targetInfo.absoluteDir());
+        const QString prefix = QStringLiteral(".%1-").arg(targetInfo.fileName());
+        const QRegularExpression ownedTemp(
+            QStringLiteral("^\\.%1-[a-z]+-(\\d+)-[0-9a-f]+\\.apfs$")
+                .arg(QRegularExpression::escape(targetInfo.fileName())),
+            QRegularExpression::CaseInsensitiveOption);
+        QFileInfoList candidates = directory.entryInfoList(
+            {prefix + QStringLiteral("*.apfs")}, QDir::Files, QDir::Time);
+
+        if (!targetInfo.exists()) {
+            for (const QFileInfo& candidate : candidates) {
+                const QRegularExpressionMatch match = ownedTemp.match(candidate.fileName());
+                if (!match.hasMatch() ||
+                    !candidate.fileName().contains(QStringLiteral("-backup-"),
+                                                   Qt::CaseInsensitive) ||
+                    processIsAlive(match.captured(1).toLongLong())) {
+                    continue;
+                }
+                if (QFile::rename(candidate.absoluteFilePath(), target_)) {
+                    break;
+                }
+            }
+        }
+
+        if (!QFileInfo::exists(target_)) {
+            return;
+        }
+        candidates = directory.entryInfoList(
+            {prefix + QStringLiteral("*.apfs")}, QDir::Files, QDir::Time);
+        for (const QFileInfo& candidate : candidates) {
+            const QRegularExpressionMatch match = ownedTemp.match(candidate.fileName());
+            if (match.hasMatch() && !processIsAlive(match.captured(1).toLongLong())) {
+                QFile::remove(candidate.absoluteFilePath());
+            }
+        }
     }
 
     NTSTATUS reloadTargetNoLock(QString* error = nullptr) {
@@ -1233,23 +1296,39 @@ private:
     bool replaceTargetWithTempNoLock(const QString& tempPath, QString* error) {
         const QString backupPath = mutationTempPathNoLock(QStringLiteral("backup"));
         QFile::remove(backupPath);
-        if (!QFile::rename(target_, backupPath)) {
+        const std::wstring target = target_.toStdWString();
+        const std::wstring replacement = tempPath.toStdWString();
+        const std::wstring backup = backupPath.toStdWString();
+        if (!ReplaceFileW(target.c_str(),
+                          replacement.c_str(),
+                          backup.c_str(),
+                          REPLACEFILE_WRITE_THROUGH,
+                          nullptr,
+                          nullptr)) {
+            const DWORD replaceError = GetLastError();
             if (error) {
-                *error = QStringLiteral("unable to move mounted image to backup");
-            }
-            QFile::remove(tempPath);
-            return false;
-        }
-        if (!QFile::rename(tempPath, target_)) {
-            QFile::rename(backupPath, target_);
-            if (error) {
-                *error = QStringLiteral("unable to promote APFS mutation image");
+                *error = QStringLiteral("atomic APFS image replacement failed: Win32 error %1")
+                             .arg(replaceError);
             }
             QFile::remove(tempPath);
             return false;
         }
         QFile::remove(backupPath);
         return true;
+    }
+
+    void maybeExitForTestFault(QLatin1StringView phase,
+                               const QString& path,
+                               uint64_t mutationBytes) const {
+        if (mutationBytes == 0 || rawTarget_ || testFaultExitPhase_ != phase ||
+            normalizeApfsPath(path) != testFaultPath_) {
+            return;
+        }
+        trace(QStringLiteral("TestFaultExit phase=%1 path=%2 bytes=%3 code=%4")
+                  .arg(phase, testFaultPath_)
+                  .arg(mutationBytes)
+                  .arg(kTestFaultExitCode));
+        ExitProcess(kTestFaultExitCode);
     }
 
     NTSTATUS resultStatus(const QString& operation,
@@ -1310,12 +1389,16 @@ private:
                  .parent_directory_path = parentDirectoryPath,
                  .options = writerOptions()});
             if (result.ok) {
+                maybeExitForTestFault(
+                    kTestFaultBeforeImageReplace, normalized, static_cast<uint64_t>(data.size()));
                 QString replaceError;
                 if (!replaceTargetWithTempNoLock(tempPath, &replaceError)) {
                     trace(QStringLiteral("write replace failed: %1").arg(replaceError));
                     reloadTargetNoLock();
                     return STATUS_ACCESS_DENIED;
                 }
+                maybeExitForTestFault(
+                    kTestFaultAfterImageReplace, normalized, static_cast<uint64_t>(data.size()));
             } else {
                 QFile::remove(tempPath);
             }
@@ -1756,6 +1839,8 @@ private:
 
     QString target_;
     QString volumeLabel_{QStringLiteral("APFS")};
+    QString testFaultExitPhase_;
+    QString testFaultPath_;
     std::unique_ptr<QIODevice> device_;
     std::unique_ptr<sak::PartitionApfsFileSystemReaderSession> readerSession_;
     mutable QMutex ioMutex_;
@@ -2099,10 +2184,18 @@ NTSTATUS runMount(const QString& target,
                   const QString& mountPoint,
                   uint64_t maxFileReadBytes,
                   bool readOnly,
-                  bool allowRawWrites) {
+                  bool allowRawWrites,
+                  const QString& testFaultExitPhase,
+                  const QString& testFaultPath) {
     ApfsMountState state;
     QString error;
-    NTSTATUS status = state.openTarget(target, maxFileReadBytes, readOnly, allowRawWrites, &error);
+    NTSTATUS status = state.openTarget(target,
+                                       maxFileReadBytes,
+                                       readOnly,
+                                       allowRawWrites,
+                                       testFaultExitPhase,
+                                       testFaultPath,
+                                       &error);
     if (!NT_SUCCESS(status)) {
         QTextStream(stderr) << error << Qt::endl;
         return status;
@@ -2211,12 +2304,21 @@ int main(int argc, char* argv[]) {
                                        QStringLiteral("Mount writable. Image targets only unless --allow-raw-writes is also present.")};
     QCommandLineOption allowRawWritesOption{{QStringLiteral("allow-raw-writes")},
                                             QStringLiteral("Allow direct raw-device APFS mutation after external media confirmation.")};
+    QCommandLineOption testFaultExitPhaseOption{
+        {QStringLiteral("test-fault-exit-phase")},
+        QStringLiteral("Test only: exit before or after image replacement."),
+        QStringLiteral("phase")};
+    QCommandLineOption testFaultPathOption{{QStringLiteral("test-fault-path")},
+                                           QStringLiteral("Test only: exact APFS path that triggers process exit."),
+                                           QStringLiteral("path")};
     parser.addOption(statusOption);
     parser.addOption(targetOption);
     parser.addOption(mountOption);
     parser.addOption(maxReadOption);
     parser.addOption(readWriteOption);
     parser.addOption(allowRawWritesOption);
+    parser.addOption(testFaultExitPhaseOption);
+    parser.addOption(testFaultPathOption);
     parser.process(app);
 
     if (parser.isSet(statusOption) ||
@@ -2238,7 +2340,31 @@ int main(int argc, char* argv[]) {
     const uint64_t maxRead = parser.value(maxReadOption).toULongLong();
     const bool readOnly = !parser.isSet(readWriteOption);
     const bool allowRawWrites = parser.isSet(allowRawWritesOption);
-    const NTSTATUS status = runMount(target, mount, maxRead, readOnly, allowRawWrites);
+    const QString testFaultExitPhase = parser.value(testFaultExitPhaseOption).trimmed().toLower();
+    const QString testFaultPath = parser.value(testFaultPathOption).trimmed();
+    const bool testFaultRequested = !testFaultExitPhase.isEmpty() || !testFaultPath.isEmpty();
+    if (testFaultRequested &&
+        (testFaultPath.isEmpty() ||
+         (testFaultExitPhase != kTestFaultBeforeImageReplace &&
+          testFaultExitPhase != kTestFaultAfterImageReplace))) {
+        QTextStream(stderr) << "test fault requires --test-fault-path and phase "
+                               "before-image-replace or after-image-replace"
+                            << Qt::endl;
+        return 2;
+    }
+    if (testFaultRequested &&
+        (readOnly || looksLikeWindowsRawTarget(target) || !QFileInfo(target).isFile())) {
+        QTextStream(stderr) << "test fault exits are restricted to writable image files"
+                            << Qt::endl;
+        return 2;
+    }
+    const NTSTATUS status = runMount(target,
+                                     mount,
+                                     maxRead,
+                                     readOnly,
+                                     allowRawWrites,
+                                     testFaultExitPhase,
+                                     testFaultPath);
     if (NT_SUCCESS(status)) {
         return 0;
     }

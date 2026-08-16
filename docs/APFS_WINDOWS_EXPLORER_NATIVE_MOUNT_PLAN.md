@@ -411,8 +411,8 @@ Exit gate: release checklist passes with artifacts under this repo.
   files into one APFS root directory, verifies every copied hash, edits a direct
   child file, replaces an existing file through `MoveFileEx` rename, renames a
   file, recursively deletes the proof directory, unmounts, and probes the APFS
-  image afterward. The current worker stages newly-created same-handle writes and
-  commits them on `Flush`/`Cleanup`.
+  image afterward. The current worker stages same-handle create and overwrite
+  writes, committing truncate plus payload together on `Flush`/`Cleanup`.
 - `scripts\verify-local-worker-robocopy-stress.ps1` is a non-admin local repeat
   proof: it mounts a generated APFS image at `T:`, runs the same Robocopy
   copy/hash/edit/`MoveFileEx` replace/recursive-delete sequence for 10 proof
@@ -423,6 +423,12 @@ Exit gate: release checklist passes with artifacts under this repo.
   overwrites/deletes one direct child file, removes the proof directory,
   unmounts, and probes `large.bin` afterward to prove metadata mutations
   preserved existing file extents.
+- `scripts\verify-local-worker-crash-recovery.ps1` is a non-admin deterministic
+  image crash proof. Test-only worker options force exit code `197` immediately
+  before or after atomic `ReplaceFileW` image promotion. Raw probe and read-only
+  remount prove the before phase selects old file bytes and the after phase
+  selects new bytes. Remount also removes the abandoned PID-owned pre-replace
+  scratch image. Fault options reject raw targets and read-only mounts.
 - `scripts\verify-service-control-ipc.ps1` is a non-admin proof for the current
   build's service-control path: service-side safe config request handling, local
   socket transport, safe read-only/read-write policy changes, raw-write denial,
@@ -450,9 +456,9 @@ Exit gate: release checklist passes with artifacts under this repo.
   window and restores that mount read-only afterward.
 - `scripts\run-apfs-for-windows-certification.ps1` is the no-reboot certification
   orchestrator. It runs build, CTest, script parse, local RW smoke, local
-  Explorer-style fileops, local Robocopy stress, service-control IPC proof,
-  installed-service mode preflight, current-state preflight, and USB RW
-  preflight. Direct mounted-drive USB file actions only run with explicit
+  Explorer-style fileops, local Robocopy stress, local worker crash recovery,
+  service-control IPC proof, installed-service mode preflight, current-state
+  preflight, and USB RW preflight. Direct mounted-drive USB file actions only run with explicit
   `-RunUsbMountedFileActions`; full USB mutation proof only runs with explicit
   `-RunUsbWriteProof` after preflight is ready. Current full no-reboot run
   completed on `2026-08-16` with `ok=true`,
@@ -481,6 +487,12 @@ Exit gate: release checklist passes with artifacts under this repo.
   write/rename, child move to root, nested directory create, and file-backed raw
   directory create/delete while preserving a 16 MiB existing file. Every result
   is verified with `PartitionApfsFileSystemReader`.
+- `apfs_core_selftest` now also builds deterministic interrupted checkpoint
+  images from actual pre-commit and committed bytes. The current insert changes
+  18 blocks. Omitting checkpoint-map publication selects the old generation;
+  omitting the checkpoint superblock still selects old; publishing that
+  superblock selects new even before the block-zero mirror. All phases preserve
+  the seed-file SHA-256 and report `old_or_new_only=true`.
 - `apfs_winfs_worker --read-write` has a guarded mount-facing mutation path for
   APFS image and raw targets. WinFsp file and directory create, overwrite,
   write, truncate/resize, rename/move, and delete route arbitrary parent paths
@@ -564,12 +576,14 @@ Exit gate: release checklist passes with artifacts under this repo.
 - `scripts\run-apfs-for-windows-certification.ps1` currently writes
   `artifacts\certification\apfs-for-windows-certification.json` with
   `local_code_gates_ok=true`, `release_package_ok=true`,
+  `local_worker_crash_recovery_ok=true`,
   `installed_persistence_ok=true`, `mounted_usb_file_actions_ok=true`,
   `usb_preflight_ready=true`, and `full_usb_rw_ok=true` from the current
   `-RunUsbWriteProof -RunUsbMountedFileActions` run. The orchestrated direct
-  mounted-file lane and serial-pinned USB RW lane now pass; broader
-  public-claim lanes still need crash/rollback, Apple/macOS validation,
-  surprise-unplug, and wider metadata coverage.
+  mounted-file lane, serial-pinned USB RW lane, and deterministic image worker
+  crash lane now pass. Broader public-claim lanes still need physical raw-media
+  power-loss recovery, Apple/macOS validation, surprise-unplug, and wider
+  metadata coverage.
 - Current self-test proof is saved at
   `artifacts\core-selftest\apfs-core-selftest-large-raw-run.log`. It records
   successful XID
@@ -767,8 +781,9 @@ Exit gate: release checklist passes with artifacts under this repo.
 - Basic serial/signature-pinned physical USB RW now passes as normal user on the
   current hybrid MBR Partition 1 APFS target at `V:`. Remaining work before
   public RW default: longer repeat/soak, real APFS basic-info/security metadata
-  writes, xattr/symlink/hardlink mutation coverage, crash-during-write/rollback
-  proof, real physical surprise-unplug behavior, and Apple/macOS validation.
+  writes, xattr/symlink/hardlink mutation coverage, physical raw-media
+  crash/power-loss recovery proof, real surprise-unplug behavior, and
+  Apple/macOS validation. Deterministic image worker crash recovery now passes.
   `\\.\PhysicalDrive2` remains read-only.
 - Current local state is safe to pause: no UAC prompt is pending, no USB verifier
   process remains, service is Automatic/running, installed binaries match the

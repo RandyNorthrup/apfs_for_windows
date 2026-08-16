@@ -198,6 +198,10 @@ $steps += Invoke-CertificationStep -Name "local_worker_large_existing_fileops" -
     powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-local-worker-large-existing-fileops.ps1
 }
 
+$steps += Invoke-CertificationStep -Name "local_worker_crash_recovery" -Script {
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-local-worker-crash-recovery.ps1
+}
+
 $steps += Invoke-CertificationStep -Name "service_control_ipc" -Script {
     powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-service-control-ipc.ps1
 }
@@ -381,6 +385,7 @@ $requiredLocalNames = @(
     "local_worker_fileops",
     "local_worker_robocopy_stress",
     "local_worker_large_existing_fileops",
+    "local_worker_crash_recovery",
     "service_control_ipc",
     "sak_source_boundary",
     "license_notices",
@@ -397,6 +402,7 @@ $winfspPrerequisiteOk = @($steps | Where-Object { $_.name -eq "winfsp_prerequisi
 $sakSourceBoundaryOk = @($steps | Where-Object { $_.name -eq "sak_source_boundary" -and $_.payload_ok -eq $true }).Count -gt 0
 $licenseNoticesOk = @($steps | Where-Object { $_.name -eq "license_notices" -and $_.payload_ok -eq $true }).Count -gt 0
 $releasePackageOk = @($steps | Where-Object { $_.name -eq "release_package_verification" -and $_.payload_ok -eq $true }).Count -gt 0
+$localWorkerCrashRecoveryOk = @($steps | Where-Object { $_.name -eq "local_worker_crash_recovery" -and $_.payload_ok -eq $true }).Count -gt 0
 $serviceRecoveryPolicyOk = @($steps | Where-Object { $_.name -eq "service_recovery_policy" -and $_.payload_ok -eq $true }).Count -gt 0
 $startMenuEntriesOk = @($steps | Where-Object { $_.name -eq "start_menu_entries" -and $_.payload_ok -eq $true }).Count -gt 0
 $installedAppRegistrationOk = @($steps | Where-Object { $_.name -eq "installed_app_registration" -and $_.payload_ok -eq $true }).Count -gt 0
@@ -427,6 +433,7 @@ $result = [ordered]@{
     sak_source_boundary_ok = [bool]$sakSourceBoundaryOk
     license_notices_ok = [bool]$licenseNoticesOk
     release_package_ok = [bool]$releasePackageOk
+    local_worker_crash_recovery_ok = [bool]$localWorkerCrashRecoveryOk
     service_recovery_policy_ok = [bool]$serviceRecoveryPolicyOk
     start_menu_entries_ok = [bool]$startMenuEntriesOk
     installed_app_registration_ok = [bool]$installedAppRegistrationOk

@@ -11,6 +11,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSet>
 #include <QTemporaryDir>
 #include <QTextStream>
 
@@ -151,6 +152,87 @@ QByteArray largeProofData() {
         largeData[i] = static_cast<char>('A' + (i % 23));
     }
     return largeData;
+}
+
+bool buildInterruptedCheckpointImage(const QString& beforePath,
+                                     const QString& committedPath,
+                                     const QString& outputPath,
+                                     const QSet<quint64>& omittedBlocks,
+                                     quint64* changedBlocks,
+                                     quint64* omittedChangedBlocks) {
+    QFile::remove(outputPath);
+    if (!QFile::copy(beforePath, outputPath)) {
+        return false;
+    }
+
+    QFile before(beforePath);
+    QFile committed(committedPath);
+    QFile output(outputPath);
+    if (!before.open(QIODevice::ReadOnly) || !committed.open(QIODevice::ReadOnly) ||
+        !output.open(QIODevice::ReadWrite) || before.size() != committed.size()) {
+        return false;
+    }
+
+    constexpr qint64 blockSize = 4096;
+    quint64 changed = 0;
+    quint64 omitted = 0;
+    for (quint64 block = 0; block * blockSize < static_cast<quint64>(before.size()); ++block) {
+        const QByteArray oldBytes = before.read(blockSize);
+        const QByteArray newBytes = committed.read(blockSize);
+        if (oldBytes.size() != newBytes.size()) {
+            return false;
+        }
+        if (oldBytes == newBytes) {
+            continue;
+        }
+        ++changed;
+        if (omittedBlocks.contains(block)) {
+            ++omitted;
+            continue;
+        }
+        if (!output.seek(static_cast<qint64>(block * blockSize)) ||
+            output.write(newBytes) != newBytes.size()) {
+            return false;
+        }
+    }
+    if (!output.flush()) {
+        return false;
+    }
+    if (changedBlocks) {
+        *changedBlocks = changed;
+    }
+    if (omittedChangedBlocks) {
+        *omittedChangedBlocks = omitted;
+    }
+    return true;
+}
+
+int verifyCheckpointView(const QString& imagePath,
+                         const QByteArray& seedData,
+                         bool expectInserted,
+                         QJsonArray* proofs,
+                         const QString& phase) {
+    const auto listing = sak::PartitionApfsFileSystemReader::listDirectoryFromImage(
+        imagePath, QStringLiteral("/"), 20);
+    if (!listing.ok) {
+        return fail(phase, QStringLiteral("interrupted checkpoint is not readable"), listing.blockers);
+    }
+    if (!rootHas(listing, QStringLiteral("seed.txt")) ||
+        rootHas(listing, QStringLiteral("inserted.txt")) != expectInserted) {
+        return fail(phase, QStringLiteral("checkpoint selected unexpected file-tree generation"));
+    }
+    const auto seedRead = sak::PartitionApfsFileSystemReader::readFileFromImage(
+        imagePath, QStringLiteral("/seed.txt"), static_cast<uint64_t>(seedData.size()));
+    if (!seedRead.ok || seedRead.data != seedData) {
+        return fail(phase, QStringLiteral("seed file changed across checkpoint interruption"),
+                    seedRead.blockers);
+    }
+    appendProof(proofs,
+                phase,
+                {{QStringLiteral("selected_generation"),
+                  expectInserted ? QStringLiteral("new") : QStringLiteral("old")},
+                 {QStringLiteral("seed_sha256"), sha256Hex(seedRead.data)}});
+    return 0;
 }
 
 }  // namespace
@@ -309,6 +391,106 @@ int main(int argc, char* argv[]) {
         rc != 0) {
         return rc;
     }
+
+    if (insert.checkpoint_map_block == 0 || insert.superblock_block == 0 ||
+        insert.checkpoint_map_block == insert.superblock_block) {
+        return fail(QStringLiteral("checkpoint interruption setup"),
+                    QStringLiteral("commit did not report distinct publication blocks"));
+    }
+    const QString beforeCheckpointMap =
+        tempDir.filePath(QStringLiteral("interrupted-before-checkpoint-map.apfs"));
+    quint64 changedBeforeMap = 0;
+    quint64 omittedBeforeMap = 0;
+    if (!buildInterruptedCheckpointImage(seedImage,
+                                         insertedImage,
+                                         beforeCheckpointMap,
+                                         {0, insert.checkpoint_map_block, insert.superblock_block},
+                                         &changedBeforeMap,
+                                         &omittedBeforeMap) ||
+        omittedBeforeMap != 3) {
+        return fail(QStringLiteral("checkpoint interruption before map"),
+                    QStringLiteral("unable to synthesize pre-publication checkpoint image"));
+    }
+    if (const int rc = verifyCheckpointView(beforeCheckpointMap,
+                                            seedData,
+                                            false,
+                                            &proofs,
+                                            QStringLiteral("checkpoint interruption before map"));
+        rc != 0) {
+        return rc;
+    }
+
+    const QString beforeSuperblock =
+        tempDir.filePath(QStringLiteral("interrupted-before-superblock.apfs"));
+    quint64 changedBeforeSuperblock = 0;
+    quint64 omittedBeforeSuperblock = 0;
+    if (!buildInterruptedCheckpointImage(seedImage,
+                                         insertedImage,
+                                         beforeSuperblock,
+                                         {0, insert.superblock_block},
+                                         &changedBeforeSuperblock,
+                                         &omittedBeforeSuperblock) ||
+        omittedBeforeSuperblock != 2) {
+        return fail(QStringLiteral("checkpoint interruption before superblock"),
+                    QStringLiteral("unable to synthesize map-only checkpoint image"));
+    }
+    if (const int rc = verifyCheckpointView(beforeSuperblock,
+                                            seedData,
+                                            false,
+                                            &proofs,
+                                            QStringLiteral("checkpoint interruption before superblock"));
+        rc != 0) {
+        return rc;
+    }
+    const QString beforePrimaryAnchor =
+        tempDir.filePath(QStringLiteral("interrupted-before-primary-anchor.apfs"));
+    quint64 changedBeforePrimaryAnchor = 0;
+    quint64 omittedBeforePrimaryAnchor = 0;
+    if (!buildInterruptedCheckpointImage(seedImage,
+                                         insertedImage,
+                                         beforePrimaryAnchor,
+                                         {0},
+                                         &changedBeforePrimaryAnchor,
+                                         &omittedBeforePrimaryAnchor) ||
+        omittedBeforePrimaryAnchor != 1) {
+        return fail(QStringLiteral("checkpoint interruption before primary anchor"),
+                    QStringLiteral("unable to synthesize ring-only checkpoint image"));
+    }
+    if (const int rc = verifyCheckpointView(
+            beforePrimaryAnchor,
+            seedData,
+            true,
+            &proofs,
+            QStringLiteral("checkpoint interruption before primary anchor"));
+        rc != 0) {
+        return rc;
+    }
+    if (const int rc = verifyCheckpointView(insertedImage,
+                                            seedData,
+                                            true,
+                                            &proofs,
+                                            QStringLiteral("checkpoint publication complete"));
+        rc != 0) {
+        return rc;
+    }
+    appendProof(&proofs,
+                QStringLiteral("checkpoint rollback boundary"),
+                {{QStringLiteral("changed_blocks"), QString::number(changedBeforeMap)},
+                 {QStringLiteral("checkpoint_map_block"),
+                  QString::number(insert.checkpoint_map_block)},
+                 {QStringLiteral("superblock_block"), QString::number(insert.superblock_block)},
+                 {QStringLiteral("primary_anchor_block"), QStringLiteral("0")},
+                 {QStringLiteral("pre_map_omitted_changed_blocks"),
+                  QString::number(omittedBeforeMap)},
+                 {QStringLiteral("pre_superblock_omitted_changed_blocks"),
+                  QString::number(omittedBeforeSuperblock)},
+                 {QStringLiteral("pre_primary_anchor_omitted_changed_blocks"),
+                  QString::number(omittedBeforePrimaryAnchor)},
+                 {QStringLiteral("map_phase_changed_blocks"),
+                  QString::number(changedBeforeSuperblock)},
+                 {QStringLiteral("primary_anchor_phase_changed_blocks"),
+                  QString::number(changedBeforePrimaryAnchor)},
+                 {QStringLiteral("old_or_new_only"), true}});
 
     const QString replacedImage = tempDir.filePath(QStringLiteral("replaced.apfs"));
     const auto replace = sak::PartitionApfsWriter::commitImageOnlyFileWrite(

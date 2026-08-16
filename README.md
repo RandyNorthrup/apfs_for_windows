@@ -27,6 +27,9 @@ Current state:
 - Large same-handle raw writes stage to a temp host file and stream through the
   APFS raw writer on flush, avoiding the old 64 MiB memory cap for Explorer
   copy-style writes. Image mounts keep the 64 MiB buffered guard.
+- Existing-file overwrite now stages truncate plus payload as one APFS commit.
+  Image commits use atomic `ReplaceFileW` promotion, and dead-worker scratch
+  images are removed on the next image mount.
 - `apfs_mount_service` installs as `ApfsForWindowsMountService` with Automatic
   startup, reads mount mappings from `C:\ProgramData\APFS for Windows\mounts.json`,
   discovers APFS whole devices plus GPT/MBR partitions by on-disk signature at
@@ -357,6 +360,13 @@ Verified USB evidence:
   proof directory, then probe `large.bin` after unmount with the same SHA-256.
   It also auto-selects a free default mount when physical APFS mounts occupy its
   preferred letter.
+- `scripts\verify-local-worker-crash-recovery.ps1` generates
+  `artifacts\local-crash-recovery\worker-crash-recovery-proof.json`. It mounts
+  fresh APFS image copies read/write and forces worker exit code `197` immediately
+  before and after atomic image replacement. Raw probe plus read-only remount
+  select only expected old bytes before replacement and expected new bytes after
+  replacement. A pre-replace scratch image is detected, then removed by remount
+  recovery. Test fault options reject raw targets and read-only mounts.
 - `scripts\verify-installed-service-mode-policy.ps1` is ready for the post-repair
   installed-service proof. It runs without admin or USB mutation, mounts a
   generated APFS image through the installed service, proves read-only write
@@ -367,10 +377,11 @@ Verified USB evidence:
   `artifacts\certification\apfs-for-windows-certification.json`. It runs build,
   CTest, script parse, local worker, service IPC, package, license, WinFsp,
   copied-core, installed-state, raw-alias, direct mounted-drive USB file-action,
-  and serial-pinned USB RW proof gates. Treat that artifact as the authoritative
-  result for the checked-out build. Broader public-certification gates still
-  need crash-during-write/rollback, Apple/macOS validation, surprise-unplug,
-  real APFS basic-info/security metadata writes, and xattr/link coverage.
+  deterministic image crash recovery, and serial-pinned USB RW proof gates.
+  Treat that artifact as the authoritative result for the checked-out build.
+  Broader public-certification gates still need physical raw-media power-loss
+  recovery, Apple/macOS validation, surprise-unplug, real APFS basic-info/security
+  metadata writes, and xattr/link coverage.
 
 Verified copied-core mutation evidence:
 
@@ -391,6 +402,12 @@ Verified copied-core mutation evidence:
   direct directory-child write/rename, child move to root, nested directory
   create, and file-backed raw directory create/delete while preserving a 16 MiB
   existing file through the vendored `third_party\sak_apfs_core` code.
+- `apfs_core_selftest` also composes interrupted checkpoint images from the real
+  pre-commit and committed bytes. The current insert changes 18 blocks: readers
+  select the old generation before checkpoint-map publication, the old generation
+  before checkpoint-superblock publication, and the new generation after that
+  superblock is published even if the primary block-zero mirror is absent. Each
+  phase preserves the seed-file hash and reports `old_or_new_only=true`.
 - `artifacts\rw-mount\rw-mounted-y-smoke.json` proves a WinFsp APFS image mount
   at `Y:` created, read, renamed, replaced, and deleted `renamed-mount.txt`.
 - `artifacts\rw-mount\rw-fixture-after-mount-probe.json` proves the final image
