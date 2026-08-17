@@ -22,7 +22,7 @@ this project. Treat the source checkout as read-only until specific files are co
 vendored, subtree-imported, or submodule-pinned into this repository. After import,
 only edit the local copy in `apfs_for_windows`.
 
-## Current Repository Baseline (2026-08-16)
+## Current Repository Baseline (2026-08-17)
 
 - Repository layout and ownership are documented in `docs/ARCHITECTURE.md`.
 - Strict release status lives in `docs/PRODUCTION_READINESS.md`; current state is
@@ -284,10 +284,11 @@ Exit gate: release checklist passes with artifacts under this repo.
   regular-file/named-directory/volume-root EA exit gates pass on disposable
   image, physical USB where non-destructive, and native macOS round-trip media.
   Exact UTF-8 xattr names and zero-byte values pass through the reserved Windows
-  EA alias transport without changing APFS on-disk names or values. Hard-link
-  creation, case-colliding APFS xattr names, and large stream-backed xattr
-  mutation remain outside the current Windows callback surface; content-critical
-  filesystem xattrs remain protected.
+  EA alias transport without changing APFS on-disk names or values. Native
+  hard-link creation and large regular-file/directory/root stream-backed xattr
+  mutation pass. Case-colliding APFS names receive distinct deterministic aliases
+  and ambiguous direct writes fail closed. Content-critical filesystem xattrs
+  remain protected.
 - M4 exit gate passes in a clean Windows 11 VM. Package install, Automatic service,
   saved mount restoration across a reboot, Start Menu, Apps & Features, one
   interactive tray process, installed hashes, and complete uninstall cleanup pass.
@@ -296,7 +297,8 @@ Exit gate: release checklist passes with artifacts under this repo.
   physical surprise-unplug behavior remains unproven.
 - M6 passes local CTest, crash recovery, installed service, current 30 GB USB,
   Unicode/long-path/Robocopy/concurrent-read, a 100-iteration Robocopy soak, and
-  native Apple round-trip lanes.
+  native Apple round-trip lanes, including three clean `fsck_apfs` runs for
+  root/directory stream xattrs.
   Remaining certification work is listed under Blockers.
 
 ## Must-Fix Before Public RW Claim
@@ -626,20 +628,21 @@ Exit gate: release checklist passes with artifacts under this repo.
   passes after repair: installed binaries match the build, service is running,
   and generated-image service policy proof can run from a non-admin shell.
 - `scripts\start-repair-elevated.ps1` remains the preferred no-reboot repair
-  entrypoint from a normal shell. The latest repair updated the installed binaries
+  entrypoint from a normal shell. A recorded repair updated the installed binaries
   and restarted the service, but the normal-shell wrapper timed out waiting for its
-  proof-file handoff. No UAC prompt is pending, service is Automatic/running,
-  manager tray is running single-instance, and current `V:` was restored read-only.
+  proof-file handoff. Current worker-only deployment completed its proof handoff;
+  no UAC prompt is pending and service is Automatic/running.
 - `scripts\verify-usb-mounted-file-actions.ps1 -CleanupStaleProofEntries` is the
   no-admin file action path for the selected mounted USB volume (`V:` in the
   current media layout). It is
   intentionally separate from service policy repair, because normal file
   create/write/delete through a mounted drive should not need elevation. The
-  latest orchestrated run temporarily enabled writable policy outside this
+  recorded orchestrated run temporarily enabled writable policy outside this
   verifier, proved root/file/named-directory EA create/read/update/delete plus
   write/hash/rename/overwrite/delete through the mounted drive, then restored
-  `V:` read-only.
-- `scripts\run-apfs-for-windows-certification.ps1` currently writes
+  `V:` read-only. Current authorized stream proof leaves owner-pinned `V:`
+  intentionally writable.
+- `scripts\run-apfs-for-windows-certification.ps1` writes
   `artifacts\certification\apfs-for-windows-certification.json` with
   `local_code_gates_ok=true`, `release_package_ok=true`,
   `local_worker_crash_recovery_ok=true`,
@@ -647,10 +650,11 @@ Exit gate: release checklist passes with artifacts under this repo.
   `usb_preflight_ready=true`, and `full_usb_rw_ok=true` from the current
   `-RunUsbWriteProof -RunUsbMountedFileActions` run. The orchestrated direct
   mounted-file lane, serial-pinned USB RW lane, deterministic image worker crash
-  lane, native Apple round trip, and four `fsck_apfs` checks now pass. Broader
-  public-claim lanes still need physical raw-media
-  power-loss recovery, surprise-unplug, hard-link creation transport, and large
-  stream-backed xattr mutation.
+  lane, and native Apple round trip pass in retained evidence. The harness now
+  requires both Apple lanes when requested, including seven total `fsck_apfs`
+  checks. Broader public-claim lanes still need physical raw-media power-loss
+  recovery, surprise-unplug, production signing/package proof, and protected
+  APFS policy closure.
 - Current self-test proof is saved at
   `artifacts\core-selftest\apfs-core-selftest-large-raw-run.log`. It records
   successful XID
@@ -832,10 +836,10 @@ Exit gate: release checklist passes with artifacts under this repo.
   `artifacts\usb-rw\usb-normal-user-rw-proof.json`.
 - Current-state preflight proof is saved at
   `artifacts\state\current-apfs-state.json`. It reports
-  `ready_for_usb_normal_user_rw_test=true`: no UAC prompt is pending, installed
-  binaries match the current build, stale proof entries are gone, service is
-  Automatic/running, and `V:` is currently restored read-only with
-  `allow_raw_writes=false`.
+  `ready_for_usb_normal_user_rw_test=true` for its recorded run: no UAC prompt
+  was pending, installed binaries matched that build, stale proof entries were
+  gone, and service was Automatic/running. Current owner-pinned `V:` policy is
+  intentionally read/write with raw writes enabled for authorized testing.
 - Non-mutating USB file-action preflight is saved at
   `artifacts\usb-rw\usb-normal-user-rw-preflight.json`. It exits quickly with
   no elevation and no USB writes, reports readiness blockers, and leaves `V:`
@@ -852,9 +856,8 @@ Exit gate: release checklist passes with artifacts under this repo.
   create/read/update/delete, and reversible volume-root basic-info now pass on
   that raw target. Physical root security was intentionally not changed; its
   implementation is covered by local remount and native macOS lanes. Remaining
-  work before public RW default: hard-link creation; large stream-backed xattr
-  mutation; case-colliding APFS xattr names; policy-specific filesystem-owned
-  xattr handling;
+  work before public RW default: policy-specific sealed/FileVault/per-file-key
+  and filesystem-owned xattr handling;
   physical raw-media crash/power-loss recovery proof; and real surprise-unplug
   behavior. Apple-created xattr/symlink/hardlink preservation and supported EA
   mutation pass a native macOS round trip. Deterministic image worker crash
@@ -872,9 +875,9 @@ Exit gate: release checklist passes with artifacts under this repo.
   live normal-shell run updated the service and then timed out waiting for
   `install-repair-proof.json`. Live wrapper proof-file completion remains open.
 - Current local state is safe to pause: no UAC prompt is pending, no USB verifier
-  process remains, service is Automatic/running, installed binaries match the
-  current build, one tray manager is running, and `V:` is read-only with raw
-  writes disabled.
+  process remains, service is Automatic/running, installed worker matches the
+  current tested build, and owner-pinned `V:` remains intentionally read/write
+  with raw writes enabled. Newly discovered media remains read-only by default.
 - Normal Explorer-style file actions remain a non-admin requirement, but service
   policy restore/install is admin-gated on this machine: a non-admin
   `--add-mount ... --read-only` restore attempt failed with
@@ -1069,12 +1072,15 @@ Exit gate: release checklist passes with artifacts under this repo.
   regular-file, named-directory, and volume-root xattrs while preserving
   unrelated attributes. Directory state, including root inode 2, is
   batch-recovered in one fs-tree walk and preserved across unrelated COW
-  mutations; directory stream-backed xattrs fail
-  closed instead of being dropped. WinFsp `GetEa`/`SetEa` exposes direct
+  mutations. Regular-file, named-directory, and volume-root values above the
+  embedded limit use APFS data-stream objects; replacement, conversion to
+  embedded storage, deletion, extent-reference updates, and crash-safe reclaim
+  are covered. WinFsp `GetEa`/`SetEa` exposes direct
   printable ASCII names plus reversible Base32 aliases for exact UTF-8 APFS
-  names and zero-byte values. Embedded values remain capped at the APFS limit of
-  3,804 bytes; regular-file larger values now use APFS data streams up to the
-  Windows EA wire limit. Protected content-critical and recovered
+  names and zero-byte values. Names that differ only by case receive distinct
+  deterministic aliases; ambiguous direct writes fail with name collision.
+  Embedded values remain capped at the APFS limit of 3,804 bytes; larger values
+  use APFS data streams up to the Windows EA wire limit. Protected content-critical and recovered
   `FILE_SYSTEM_OWNED` attributes fail closed.
 - Local WinFsp proof passed file, named-directory, and volume-root EA create/read,
   restart persistence, update, and delete for direct names, empty values, and
@@ -1222,8 +1228,8 @@ Exit gate: release checklist passes with artifacts under this repo.
   metadata, file/directory/root EAs including empty and UTF-8 names, symlink,
   ACL query, and cleanup. A later proof deployed the current app binaries only,
   matched the installed/build worker SHA-256, and added 9,001/12,017-byte
-  regular-file stream EA operations. It did not change the driver, Test Mode,
-  or boot state. Exact production-package physical proof remains open until a
+  regular-file, named-directory, and volume-root stream EA operations. It did
+  not change the driver, Test Mode, or boot state. Exact production-package physical proof remains open until a
   production-signed driver and signed app package exist. The owner-pinned `V:`
   test mapping remains writable.
 - Upstream `S.A.K.-Utility` was not modified. All APFS changes remain in this
@@ -1233,30 +1239,35 @@ Exit gate: release checklist passes with artifacts under this repo.
   Authenticode application signing, retained clean-CI/kernel-test provenance,
   production-signed exact-package lifecycle and physical USB proof,
   disposable-media surprise-unplug and interrupted-write recovery,
-  directory/root stream-xattr policy,
-  case-colliding EA policy, sealed/FileVault policy, and release governance.
+  sealed/FileVault/per-file-key and filesystem-owned mutation policy beyond
+  fail-closed behavior, and release governance.
 
 ## 2026-08-17 Current-Build Stream Xattr and Host Update
 
-- Regular-file xattr values above the 3,804-byte embedded ceiling now allocate
-  APFS data-stream objects and extents through the existing COW transaction.
+- Regular-file, named-directory, and volume-root xattr values above the
+  3,804-byte embedded ceiling now allocate APFS data-stream objects and extents
+  through the existing COW transaction.
   Replacement reuses the stream object id, releases old extents, updates the
   extent-ref/free-queue state, and preserves unrelated file data and metadata.
 - The copied reader now materializes ordinary stream xattrs after extent scan.
   Content-critical streams remain hidden, values beyond the Windows EA wire
   limit are skipped with a warning, and recovered `FILE_SYSTEM_OWNED` attributes
   reject generic mutation.
-- `apfs_core_selftest` passes create/read at 9,001 bytes, replacement at 12,017
-  bytes, delete, recreate, stream-to-embedded conversion, descriptor storage,
-  and file-payload preservation. Release CTest passes 13/13.
+- `apfs_core_selftest` passes root/directory create/read at 9,001 bytes,
+  replacement at 12,017 bytes, delete, stream-to-embedded conversion,
+  descriptor storage, preservation across unrelated mutations, and deletion of
+  a directory that owns stream blocks. Release CTest passes 13/13.
 - The local WinFsp metadata lane independently passes 9,001-byte create/read,
-  remount persistence, 12,017-byte replacement, exact hashes, and deletion.
+  remount persistence, 12,017-byte replacement, exact hashes, deletion, and
+  deterministic aliases for case-colliding APFS names. Ambiguous direct writes
+  fail closed.
 - Current app binaries were deployed without changing the WinFsp driver, Test
   Mode, or boot state. The installed/build worker SHA-256 matched
-  `9F01F88C8D7FD7FA6169A03D778FBC4F2340724E5167DE88F7A2657FB20125B2`.
+  `E94F3E1E642F0C6908F2D730CD6BEA05C1BB476D1591D9D3CF0C07062D6BFCA8`.
 - Non-admin physical `V:` proof passed namespace operations, metadata, ACL,
   symlink, direct/empty/UTF-8 file-directory-root EAs, and exact 9,001-byte then
-  12,017-byte stream EA replacement/deletion. Cleanup removed all proof content
+  12,017-byte regular-file/directory/root stream EA replacement/deletion.
+  Cleanup removed all proof content
   and restored root metadata within Windows precision. The service remained
   Automatic/running and the host was not rebooted.
 - Mount health now validates the filesystem name before claiming a configured
@@ -1265,10 +1276,14 @@ Exit gate: release checklist passes with artifacts under this repo.
 - The owner-pinned `V:` test mapping remains read/write with raw writes enabled.
   Newly discovered media remains read-only by default. Earlier statements in
   this plan that `V:` was restored read-only describe older proof points.
-- Sanitized proof: `docs/evidence/stream-xattr-usb-2026-08-17.json`.
+- macOS mounted the generated root/directory stream image, read both 9,001-byte
+  values, replaced both with 12,017-byte values, remounted, and passed three
+  `fsck_apfs -n` runs. Windows then read matching returned hashes.
+- Sanitized proof:
+  `docs/evidence/directory-root-stream-xattrs-2026-08-17.json`.
 - Remaining production blockers are production driver signing, application
   Authenticode signing, retained clean CI/kernel-test provenance,
   production-signed exact-package lifecycle and physical USB validation,
-  surprise-unplug and interrupted-write recovery, directory/root stream-xattr
-  policy, case-colliding EA policy, sealed/FileVault policy, and release
+  surprise-unplug and interrupted-write recovery, sealed/FileVault/per-file-key
+  and filesystem-owned mutation policy beyond fail-closed behavior, and release
   governance.

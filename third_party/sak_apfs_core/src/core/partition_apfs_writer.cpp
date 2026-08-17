@@ -1617,8 +1617,9 @@ struct ApfsRootDirectoryPayload {
     uint64_t extraInodeFlags{0};
     // Directories can carry Finder metadata, ACLs, and user xattrs. Preserve
     // original flags for unrelated attributes; Windows EA mutations create
-    // ordinary embedded attributes.
+    // ordinary embedded or data-stream attributes.
     QVector<ApfsRecoveredXattr> xattrs;
+    QVector<ApfsDataStreamXattr> streamXattrs;
 };
 
 uint32_t crc32cWord(uint32_t crc, uint32_t word) {
@@ -2247,6 +2248,13 @@ uint64_t directoryAttributeFlags(const ApfsRootDirectoryPayload& directory) {
             flags |= kApfsInodeFlagHasFinderInfo;
         }
     }
+    for (const ApfsDataStreamXattr& xattr : directory.streamXattrs) {
+        if (xattr.name == QByteArray(kApfsXattrNameSecurity)) {
+            flags |= kApfsInodeFlagHasSecurityEa;
+        } else if (xattr.name == QByteArray(kApfsXattrNameFinderInfo)) {
+            flags |= kApfsInodeFlagHasFinderInfo;
+        }
+    }
     return flags;
 }
 
@@ -2303,9 +2311,11 @@ void appendResourceForkRecords(QVector<ApfsBtreeKeyValue>* records,
 // Emit each preserved DATA-STREAM extended attribute: a j_xattr_dstream naming its object id plus
 // the file-extent records that carry the value's blocks (keyed by that object id, like a resource
 // fork). Used to preserve a real Apple file's large (> embedded-limit) xattr across a mutation.
-void appendDataStreamXattrs(QVector<ApfsBtreeKeyValue>* records, const ApfsRootFilePayload& file) {
-    for (const ApfsDataStreamXattr& sx : file.streamXattrs) {
-        records->append({xattrKey(file.fileId, sx.name),
+void appendDataStreamXattrs(QVector<ApfsBtreeKeyValue>* records,
+                            uint64_t ownerId,
+                            const QVector<ApfsDataStreamXattr>& streamXattrs) {
+    for (const ApfsDataStreamXattr& sx : streamXattrs) {
+        records->append({xattrKey(ownerId, sx.name),
                          resourceForkXattrValue(sx.objId, sx.size, sx.allocedSize, sx.flags)});
         for (const ApfsDataExtent& extent : sx.extents) {
             records->append(
@@ -2313,6 +2323,11 @@ void appendDataStreamXattrs(QVector<ApfsBtreeKeyValue>* records, const ApfsRootF
                  fileExtentValue(extent.blockCount * kSupportedApfsBlockSizeBytes, extent.paddr)});
         }
     }
+}
+
+void appendDataStreamXattrs(QVector<ApfsBtreeKeyValue>* records,
+                            const ApfsRootFilePayload& file) {
+    appendDataStreamXattrs(records, file.fileId, file.streamXattrs);
 }
 
 // A7 (A-h) hard links: emit the sibling-link + sibling-map records that track every
@@ -2487,9 +2502,12 @@ void appendRootDirectoryRecords(QVector<ApfsBtreeKeyValue>* records,
     for (const ApfsRecoveredXattr& xattr : directory.xattrs) {
         records->append(
             {xattrKey(directory.directoryId, xattr.name),
-             xattrEmbeddedValue(static_cast<uint16_t>(xattr.flags | kApfsXattrDataEmbedded),
+             xattrEmbeddedValue(static_cast<uint16_t>(
+                                    (xattr.flags & ~kApfsXattrDataStream) |
+                                    kApfsXattrDataEmbedded),
                                 xattr.xdata)});
     }
+    appendDataStreamXattrs(records, directory.directoryId, directory.streamXattrs);
 }
 
 qsizetype btreeRecordsByteSize(const QVector<ApfsBtreeKeyValue>& records) {
@@ -2644,9 +2662,12 @@ QVector<ApfsBtreeKeyValue> buildFsTreeRecords(const QVector<ApfsRootFilePayload>
     for (const ApfsRecoveredXattr& xattr : root.xattrs) {
         records.append(
             {xattrKey(kApfsRootDirectoryId, xattr.name),
-             xattrEmbeddedValue(static_cast<uint16_t>(xattr.flags | kApfsXattrDataEmbedded),
+             xattrEmbeddedValue(static_cast<uint16_t>(
+                                    (xattr.flags & ~kApfsXattrDataStream) |
+                                    kApfsXattrDataEmbedded),
                                 xattr.xdata)});
     }
+    appendDataStreamXattrs(&records, kApfsRootDirectoryId, root.streamXattrs);
     for (const auto& file : files) {
         appendRootFileRecords(&records, file);
     }
@@ -3458,8 +3479,10 @@ void mergeExtentRefRecord(QVector<ExtentRefPhysRecord>* records,
 // clone) reference the same physical block, emit ONE record with refcnt = the
 // number of referencing data streams (fsck/apfsck cross-check e_refcnt against
 // the file-extent references). The owner stays the lowest id (the source).
-QVector<ExtentRefPhysRecord> collectExtentRefRecords(uint32_t blockSize,
-                                                     const QVector<ApfsRootFilePayload>& files) {
+QVector<ExtentRefPhysRecord> collectExtentRefRecords(
+    uint32_t blockSize,
+    const QVector<ApfsRootFilePayload>& files,
+    const QVector<ApfsRootDirectoryPayload>& directories = {}) {
     QVector<ExtentRefPhysRecord> records;
     for (const auto& file : files) {
         // A resource-fork-compressed file's data extents belong to its ResourceFork data
@@ -3471,6 +3494,13 @@ QVector<ExtentRefPhysRecord> collectExtentRefRecords(uint32_t blockSize,
         }
         // A large data-stream xattr's value blocks are owned by ITS object id, not the inode's.
         for (const ApfsDataStreamXattr& sx : file.streamXattrs) {
+            for (const ApfsDataExtent& extent : sx.extents) {
+                mergeExtentRefRecord(&records, extent, sx.objId);
+            }
+        }
+    }
+    for (const ApfsRootDirectoryPayload& directory : directories) {
+        for (const ApfsDataStreamXattr& sx : directory.streamXattrs) {
             for (const ApfsDataExtent& extent : sx.extents) {
                 mergeExtentRefRecord(&records, extent, sx.objId);
             }
@@ -3570,13 +3600,15 @@ void writeExtentRefRootTrailer(QByteArray* block,
 
 QByteArray buildExtentRefTreeBlock(uint32_t blockSize,
                                    const QVector<ApfsRootFilePayload>& files,
+                                   const QVector<ApfsRootDirectoryPayload>& directories,
                                    QStringList* blockers) {
     QByteArray block = newApfsObjectBlock(
         blockSize, kApfsFormatExtentRefTreeBlock, kApfsFormatXid, kApfsObjectTypeBtreePhysical);
     writeLe32(&block, kApfsObjectSubtypeOffset, kApfsObjectSubtypeExtentRef);
     writeLe16(&block, kApfsBtreeNodeFlagsOffset, 0x0003);
 
-    const QVector<ExtentRefPhysRecord> records = collectExtentRefRecords(blockSize, files);
+    const QVector<ExtentRefPhysRecord> records =
+        collectExtentRefRecords(blockSize, files, directories);
 
     const qsizetype tocLength = extentRefTocBytes(records.size());
     // This helper builds the single ROOT|LEAF node at a FIXED block (the format layout's
@@ -3819,9 +3851,11 @@ QVector<QByteArray> buildExtentRefTreeNodesFromRecords(const ApfsExtentRefTreePa
 
 QVector<QByteArray> buildExtentRefTreeNodes(const ApfsExtentRefTreeParams& params,
                                             const QVector<ApfsRootFilePayload>& files,
+                                            const QVector<ApfsRootDirectoryPayload>& directories,
                                             QStringList* blockers) {
     return buildExtentRefTreeNodesFromRecords(params,
-                                              collectExtentRefRecords(params.blockSize, files),
+                                              collectExtentRefRecords(
+                                                  params.blockSize, files, directories),
                                               blockers);
 }
 
@@ -8449,6 +8483,7 @@ bool applyPreservedInodeState(const ApfsRecoveredInodeState& state,
 }
 
 bool applyPreservedDirectoryState(const ApfsRecoveredInodeState& state,
+                                  const ApfsLiveTreeSource& source,
                                   ApfsRootDirectoryPayload* directory,
                                   QStringList* blockers) {
     if (!state.inodeFound) {
@@ -8470,14 +8505,24 @@ bool applyPreservedDirectoryState(const ApfsRecoveredInodeState& state,
         state.internalFlags & ~(kApfsInodeFlagNoRsrcFork | kApfsInodeFlagHasSecurityEa |
                                 kApfsInodeFlagHasFinderInfo);
     for (const ApfsRecoveredXattr& xattr : state.xattrs) {
-        if ((xattr.flags & kApfsXattrDataEmbedded) == 0) {
+        if ((xattr.flags & kApfsXattrDataEmbedded) != 0) {
+            directory->xattrs.append(xattr);
+            continue;
+        }
+        ApfsDataStreamXattr stream = recoveredStreamXattr(xattr);
+        stream.extents = recoverFileDataExtents(
+            source.image, source.geometry, source.chain, stream.objId, blockers);
+        if (!blockers->isEmpty()) {
+            return false;
+        }
+        if (stream.size != 0 && stream.extents.isEmpty()) {
             blockers->append(
-                QStringLiteral("APFS preserve: directory data-stream xattr '%1' on '%2' is not "
-                               "yet supported")
+                QStringLiteral("APFS preserve: directory data-stream xattr '%1' on '%2' has no "
+                               "recoverable extents")
                     .arg(QString::fromUtf8(xattr.name), directory->directoryName));
             return false;
         }
-        directory->xattrs.append(xattr);
+        directory->streamXattrs.append(std::move(stream));
     }
     return true;
 }
@@ -9032,6 +9077,7 @@ struct ApfsCowFileInsert {
     // [fs-tree nodes (K), volOmapTree, volOmapHdr, volSb, ctrOmapTree, ctrOmapHdr]
     QVector<uint64_t> newBlocks;
     QVector<ApfsRootFilePayload> files;
+    QVector<ApfsRootDirectoryPayload> directories;
     int64_t allocBlockDelta{0};  // change to the volume allocated-block count (data blocks)
     uint64_t extentRefNew{0};    // new extent-ref tree root block (0 = keep the existing tree)
     // The full reserved extent-ref tree run (root at [0]); empty means the single-node tree
@@ -9096,6 +9142,7 @@ bool cowExtentRefTree(const ApfsCowFileInsert& cow, QStringList* blockers) {
                                                         blockers)
                    : buildExtentRefTreeNodes({cow.geometry.blockSize, cow.newXid, run},
                                              cow.files,
+                                             cow.directories,
                                              blockers);
     if (nodes.isEmpty()) {
         return false;  // reserved run too small for the record set (blocker already appended)
@@ -11787,6 +11834,7 @@ struct ApfsFsCommitFinalize {
     QVector<ApfsFsTreeNode> fsNodes;     // root first; paddrs are newBlocks[0..K-1]
     QVector<uint64_t> newBlocks;         // [K nodes, 5-chain, extentRef?, data?]
     QVector<ApfsRootFilePayload> files;  // the committed root-file set
+    QVector<ApfsRootDirectoryPayload> directories;
     uint64_t extentRefNew{0};            // new extent-ref tree root block (0 = keep)
     QVector<uint64_t> extentRefBlocks;   // full reserved extent-ref run (root at [0])
     QVector<uint64_t> freedDataBlocks;   // data blocks the commit releases
@@ -12125,6 +12173,7 @@ bool writeFinalizeCowChain(const ApfsFsCommitFinalize& f,
                                                           f.ctx.geometry.blockSize)
                                               .tail)),
          .files = f.files,
+         .directories = f.directories,
          .allocBlockDelta = netConsumed,
          .extentRefNew = f.extentRefNew,
          .extentRefBlocks = f.extentRefBlocks,
@@ -13387,8 +13436,9 @@ bool sizeInsertFsTree(const ApfsFsCommitContext& ctx,
     // corrupting.
     const qsizetype newFileRecords = dataBlocks > 0 ? 1 : 0;
     if (!diverge.active) {
-        out->extentRefRecords = collectExtentRefRecords(ctx.geometry.blockSize, files).size() +
-                                newFileRecords;
+        out->extentRefRecords =
+            collectExtentRefRecords(ctx.geometry.blockSize, files, request.directories).size() +
+            newFileRecords;
         return true;
     }
     // The live extent-ref tree carries only the post-snapshot extents (the pre-snapshot ones the
@@ -13403,6 +13453,7 @@ bool sizeInsertFsTree(const ApfsFsCommitContext& ctx,
 // path or for a data-free insert.
 void extendDivergeExtentRecords(const ApfsFsCommitContext& ctx,
                                 const QVector<ApfsRootFilePayload>& files,
+                                const QVector<ApfsRootDirectoryPayload>& directories,
                                 const QVector<uint64_t>& dataBlockList,
                                 ApfsDivergeState* diverge) {
     if (!diverge->active || dataBlockList.isEmpty()) {
@@ -13412,7 +13463,8 @@ void extendDivergeExtentRecords(const ApfsFsCommitContext& ctx,
     for (const uint64_t block : dataBlockList) {
         freshData.insert(block);
     }
-    for (const ExtentRefPhysRecord& r : collectExtentRefRecords(ctx.geometry.blockSize, files)) {
+    for (const ExtentRefPhysRecord& r :
+         collectExtentRefRecords(ctx.geometry.blockSize, files, directories)) {
         if (freshData.contains(r.paddr)) {
             diverge->liveExtentRefRecords.append(r);
         }
@@ -13593,12 +13645,14 @@ bool commitInPlaceFileInsert(QIODevice* image,
             "APFS in-place commit: fs-tree grew past the reserved node count after allocation"));
         return false;
     }
-    extendDivergeExtentRecords(ctx, built.files, layout.dataBlockList, &diverge);
+    extendDivergeExtentRecords(
+        ctx, built.files, request.directories, layout.dataBlockList, &diverge);
     return finalizeFsCommit({.ctx = ctx,
                              .newXid = ctx.live.xid + 1,
                              .fsNodes = built.nodes,
                              .newBlocks = layout.newBlocks,
                              .files = built.files,
+                             .directories = request.directories,
                              .extentRefNew = layout.extentRefBlocks.value(0),
                              .extentRefBlocks = layout.extentRefBlocks,
                              .freedDataBlocks = {},
@@ -13848,12 +13902,14 @@ bool commitInPlaceFilePatch(QIODevice* image,
             "APFS in-place commit: fs-tree grew past the reserved node count after allocation"));
         return false;
     }
-    extendDivergeExtentRecords(ctx, built.files, layout.dataBlockList, &diverge);
+    extendDivergeExtentRecords(
+        ctx, built.files, request.directories, layout.dataBlockList, &diverge);
     return finalizeFsCommit({.ctx = ctx,
                              .newXid = ctx.live.xid + 1,
                              .fsNodes = built.nodes,
                              .newBlocks = layout.newBlocks,
                              .files = built.files,
+                             .directories = request.directories,
                              .extentRefNew = layout.extentRefBlocks.value(0),
                              .extentRefBlocks = layout.extentRefBlocks,
                              .freedDataBlocks = freedDataBlocks,
@@ -14315,7 +14371,7 @@ bool writeSnapshotFrozenBlocks(const ApfsSnapshotCreateCow& cow,
     // them only as later writes diverge. apfsck processes the snapshot first (NEW
     // sets the refcnt + marks each block used once) then the live (empty -> refcnt
     // unchanged), and the per-version e_references each equal the file's references.
-    QByteArray extentRef = buildExtentRefTreeBlock(bs, {}, blockers);
+    QByteArray extentRef = buildExtentRefTreeBlock(bs, {}, {}, blockers);
     writeLe64(&extentRef, kApfsObjectOidOffset, frozenExtentRef);
     writeLe64(&extentRef, kApfsObjectXidOffset, snapXid);
     if (!stampAndWriteApfsBlock(cow.image, cow.geometry, frozenExtentRef, &extentRef, blockers)) {
@@ -18591,7 +18647,8 @@ bool buildDeleteLayout(const ApfsDeleteLayoutInput& in,
     const qsizetype recordCount =
         in.divergeRecordCount >= 0
             ? in.divergeRecordCount
-            : collectExtentRefRecords(ctx.geometry.blockSize, in.remaining).size();
+            : collectExtentRefRecords(
+                  ctx.geometry.blockSize, in.remaining, in.directories).size();
     // A diverge delete always rebuilds the (delta) live tree even when it becomes empty, so it
     // reserves at least one node; the non-snapshot path only rebuilds when the file had blocks.
     const int extentRefSlots =
@@ -18705,6 +18762,7 @@ bool commitInPlaceFileDelete(QIODevice* image,
                              .fsNodes = layout.fsNodes,
                              .newBlocks = layout.newBlocks,
                              .files = remaining,
+                             .directories = request.directories,
                              .extentRefNew = layout.extentRefBlocks.value(0),
                              .extentRefBlocks = layout.extentRefBlocks,
                              .freedDataBlocks = freedDataBlocks,
@@ -18961,6 +19019,7 @@ bool commitInPlaceFileRename(QIODevice* image,
                              .fsNodes = fsNodes,
                              .newBlocks = newBlocks,
                              .files = files,
+                             .directories = request.directories,
                              .extentRefNew = 0,
                              .freedDataBlocks = {},
                              .dataBlocksNew = 0,
@@ -19040,6 +19099,7 @@ bool commitInPlaceDirectoryCreate(QIODevice* image,
                              .fsNodes = fsNodes,
                              .newBlocks = newBlocks,
                              .files = files,
+                             .directories = directories,
                              .extentRefNew = 0,
                              .freedDataBlocks = {},
                              .dataBlocksNew = 0,
@@ -19060,6 +19120,7 @@ bool commitInPlaceDirectoryCreate(QIODevice* image,
 // parent (root by default; a nested parent when the caller supplied a parent path).
 bool resolveDeletableRootDirectory(const ApfsDirectoryCreateRequest& request,
                                    QVector<ApfsRootDirectoryPayload>* remainingDirectories,
+                                   ApfsRootDirectoryPayload* targetDirectory,
                                    QStringList* blockers) {
     const QString name = request.directoryName.trimmed();
     uint64_t targetDirId = 0;
@@ -19067,6 +19128,7 @@ bool resolveDeletableRootDirectory(const ApfsDirectoryCreateRequest& request,
         if (directory.parentDirectoryId == request.parentDirectoryId &&
             directory.directoryName == name && targetDirId == 0) {
             targetDirId = directory.directoryId;
+            *targetDirectory = directory;
         } else {
             remainingDirectories->append(directory);
         }
@@ -19105,7 +19167,9 @@ bool commitInPlaceDirectoryDelete(QIODevice* image,
         return false;
     }
     QVector<ApfsRootDirectoryPayload> remainingDirectories;
-    if (!resolveDeletableRootDirectory(request, &remainingDirectories, blockers)) {
+    ApfsRootDirectoryPayload targetDirectory;
+    if (!resolveDeletableRootDirectory(
+            request, &remainingDirectories, &targetDirectory, blockers)) {
         return false;
     }
     QVector<ApfsRootFilePayload> files;
@@ -19113,46 +19177,52 @@ bool commitInPlaceDirectoryDelete(QIODevice* image,
             {ctx.image, ctx.geometry, ctx.chain}, request.existingFiles, &files, blockers)) {
         return false;
     }
-    QVector<ApfsFsTreeNode> fsNodes;
-    if (!buildFsTreeNodes({ctx.geometry.blockSize,
-                           files,
-                           remainingDirectories,
-                           ctx.firstLeafOid,
-                           ctx.chain.rootTreeOid},
-                          &fsNodes,
-                          blockers)) {
-        return false;
+    QVector<ApfsDataExtent> targetStreamExtents;
+    for (const ApfsDataStreamXattr& xattr : targetDirectory.streamXattrs) {
+        targetStreamExtents += xattr.extents;
     }
-    const qsizetype nodeCount = fsNodes.size();
-    // Diverge: an empty directory owns no data extents, so deleting it on a snapshotted volume
-    // only reshapes the fs-tree + versions the omap; nothing snapshot-owned is freed (the
-    // snapshot-frozen fs nodes are preserved, extent-ref tree kept in place). Computed BEFORE the
-    // reservation so its retained-version count sizes the omap chain.
+    QVector<uint64_t> freedDataBlocks = fileFreedDataBlocks(
+        {.dataExtents = targetStreamExtents}, ctx.geometry.blockSize);
+    const uint64_t targetBlocks = static_cast<uint64_t>(freedDataBlocks.size());
+    // A directory has no primary data stream, but it may own stream-backed xattrs. Those extents
+    // follow the same snapshot-aware free and extent-ref rebuild path as deleted file data.
     ApfsDivergeState diverge;
     if (!computeDivergeState(ctx, &diverge, blockers)) {
         return false;
     }
-    QVector<uint64_t> newBlocks;
-    uint64_t directoryChunk1Bitmap = 0;
-    if (!allocateFsCommitBlocks(ctx,
-                                {nodeCount, 0, 0, nodeCount + diverge.retainedMappings.size()},
-                                &newBlocks,
-                                &directoryChunk1Bitmap,
-                                blockers)) {
+    qsizetype divergeRecordCount = -1;
+    if (diverge.active && !targetStreamExtents.isEmpty()) {
+        const ApfsDivergeDeleteExtentPlan plan = planDivergeDeleteExtents(
+            diverge.liveExtentRefRecords, targetStreamExtents);
+        diverge.liveExtentRefRecords = plan.liveRecords;
+        freedDataBlocks = plan.freedBlocks;
+        divergeRecordCount = plan.liveRecords.size();
+    }
+    ApfsDeleteLayout layout;
+    if (!buildDeleteLayout({ctx,
+                            files,
+                            remainingDirectories,
+                            targetBlocks,
+                            divergeRecordCount,
+                            diverge.retainedMappings.size()},
+                           &layout,
+                           blockers)) {
         return false;
     }
     return finalizeFsCommit({.ctx = ctx,
                              .newXid = ctx.live.xid + 1,
-                             .fsNodes = fsNodes,
-                             .newBlocks = newBlocks,
+                             .fsNodes = layout.fsNodes,
+                             .newBlocks = layout.newBlocks,
                              .files = files,
-                             .extentRefNew = 0,
-                             .freedDataBlocks = {},
+                             .directories = remainingDirectories,
+                             .extentRefNew = layout.extentRefBlocks.value(0),
+                             .extentRefBlocks = layout.extentRefBlocks,
+                             .freedDataBlocks = freedDataBlocks,
                              .dataBlocksNew = 0,
                              .fileCountDelta = 0,
                              .directoryCountDelta = -1,
                              .nextObjIdDelta = 0,
-                             .chunk1BitmapBlock = directoryChunk1Bitmap,
+                             .chunk1BitmapBlock = layout.chunk1BitmapBlock,
                              .diverge = diverge},
                             result,
                             blockers);
@@ -19291,6 +19361,7 @@ bool commitInPlaceDirectoryRename(QIODevice* image,
                              .fsNodes = fsNodes,
                              .newBlocks = newBlocks,
                              .files = files,
+                             .directories = directories,
                              .extentRefNew = 0,
                              .freedDataBlocks = {},
                              .dataBlocksNew = 0,
@@ -19573,9 +19644,10 @@ bool applyFileXattrMetadata(const PartitionApfsInodeMetadataUpdate& update,
     return true;
 }
 
-bool applyEmbeddedDirectoryXattrMetadata(const PartitionApfsInodeMetadataUpdate& update,
-                                         ApfsRootDirectoryPayload* directory,
-                                         QStringList* blockers) {
+bool applyDirectoryXattrMetadata(const PartitionApfsInodeMetadataUpdate& update,
+                                 ApfsRootDirectoryPayload* directory,
+                                 ApfsInodeMetadataDataPlan* dataPlan,
+                                 QStringList* blockers) {
     if (update.xattr_mutations.isEmpty()) {
         return true;
     }
@@ -19599,34 +19671,78 @@ bool applyEmbeddedDirectoryXattrMetadata(const PartitionApfsInodeMetadataUpdate&
             updated.cbegin(), updated.cend(), [&name](const ApfsRecoveredXattr& xattr) {
                 return xattr.name == name;
             });
-        if (existing != updated.cend() &&
-            (existing->flags & kApfsXattrFileSystemOwned) != 0) {
+        const auto stream = std::find_if(
+            directory->streamXattrs.cbegin(),
+            directory->streamXattrs.cend(),
+            [&name](const ApfsDataStreamXattr& xattr) { return xattr.name == name; });
+        if ((existing != updated.cend() &&
+             (existing->flags & kApfsXattrFileSystemOwned) != 0) ||
+            (stream != directory->streamXattrs.cend() &&
+             (stream->flags & kApfsXattrFileSystemOwned) != 0)) {
             blockers->append(QStringLiteral(
                 "APFS inode-metadata-commit: filesystem-owned xattr '%1' is not mutable")
                                  .arg(mutation.name));
             return false;
         }
-        if (mutation.value.size() > kApfsXattrMaxEmbeddedSize) {
-            blockers->append(QStringLiteral(
-                "APFS inode-metadata-commit: xattr '%1' exceeds the embedded-value limit")
-                                 .arg(mutation.name));
-            return false;
+
+        uint16_t preservedFlags = kApfsXattrDataEmbedded;
+        if (existing != updated.cend()) {
+            preservedFlags = existing->flags;
         }
-        const uint16_t preservedFlags =
-            existing == updated.cend() ? kApfsXattrDataEmbedded : existing->flags;
+        uint64_t streamObjId = 0;
+        if (stream != directory->streamXattrs.cend()) {
+            preservedFlags = stream->flags;
+            streamObjId = stream->objId;
+            dataPlan->releasedStreamExtents += stream->extents;
+        }
         updated.erase(std::remove_if(updated.begin(),
                                      updated.end(),
                                      [&name](const ApfsRecoveredXattr& xattr) {
                                          return xattr.name == name;
                                      }),
                       updated.end());
-        if (!mutation.remove) {
+        directory->streamXattrs.erase(
+            std::remove_if(directory->streamXattrs.begin(),
+                           directory->streamXattrs.end(),
+                           [&name](const ApfsDataStreamXattr& xattr) {
+                               return xattr.name == name;
+                           }),
+            directory->streamXattrs.end());
+        if (mutation.remove) {
+            continue;
+        }
+        if (mutation.value.size() <= kApfsXattrMaxEmbeddedSize) {
             updated.append(
                 {name,
                  static_cast<uint16_t>((preservedFlags & ~kApfsXattrDataStream) |
                                        kApfsXattrDataEmbedded),
                  mutation.value});
+            continue;
         }
+
+        if (streamObjId == 0) {
+            if (dataPlan->nextObjId == 0 ||
+                dataPlan->nextObjIdDelta >=
+                    std::numeric_limits<uint64_t>::max() - dataPlan->nextObjId) {
+                blockers->append(QStringLiteral(
+                    "APFS inode-metadata-commit: no object id is available for xattr '%1'")
+                                     .arg(mutation.name));
+                return false;
+            }
+            streamObjId = dataPlan->nextObjId + dataPlan->nextObjIdDelta;
+            ++dataPlan->nextObjIdDelta;
+        }
+        const uint64_t blocks = roundedBlockCount(
+            static_cast<uint64_t>(mutation.value.size()), kSupportedApfsBlockSizeBytes);
+        directory->streamXattrs.append(
+            {.name = name,
+             .objId = streamObjId,
+             .size = static_cast<uint64_t>(mutation.value.size()),
+             .allocedSize = blocks * kSupportedApfsBlockSizeBytes,
+             .extents = {{0, 0, blocks}},
+             .flags = static_cast<uint16_t>((preservedFlags & ~kApfsXattrDataEmbedded) |
+                                            kApfsXattrDataStream),
+             .pendingValue = mutation.value});
     }
     directory->xattrs = std::move(updated);
     return true;
@@ -19658,8 +19774,8 @@ bool applyInodeMetadata(const ApfsInodeMetadataRequest& request,
                                      &directory.bsdFlags,
                                      &directory.ownerId,
                                      &directory.groupId);
-            return applyEmbeddedDirectoryXattrMetadata(
-                request.metadata, &directory, blockers);
+            return applyDirectoryXattrMetadata(
+                request.metadata, &directory, dataPlan, blockers);
         }
     } else {
         for (auto& file : *files) {
@@ -19701,11 +19817,12 @@ bool applyInodeMetadata(const ApfsInodeMetadataRequest& request,
     return false;
 }
 
-uint64_t pendingXattrDataBlocks(const QVector<ApfsRootFilePayload>& files,
-                                uint32_t blockSize) {
+template <typename Owner>
+uint64_t pendingXattrDataBlocksForOwners(const QVector<Owner>& owners,
+                                         uint32_t blockSize) {
     uint64_t blocks = 0;
-    for (const ApfsRootFilePayload& file : files) {
-        for (const ApfsDataStreamXattr& xattr : file.streamXattrs) {
+    for (const Owner& owner : owners) {
+        for (const ApfsDataStreamXattr& xattr : owner.streamXattrs) {
             if (!xattr.pendingValue.isEmpty()) {
                 blocks += roundedBlockCount(
                     static_cast<uint64_t>(xattr.pendingValue.size()), blockSize);
@@ -19715,24 +19832,42 @@ uint64_t pendingXattrDataBlocks(const QVector<ApfsRootFilePayload>& files,
     return blocks;
 }
 
-qsizetype pendingXattrStreamCount(const QVector<ApfsRootFilePayload>& files) {
+uint64_t pendingXattrDataBlocks(
+    const QVector<ApfsRootFilePayload>& files,
+    const QVector<ApfsRootDirectoryPayload>& directories,
+    uint32_t blockSize) {
+    return pendingXattrDataBlocksForOwners(files, blockSize) +
+           pendingXattrDataBlocksForOwners(directories, blockSize);
+}
+
+template <typename Owner>
+qsizetype pendingXattrStreamCountForOwners(const QVector<Owner>& owners) {
     qsizetype count = 0;
-    for (const ApfsRootFilePayload& file : files) {
+    for (const Owner& owner : owners) {
         count += static_cast<qsizetype>(std::count_if(
-            file.streamXattrs.cbegin(),
-            file.streamXattrs.cend(),
+            owner.streamXattrs.cbegin(),
+            owner.streamXattrs.cend(),
             [](const ApfsDataStreamXattr& xattr) { return !xattr.pendingValue.isEmpty(); }));
     }
     return count;
 }
 
+qsizetype pendingXattrStreamCount(
+    const QVector<ApfsRootFilePayload>& files,
+    const QVector<ApfsRootDirectoryPayload>& directories) {
+    return pendingXattrStreamCountForOwners(files) +
+           pendingXattrStreamCountForOwners(directories);
+}
+
 bool materializePendingXattrStreams(const ApfsFsCommitContext& ctx,
                                     const QVector<uint64_t>& dataBlocks,
                                     QVector<ApfsRootFilePayload>* files,
+                                    QVector<ApfsRootDirectoryPayload>* directories,
                                     QStringList* blockers) {
     qsizetype cursor = 0;
-    for (ApfsRootFilePayload& file : *files) {
-        for (ApfsDataStreamXattr& xattr : file.streamXattrs) {
+    const auto materializeOwners = [&](auto* owners) {
+      for (auto& owner : *owners) {
+        for (ApfsDataStreamXattr& xattr : owner.streamXattrs) {
             if (xattr.pendingValue.isEmpty()) {
                 continue;
             }
@@ -19759,6 +19894,11 @@ bool materializePendingXattrStreams(const ApfsFsCommitContext& ctx,
             }
             cursor += static_cast<qsizetype>(blockCount);
         }
+      }
+      return true;
+    };
+    if (!materializeOwners(files) || !materializeOwners(directories)) {
+        return false;
     }
     if (cursor != dataBlocks.size()) {
         blockers->append(QStringLiteral(
@@ -19797,8 +19937,9 @@ bool commitInPlaceInodeMetadata(QIODevice* image,
     }
     const QVector<uint64_t> freedDataBlocks =
         planPatchOldExtents(ctx, dataPlan.releasedStreamExtents, &diverge);
-    const uint64_t newDataBlocks = pendingXattrDataBlocks(files, ctx.geometry.blockSize);
-    const qsizetype newStreamCount = pendingXattrStreamCount(files);
+    const uint64_t newDataBlocks =
+        pendingXattrDataBlocks(files, directories, ctx.geometry.blockSize);
+    const qsizetype newStreamCount = pendingXattrStreamCount(files, directories);
     const bool cowExtentRef = newDataBlocks != 0 || !dataPlan.releasedStreamExtents.isEmpty();
 
     QVector<ApfsFsTreeNode> probeNodes;
@@ -19813,7 +19954,8 @@ bool commitInPlaceInodeMetadata(QIODevice* image,
     }
     const qsizetype estimatedExtentRecords =
         (diverge.active ? diverge.liveExtentRefRecords.size()
-                        : collectExtentRefRecords(ctx.geometry.blockSize, files).size()) +
+                        : collectExtentRefRecords(
+                              ctx.geometry.blockSize, files, directories).size()) +
         newStreamCount;
     ApfsInsertLayout layout;
     if (!reserveInsertLayout(ctx,
@@ -19827,7 +19969,8 @@ bool commitInPlaceInodeMetadata(QIODevice* image,
                              blockers)) {
         return false;
     }
-    if (!materializePendingXattrStreams(ctx, layout.dataBlockList, &files, blockers)) {
+    if (!materializePendingXattrStreams(
+            ctx, layout.dataBlockList, &files, &directories, blockers)) {
         return false;
     }
     QVector<ApfsFsTreeNode> fsNodes;
@@ -19846,10 +19989,11 @@ bool commitInPlaceInodeMetadata(QIODevice* image,
             "allocation"));
         return false;
     }
-    extendDivergeExtentRecords(ctx, files, layout.dataBlockList, &diverge);
+    extendDivergeExtentRecords(ctx, files, directories, layout.dataBlockList, &diverge);
     const qsizetype actualExtentRecords =
         diverge.active ? diverge.liveExtentRefRecords.size()
-                       : collectExtentRefRecords(ctx.geometry.blockSize, files).size();
+                       : collectExtentRefRecords(
+                             ctx.geometry.blockSize, files, directories).size();
     const qsizetype actualExtentSlots =
         cowExtentRef
             ? extentRefTreeBlockCount(actualExtentRecords, ctx.geometry.blockSize)
@@ -19865,6 +20009,7 @@ bool commitInPlaceInodeMetadata(QIODevice* image,
                              .fsNodes = fsNodes,
                              .newBlocks = layout.newBlocks,
                              .files = files,
+                             .directories = directories,
                              .extentRefNew = layout.extentRefBlocks.value(0),
                              .extentRefBlocks = layout.extentRefBlocks,
                              .freedDataBlocks = freedDataBlocks,
@@ -19930,6 +20075,7 @@ bool commitInPlaceVolumeLabel(QIODevice* image,
                              .fsNodes = fsNodes,
                              .newBlocks = newBlocks,
                              .files = files,
+                             .directories = request.existingDirectories,
                              .extentRefNew = 0,
                              .freedDataBlocks = {},
                              .dataBlocksNew = 0,
@@ -20306,7 +20452,8 @@ bool collectFullFsTree(const QString& sourcePath,
                                  .arg(directory.directoryId));
             return false;
         }
-        if (!applyPreservedDirectoryState(*state, &directory, blockers)) {
+        if (!applyPreservedDirectoryState(
+                *state, {image.get(), ctx.geometry, ctx.chain}, &directory, blockers)) {
             return false;
         }
     }
@@ -23501,7 +23648,8 @@ static QVector<ApfsImageBlock> seedRewriteBlocks(const ApfsSeedRewrite& rewrite,
         {kApfsFormatRootTreeBlock,
          buildRootTreeBlock(rewrite.blockSize, rewrite.files, rewrite.directories, blockers)},
         {kApfsFormatExtentRefTreeBlock,
-         buildExtentRefTreeBlock(rewrite.blockSize, rewrite.files, blockers)},
+         buildExtentRefTreeBlock(
+             rewrite.blockSize, rewrite.files, rewrite.directories, blockers)},
         {kApfsFormatSpacemanBlock,
          buildSpacemanBlock({.blockSize = rewrite.blockSize,
                              .blockCount = rewrite.blockCount,
@@ -23613,7 +23761,7 @@ static QVector<ApfsImageBlock> perFileSeedRewriteBlocks(const ApfsPerFileSeedRew
                                blockers)},
         {kApfsFormatRootTreeBlock, rootTree},
         {kApfsFormatExtentRefTreeBlock,
-         buildExtentRefTreeBlock(rewrite.blockSize, {file}, blockers)},
+         buildExtentRefTreeBlock(rewrite.blockSize, {file}, {}, blockers)},
         {kApfsFormatSpacemanBlock,
          buildSpacemanBlock({.blockSize = rewrite.blockSize,
                              .blockCount = rewrite.blockCount,
@@ -27094,7 +27242,7 @@ QVector<QByteArray> PartitionApfsWriter::buildExtentRefTreeBlocksForTesting(
     for (qsizetype i = 0; i < nodeTotal; ++i) {
         run.append(tree_base_paddr + static_cast<uint64_t>(i));
     }
-    return buildExtentRefTreeNodes({block_size, xid, run}, files, sink);
+    return buildExtentRefTreeNodes({block_size, xid, run}, files, {}, sink);
 }
 
 QVector<QPair<quint64, quint64>> PartitionApfsWriter::readExtentRefTreeBlocksForTesting(
@@ -27323,6 +27471,29 @@ QVector<quint64> PartitionApfsWriter::readGeneratedIpFreeQueueGhosts(const QStri
         }
     }
     return ghosts;
+}
+
+QVector<quint64> PartitionApfsWriter::readLiveMainFreeQueueBlocksForTesting(
+    const QString& image_path) {
+    QVector<quint64> blocks;
+    QFile image(image_path);
+    if (!image.open(QIODevice::ReadOnly)) {
+        return blocks;
+    }
+    QStringList blockers;
+    ApfsFsCommitContext ctx;
+    if (!loadFsCommitContext(&image, &ctx, &blockers)) {
+        return blocks;
+    }
+    QVector<uint64_t> expanded;
+    if (!expandFreeQueueEntries(readLiveMainFreeQueue(ctx, &blockers), &expanded, &blockers)) {
+        return blocks;
+    }
+    blocks.reserve(expanded.size());
+    for (const uint64_t block : expanded) {
+        blocks.append(block);
+    }
+    return blocks;
 }
 
 }  // namespace sak

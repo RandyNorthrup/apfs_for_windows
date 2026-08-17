@@ -180,6 +180,7 @@ Verify installed service and APFS USB mount state:
 .\scripts\verify-local-worker-robocopy-stress.ps1
 .\scripts\verify-local-worker-large-existing-fileops.ps1
 .\scripts\verify-apple-vm-roundtrip.ps1 -MacHost <host> -MacUser <user> -PasswordFile <ignored-path>
+.\scripts\verify-apple-vm-directory-root-stream-xattrs.ps1 -MacHost <host> -MacUser <user> -PasswordFile <ignored-path>
 .\scripts\verify-service-control-ipc.ps1
 .\scripts\verify-sak-source-boundary.ps1
 .\scripts\verify-license-notices.ps1
@@ -213,9 +214,12 @@ second native macOS mount and `fsck_apfs` pair. File, named-directory, and
 volume-root xattrs are mutated in both directions; root basic-info and POSIX
 security metadata are also validated through raw APFS inode state and native
 macOS presentation. Empty xattr values and exact UTF-8 names are included on
-regular files, named directories, and the volume root. Latest sanitized evidence:
+regular files, named directories, and the volume root. A separate lane verifies
+9,001-byte Windows-created root/directory stream xattrs, 12,017-byte macOS
+replacement, Windows return readback, and three native `fsck_apfs` passes.
+Latest sanitized evidence:
 `docs/evidence/apple-vm-roundtrip-2026-08-17.json` and
-`docs/evidence/xattr-edge-cases-2026-08-17.json`.
+`docs/evidence/directory-root-stream-xattrs-2026-08-17.json`.
 
 Serial-pinned normal-user USB write/delete proof is current. The verifier keeps
 file actions in the non-admin parent process, uses service IPC only to switch
@@ -496,22 +500,25 @@ Verified USB evidence:
   CTest, script parse, local worker, service IPC, package, license, WinFsp,
   copied-core, installed-state, raw-alias, direct mounted-drive USB file-action,
   deterministic image crash recovery, and serial-pinned USB RW proof gates. With
-  `-RunAppleVmRoundTrip`, it also requires native macOS mutation, kernel mount,
-  and four clean `fsck_apfs` passes.
+  `-RunAppleVmRoundTrip`, it also requires the general native macOS mutation
+  round trip plus the root/directory stream-xattr lane, with seven clean
+  `fsck_apfs` passes across both artifacts.
   Treat that artifact as the authoritative result for the checked-out build.
   Current local proof includes a 100-iteration Robocopy soak and real APFS
-  basic-info/security, symbolic-link, and supported file/named-directory/
-  volume-root EA mutation on both disposable images and the serial-pinned
-  physical USB. Volume-root basic-info and POSIX security persistence also pass
+  basic-info/security, symbolic-link, and file/named-directory/volume-root EA
+  mutation on both disposable images and the serial-pinned physical USB.
+  Regular-file, named-directory, and volume-root stream-backed EAs pass 9,001-
+  byte create/read, 12,017-byte replacement, and deletion. Volume-root basic-info
+  and POSIX security persistence also pass
   copied-core, local remount, and native macOS round-trip lanes; physical USB
   basic-info is changed and restored within Windows 100 ns timestamp precision,
   while physical root security is intentionally left unchanged. Native hard-link
-  creation and regular-file stream-backed xattr mutation are implemented and
-  development-certified. Remaining public-RW gates are physical raw-media
-  power-loss recovery, real surprise-unplug, directory/root stream-backed xattr
-  policy, and sealed/FileVault/filesystem-owned mutation policy beyond the
-  current fail-closed behavior. APFS xattr names that differ only by case also
-  need an explicit collision policy because Windows EA lookup is case-insensitive.
+  creation and regular-file/directory/root stream-backed xattr mutation are
+  implemented and development-certified. APFS xattr names that differ only by
+  case use distinct deterministic aliases; ambiguous direct writes fail closed.
+  Remaining public-RW gates are physical raw-media power-loss recovery, real
+  surprise-unplug, and sealed/FileVault/filesystem-owned mutation policy beyond
+  current fail-closed behavior.
   Empty values and exact UTF-8 xattr names are certified through the reserved
   Windows EA transport.
   Existing Apple hard links remain preserved across Windows mutations. Copied
@@ -540,9 +547,12 @@ Verified copied-core mutation evidence:
   create, and file-backed raw directory create/delete while preserving a 16 MiB
   existing file through the vendored `third_party\sak_apfs_core` code. It also
   creates, reads, preserves across unrelated COW mutations, and deletes a
-  volume-root embedded xattr. Regular-file xattr coverage includes data-stream
-  create/read at 9,001 bytes, replacement at 12,017 bytes, deletion, recreation,
-  and conversion back to embedded storage.
+  volume-root embedded xattr. Regular-file, named-directory, and volume-root
+  xattr coverage includes data-stream create/read at 9,001 bytes, replacement at
+  12,017 bytes, deletion, persistence across unrelated mutation, and conversion
+  back to embedded storage. Directory deletion queues owned stream blocks for
+  crash-safe reclaim. Worker policy regression verifies deterministic aliases
+  for case-colliding names and rejects ambiguous direct writes.
 - `apfs_core_selftest` also composes interrupted checkpoint images from the real
   pre-commit and committed bytes. The current insert changes 18 blocks: readers
   select the old generation before checkpoint-map publication, the old generation

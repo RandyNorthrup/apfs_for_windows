@@ -773,14 +773,20 @@ public:
         for (const auto& xattr : xattrsByInode_.values(inodeId)) {
             result.xattrs.append(PartitionApfsFileXattrDebug{
                 .name = xattr.first,
+                .object_id = 0,
                 .size_bytes = static_cast<uint64_t>(xattr.second.size()),
                 .embedded = true});
         }
         for (const StreamXattrRecord& xattr : streamXattrsByInode_.values(inodeId)) {
             result.xattrs.append(PartitionApfsFileXattrDebug{
                 .name = xattr.name,
+                .object_id = xattr.object_id,
                 .size_bytes = xattr.size_bytes,
                 .embedded = false});
+            if (xattr.object_id != result.resource_fork_object_id) {
+                appendDebugExtents(
+                    QStringLiteral("xattr:%1").arg(xattr.name), xattr.object_id, &result);
+            }
         }
 
         appendDebugExtents(QStringLiteral("inode_private_id"), inode->private_id, &result);

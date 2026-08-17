@@ -236,12 +236,32 @@ if ($RunAppleVmRoundTrip) {
         }
         powershell @arguments
     }
+    $steps += Invoke-CertificationStep -Name "apple_vm_directory_root_stream_xattrs" -Script {
+        $arguments = @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", ".\scripts\verify-apple-vm-directory-root-stream-xattrs.ps1",
+            "-MacHost", $AppleVmHost,
+            "-MacUser", $AppleVmUser,
+            "-PasswordFile", $AppleVmPasswordFile,
+            "-BuildDir", $BuildDir
+        )
+        if ($AppleVmHostKey) {
+            $arguments += @("-HostKey", $AppleVmHostKey)
+        }
+        powershell @arguments
+    }
 } else {
     $steps += [pscustomobject][ordered]@{
         name = "apple_vm_roundtrip"
         ok = $false
         skipped = $true
         reason = "Run with -RunAppleVmRoundTrip and VM connection parameters for native macOS mutation/fsck proof."
+    }
+    $steps += [pscustomobject][ordered]@{
+        name = "apple_vm_directory_root_stream_xattrs"
+        ok = $false
+        skipped = $true
+        reason = "Run with -RunAppleVmRoundTrip and VM connection parameters for native root/directory stream-xattr proof."
     }
 }
 
@@ -473,6 +493,9 @@ $releasePackageOk = @($steps | Where-Object { $_.name -eq "release_package_verif
 $localWorkerCrashRecoveryOk = @($steps | Where-Object { $_.name -eq "local_worker_crash_recovery" -and $_.payload_ok -eq $true }).Count -gt 0
 $localWorkerMetadataLinksOk = @($steps | Where-Object { $_.name -eq "local_worker_metadata_links" -and $_.payload_ok -eq $true }).Count -gt 0
 $appleVmRoundTripOk = @($steps | Where-Object { $_.name -eq "apple_vm_roundtrip" -and $_.payload_ok -eq $true }).Count -gt 0
+$appleVmDirectoryRootStreamOk = @($steps | Where-Object {
+    $_.name -eq "apple_vm_directory_root_stream_xattrs" -and $_.payload_ok -eq $true
+}).Count -gt 0
 $serviceRecoveryPolicyOk = @($steps | Where-Object { $_.name -eq "service_recovery_policy" -and $_.payload_ok -eq $true }).Count -gt 0
 $startMenuEntriesOk = @($steps | Where-Object { $_.name -eq "start_menu_entries" -and $_.payload_ok -eq $true }).Count -gt 0
 $installedAppRegistrationOk = @($steps | Where-Object { $_.name -eq "installed_app_registration" -and $_.payload_ok -eq $true }).Count -gt 0
@@ -494,7 +517,9 @@ $usbRequirementOk = if ($RunUsbWriteProof) {
 }
 $mountedUsbRequirementOk = if ($RunUsbMountedFileActions) { $mountedUsbFileActionsOk } else { $true }
 
-$appleRequirementOk = if ($RunAppleVmRoundTrip) { $appleVmRoundTripOk } else { $true }
+$appleRequirementOk = if ($RunAppleVmRoundTrip) {
+    $appleVmRoundTripOk -and $appleVmDirectoryRootStreamOk
+} else { $true }
 
 $result = [ordered]@{
     component = "apfs_for_windows"
@@ -509,6 +534,7 @@ $result = [ordered]@{
     local_worker_metadata_links_ok = [bool]$localWorkerMetadataLinksOk
     apple_vm_roundtrip_requested = [bool]$RunAppleVmRoundTrip
     apple_vm_roundtrip_ok = [bool]$appleVmRoundTripOk
+    apple_vm_directory_root_stream_xattrs_ok = [bool]$appleVmDirectoryRootStreamOk
     service_recovery_policy_ok = [bool]$serviceRecoveryPolicyOk
     start_menu_entries_ok = [bool]$startMenuEntriesOk
     installed_app_registration_ok = [bool]$installedAppRegistrationOk

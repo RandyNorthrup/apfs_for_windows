@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "component": "apfs_for_windows",
+  "check": "directory_root_stream_xattrs_and_ea_case_collisions",
+  "status": "development_certified",
+  "source_base_commit": "6209e9132e860d4640e59ed9b706c677c829c439",
+  "worker_sha256": "E94F3E1E642F0C6908F2D730CD6BEA05C1BB476D1591D9D3CF0C07062D6BFCA8",
+  "results": {
+    "release_build_warnings_as_errors": true,
+    "ctest": "13/13",
+    "copied_core_boundary": true,
+    "local_winfs_two_mount": {
+      "ok": true,
+      "root_and_directory_stream_sizes": [9001, 12017],
+      "case_collision_aliases_distinct": true,
+      "ambiguous_direct_write_blocked": true,
+      "remount_persistence": true,
+      "delete_reclaim_queue_verified": true,
+      "artifact_sha256": "15926E24FA7725D957A5EA5E48AF1B5E663BDDD6D30C88F3E63E1BCC30026449"
+    },
+    "macos_vm": {
+      "ok": true,
+      "host": "redacted_validation_vm",
+      "windows_created_sizes": [9001, 9001],
+      "macos_replaced_sizes": [12017, 12017],
+      "windows_return_readback": true,
+      "fsck_apfs_passes": 3,
+      "return_image_sha256": "61E343E1657ABD0EB2BF988F05B3772895327BE43CBAC241FDD0757CEA6CECF2",
+      "artifact_sha256": "D7E170A4589B93300B60D630E5BEBDA85DA115D450B189741F1F3AC557C45051"
+    },
+    "physical_usb": {
+      "ok": true,
+      "device": "serial_redacted_31gb_usb_apfs",
+      "mount": "V:",
+      "target": "partition_identity_redacted",
+      "non_admin_operations": true,
+      "regular_file_root_directory_stream_sizes": [9001, 12017],
+      "stream_delete_cleanup": true,
+      "file_create_read_rename_overwrite_delete": true,
+      "service_policy_unchanged": true,
+      "host_rebooted": false,
+      "artifact_sha256": "CA34B0A7E9AA25D855E24ABFE2DEBF9B0022FF16D75CA319238002D84E4DE9ED"
+    }
+  },
+  "limitations": [
+    "This is development certification, not production-package certification.",
+    "Microsoft-compatible production driver signing remains open.",
+    "Application Authenticode signing remains open.",
+    "Physical surprise-unplug and interrupted-write or power-loss recovery remain open.",
+    "Sealed, FileVault, per-file-key, and filesystem-owned mutation policy remains fail-closed where unsupported."
+  ]
+}

@@ -238,7 +238,7 @@ $rootDebugPath = Join-Path $artifactDir "root-debug.json"
 Remove-Item -LiteralPath $image, $trace, $stdout1, $stderr1, $stdout2, $stderr2, `
     $debugPath, $directoryDebugPath, $rootDebugPath, $output -Force -ErrorAction SilentlyContinue
 
-& $selftest --make-image $image | Out-Null
+& $selftest --make-ea-collision-image $image | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Unable to create APFS image." }
 
 $creation = [datetime]::SpecifyKind([datetime]"2021-02-03T04:05:06", "Utc")
@@ -268,9 +268,16 @@ for ($index = 0; $index -lt $streamEaUpdatedValue.Length; $index++) {
 $directoryEaName = "user.apfswin_directory"
 $directoryEaFirstText = "Windows directory EA first payload"
 $directoryEaUpdatedText = "Windows directory EA updated payload"
+$directoryStreamEaName = "user.apfswin_directory_stream"
 $rootEaName = "user.apfswin_root"
 $rootEaFirstText = "Windows root EA first payload"
 $rootEaUpdatedText = "Windows root EA updated payload"
+$rootStreamEaName = "user.apfswin_root_stream"
+$collisionUpperName = "user.apfswin.CaseProof"
+$collisionLowerName = "user.apfswin.caseproof"
+$collisionUpperInitialText = "upper-case APFS xattr"
+$collisionLowerInitialText = "lower-case APFS xattr"
+$collisionUpperUpdatedText = "upper-case alias update"
 $emptyEaName = "user.apfswin_empty"
 $unicodeEaName = "user.apfswin_r$([char]0x00E9)sum$([char]0x00E9)_" +
     "$([char]0x65E5)$([char]0x672C)$([char]0x8A9E)"
@@ -296,12 +303,22 @@ $eaDeleteState = $null
 $streamEaFirstState = $null
 $streamEaSecondState = $null
 $streamEaDeleteState = $null
+$directoryStreamEaFirstState = $null
+$directoryStreamEaSecondState = $null
+$directoryStreamEaDeleteState = $null
 $directoryEaFirstState = $null
 $directoryEaSecondState = $null
 $directoryEaDeleteState = $null
 $rootEaFirstState = $null
 $rootEaSecondState = $null
 $rootEaDeleteState = $null
+$rootStreamEaFirstState = $null
+$rootStreamEaSecondState = $null
+$rootStreamEaDeleteState = $null
+$collisionEaFirstState = $null
+$collisionEaSecondState = $null
+$collisionEaDeleteState = $null
+$collisionDirectWriteBlocked = $false
 $edgeEaFirstState = $null
 $edgeEaSecondState = $null
 $edgeEaDeleteState = $null
@@ -324,6 +341,40 @@ try {
         name = $rootEaName
         value = [Text.Encoding]::UTF8.GetString([byte[]](
             Get-NativeExtendedAttribute -Path $mountRoot -Name $rootEaName))
+    }
+    Set-NativeExtendedAttribute -Path $mountRoot -Name $rootStreamEaName `
+        -Value $streamEaFirstValue
+    $rootStreamEaFirstRead = [byte[]](
+        Get-NativeExtendedAttribute -Path $mountRoot -Name $rootStreamEaName)
+    $rootStreamEaFirstState = [pscustomobject][ordered]@{
+        bytes = $rootStreamEaFirstRead.Length
+        sha256 = Get-BytesSha256 -Value $rootStreamEaFirstRead
+        expected_sha256 = Get-BytesSha256 -Value $streamEaFirstValue
+    }
+    $collisionUpperInitialRead = [byte[]](Get-NativeExtendedAttribute `
+        -Path $mountRoot -Name $collisionUpperName -ForceAlias)
+    $collisionLowerInitialRead = [byte[]](Get-NativeExtendedAttribute `
+        -Path $mountRoot -Name $collisionLowerName -ForceAlias)
+    try {
+        Set-NativeExtendedAttribute -Path $mountRoot -Name $collisionUpperName `
+            -Value ([Text.Encoding]::UTF8.GetBytes("ambiguous direct update"))
+    } catch {
+        $collisionDirectWriteBlocked = $_.Exception.Message -match "C0000035"
+    }
+    Set-NativeExtendedAttribute -Path $mountRoot -Name $collisionUpperName -ForceAlias `
+        -Value ([Text.Encoding]::UTF8.GetBytes($collisionUpperUpdatedText))
+    $collisionEaFirstState = [pscustomobject][ordered]@{
+        upper_wire_name = Get-NativeExtendedAttributeWireName `
+            -Name $collisionUpperName -ForceAlias
+        lower_wire_name = Get-NativeExtendedAttributeWireName `
+            -Name $collisionLowerName -ForceAlias
+        upper_initial_value = [Text.Encoding]::UTF8.GetString($collisionUpperInitialRead)
+        lower_initial_value = [Text.Encoding]::UTF8.GetString($collisionLowerInitialRead)
+        direct_write_blocked = $collisionDirectWriteBlocked
+        upper_updated_value = [Text.Encoding]::UTF8.GetString([byte[]](
+            Get-NativeExtendedAttribute -Path $mountRoot -Name $collisionUpperName -ForceAlias))
+        lower_after_update = [Text.Encoding]::UTF8.GetString([byte[]](
+            Get-NativeExtendedAttribute -Path $mountRoot -Name $collisionLowerName -ForceAlias))
     }
     Set-NativeDirectoryBasicInfo -Path $mountRoot `
         -CreationTimeUtc $rootCreation `
@@ -355,6 +406,15 @@ try {
     $directoryEaFirstState = [pscustomobject][ordered]@{
         name = $directoryEaName
         value = [Text.Encoding]::UTF8.GetString([byte[]]$directoryEaFirstRead)
+    }
+    Set-NativeExtendedAttribute -Path $dir -Name $directoryStreamEaName `
+        -Value $streamEaFirstValue
+    $directoryStreamEaFirstRead = [byte[]](
+        Get-NativeExtendedAttribute -Path $dir -Name $directoryStreamEaName)
+    $directoryStreamEaFirstState = [pscustomobject][ordered]@{
+        bytes = $directoryStreamEaFirstRead.Length
+        sha256 = Get-BytesSha256 -Value $directoryStreamEaFirstRead
+        expected_sha256 = Get-BytesSha256 -Value $streamEaFirstValue
     }
     Set-Content -LiteralPath $file -Value $expectedText -NoNewline -Encoding ASCII
     [IO.File]::SetCreationTimeUtc($file, $creation)
@@ -480,6 +540,39 @@ try {
     $rootEaDeleteState = [pscustomobject][ordered]@{
         absent = [bool](-not (Test-NativeExtendedAttribute -Path $mountRoot -Name $rootEaName))
     }
+    $rootStreamEaPersistentRead = [byte[]](
+        Get-NativeExtendedAttribute -Path $mountRoot -Name $rootStreamEaName)
+    Set-NativeExtendedAttribute -Path $mountRoot -Name $rootStreamEaName `
+        -Value $streamEaUpdatedValue
+    $rootStreamEaUpdatedRead = [byte[]](
+        Get-NativeExtendedAttribute -Path $mountRoot -Name $rootStreamEaName)
+    $rootStreamEaSecondState = [pscustomobject][ordered]@{
+        persisted_bytes = $rootStreamEaPersistentRead.Length
+        persisted_sha256 = Get-BytesSha256 -Value $rootStreamEaPersistentRead
+        expected_persisted_sha256 = Get-BytesSha256 -Value $streamEaFirstValue
+        updated_bytes = $rootStreamEaUpdatedRead.Length
+        updated_sha256 = Get-BytesSha256 -Value $rootStreamEaUpdatedRead
+        expected_updated_sha256 = Get-BytesSha256 -Value $streamEaUpdatedValue
+    }
+    Remove-NativeExtendedAttribute -Path $mountRoot -Name $rootStreamEaName
+    $rootStreamEaDeleteState = [pscustomobject][ordered]@{
+        absent = [bool](-not (
+            Test-NativeExtendedAttribute -Path $mountRoot -Name $rootStreamEaName))
+    }
+    $collisionEaSecondState = [pscustomobject][ordered]@{
+        upper_persisted_value = [Text.Encoding]::UTF8.GetString([byte[]](
+            Get-NativeExtendedAttribute -Path $mountRoot -Name $collisionUpperName -ForceAlias))
+        lower_persisted_value = [Text.Encoding]::UTF8.GetString([byte[]](
+            Get-NativeExtendedAttribute -Path $mountRoot -Name $collisionLowerName -ForceAlias))
+    }
+    Remove-NativeExtendedAttribute -Path $mountRoot -Name $collisionUpperName -ForceAlias
+    Remove-NativeExtendedAttribute -Path $mountRoot -Name $collisionLowerName -ForceAlias
+    $collisionEaDeleteState = [pscustomobject][ordered]@{
+        upper_absent = [bool](-not (Test-NativeExtendedAttribute `
+            -Path $mountRoot -Name $collisionUpperName -ForceAlias))
+        lower_absent = [bool](-not (Test-NativeExtendedAttribute `
+            -Path $mountRoot -Name $collisionLowerName -ForceAlias))
+    }
     $directoryEaPersistentRead =
         Get-NativeExtendedAttribute -Path $dir -Name $directoryEaName
     Set-NativeExtendedAttribute -Path $dir -Name $directoryEaName `
@@ -492,6 +585,25 @@ try {
     Remove-NativeExtendedAttribute -Path $dir -Name $directoryEaName
     $directoryEaDeleteState = [pscustomobject][ordered]@{
         absent = [bool](-not (Test-NativeExtendedAttribute -Path $dir -Name $directoryEaName))
+    }
+    $directoryStreamEaPersistentRead = [byte[]](
+        Get-NativeExtendedAttribute -Path $dir -Name $directoryStreamEaName)
+    Set-NativeExtendedAttribute -Path $dir -Name $directoryStreamEaName `
+        -Value $streamEaUpdatedValue
+    $directoryStreamEaUpdatedRead = [byte[]](
+        Get-NativeExtendedAttribute -Path $dir -Name $directoryStreamEaName)
+    $directoryStreamEaSecondState = [pscustomobject][ordered]@{
+        persisted_bytes = $directoryStreamEaPersistentRead.Length
+        persisted_sha256 = Get-BytesSha256 -Value $directoryStreamEaPersistentRead
+        expected_persisted_sha256 = Get-BytesSha256 -Value $streamEaFirstValue
+        updated_bytes = $directoryStreamEaUpdatedRead.Length
+        updated_sha256 = Get-BytesSha256 -Value $directoryStreamEaUpdatedRead
+        expected_updated_sha256 = Get-BytesSha256 -Value $streamEaUpdatedValue
+    }
+    Remove-NativeExtendedAttribute -Path $dir -Name $directoryStreamEaName
+    $directoryStreamEaDeleteState = [pscustomobject][ordered]@{
+        absent = [bool](-not (
+            Test-NativeExtendedAttribute -Path $dir -Name $directoryStreamEaName))
     }
     $eaPersistentRead = Get-NativeExtendedAttribute -Path $file -Name $eaName
     Set-NativeExtendedAttribute -Path $file -Name $eaName `
@@ -620,10 +732,14 @@ $directoryDebugJson = if (Test-Path -LiteralPath $directoryDebugPath) {
 $directoryDebugFile = if ($directoryDebugJson) {
     $directoryDebugJson.whole_device_debug_file
 } else { $null }
+$directoryStreamDebugEa = @(
+    $directoryDebugFile.xattrs | Where-Object { $_.name -eq $directoryStreamEaName })
 $rootDebugJson = if (Test-Path -LiteralPath $rootDebugPath) {
     Get-Content -LiteralPath $rootDebugPath -Raw | ConvertFrom-Json
 } else { $null }
 $rootDebugFile = if ($rootDebugJson) { $rootDebugJson.whole_device_debug_file } else { $null }
+$rootStreamDebugEa = @(
+    $rootDebugFile.xattrs | Where-Object { $_.name -eq $rootStreamEaName })
 $edgeApfsState = [pscustomobject][ordered]@{}
 $debugTargets = [ordered]@{
     root = $rootDebugFile
@@ -687,6 +803,15 @@ $ok = -not $errorText -and $firstState.hidden -and $firstState.archive -and
     ($streamEaSecondState.updated_bytes -eq $streamEaUpdatedValue.Length) -and
     ($streamEaSecondState.updated_sha256 -eq $streamEaSecondState.expected_updated_sha256) -and
     $streamEaDeleteState.absent -and
+    ($directoryStreamEaFirstState.bytes -eq $streamEaFirstValue.Length) -and
+    ($directoryStreamEaFirstState.sha256 -eq $directoryStreamEaFirstState.expected_sha256) -and
+    ($directoryStreamEaSecondState.persisted_bytes -eq $streamEaFirstValue.Length) -and
+    ($directoryStreamEaSecondState.persisted_sha256 -eq `
+        $directoryStreamEaSecondState.expected_persisted_sha256) -and
+    ($directoryStreamEaSecondState.updated_bytes -eq $streamEaUpdatedValue.Length) -and
+    ($directoryStreamEaSecondState.updated_sha256 -eq `
+        $directoryStreamEaSecondState.expected_updated_sha256) -and
+    $directoryStreamEaDeleteState.absent -and
     ($directoryEaFirstState.value -eq $directoryEaFirstText) -and
     ($directoryEaSecondState.persisted_value -eq $directoryEaFirstText) -and
     ($directoryEaSecondState.updated_value -eq $directoryEaUpdatedText) -and
@@ -695,6 +820,24 @@ $ok = -not $errorText -and $firstState.hidden -and $firstState.archive -and
     ($rootEaSecondState.persisted_value -eq $rootEaFirstText) -and
     ($rootEaSecondState.updated_value -eq $rootEaUpdatedText) -and
     $rootEaDeleteState.absent -and
+    ($rootStreamEaFirstState.bytes -eq $streamEaFirstValue.Length) -and
+    ($rootStreamEaFirstState.sha256 -eq $rootStreamEaFirstState.expected_sha256) -and
+    ($rootStreamEaSecondState.persisted_bytes -eq $streamEaFirstValue.Length) -and
+    ($rootStreamEaSecondState.persisted_sha256 -eq `
+        $rootStreamEaSecondState.expected_persisted_sha256) -and
+    ($rootStreamEaSecondState.updated_bytes -eq $streamEaUpdatedValue.Length) -and
+    ($rootStreamEaSecondState.updated_sha256 -eq `
+        $rootStreamEaSecondState.expected_updated_sha256) -and
+    $rootStreamEaDeleteState.absent -and
+    ($collisionEaFirstState.upper_initial_value -eq $collisionUpperInitialText) -and
+    ($collisionEaFirstState.lower_initial_value -eq $collisionLowerInitialText) -and
+    $collisionEaFirstState.direct_write_blocked -and
+    ($collisionEaFirstState.upper_updated_value -eq $collisionUpperUpdatedText) -and
+    ($collisionEaFirstState.lower_after_update -eq $collisionLowerInitialText) -and
+    ($collisionEaFirstState.upper_wire_name -ne $collisionEaFirstState.lower_wire_name) -and
+    ($collisionEaSecondState.upper_persisted_value -eq $collisionUpperUpdatedText) -and
+    ($collisionEaSecondState.lower_persisted_value -eq $collisionLowerInitialText) -and
+    $collisionEaDeleteState.upper_absent -and $collisionEaDeleteState.lower_absent -and
     (Test-EaEdgePresent $edgeEaFirstState.root $unicodeEaFirstText) -and
     (Test-EaEdgePresent $edgeEaFirstState.directory $unicodeEaFirstText) -and
     (Test-EaEdgePresent $edgeEaFirstState.file $unicodeEaFirstText) -and
@@ -716,6 +859,11 @@ $ok = -not $errorText -and $firstState.hidden -and $firstState.archive -and
     ($debugEa.Count -eq 1) -and
     ($streamDebugEa.Count -eq 1) -and -not $streamDebugEa[0].embedded -and
     ([uint64]$streamDebugEa[0].size_bytes -eq [uint64]$streamEaFirstValue.Length) -and
+    ($directoryStreamDebugEa.Count -eq 1) -and -not $directoryStreamDebugEa[0].embedded -and
+    ([uint64]$directoryStreamDebugEa[0].size_bytes -eq `
+        [uint64]$streamEaFirstValue.Length) -and
+    ($rootStreamDebugEa.Count -eq 1) -and -not $rootStreamDebugEa[0].embedded -and
+    ([uint64]$rootStreamDebugEa[0].size_bytes -eq [uint64]$streamEaFirstValue.Length) -and
     (Test-TimeNear ([datetime]$secondState.creation_utc) $creation) -and
     (Test-TimeNear ([datetime]$secondState.access_utc) $access) -and
     (Test-TimeNear ([datetime]$secondState.write_utc) $write) -and
@@ -766,6 +914,9 @@ $result = [pscustomobject][ordered]@{
     stream_extended_attribute_first_mount = $streamEaFirstState
     stream_extended_attribute_second_mount = $streamEaSecondState
     stream_extended_attribute_delete = $streamEaDeleteState
+    directory_stream_extended_attribute_first_mount = $directoryStreamEaFirstState
+    directory_stream_extended_attribute_second_mount = $directoryStreamEaSecondState
+    directory_stream_extended_attribute_delete = $directoryStreamEaDeleteState
     directory_extended_attribute_first_mount = $directoryEaFirstState
     directory_extended_attribute_second_mount = $directoryEaSecondState
     directory_extended_attribute_delete = $directoryEaDeleteState
@@ -776,6 +927,12 @@ $result = [pscustomobject][ordered]@{
     root_extended_attribute_first_mount = $rootEaFirstState
     root_extended_attribute_second_mount = $rootEaSecondState
     root_extended_attribute_delete = $rootEaDeleteState
+    root_stream_extended_attribute_first_mount = $rootStreamEaFirstState
+    root_stream_extended_attribute_second_mount = $rootStreamEaSecondState
+    root_stream_extended_attribute_delete = $rootStreamEaDeleteState
+    case_collision_first_mount = $collisionEaFirstState
+    case_collision_second_mount = $collisionEaSecondState
+    case_collision_delete = $collisionEaDeleteState
     edge_extended_attribute_name = $unicodeEaName
     edge_extended_attribute_first_mount = $edgeEaFirstState
     edge_extended_attribute_second_mount = $edgeEaSecondState

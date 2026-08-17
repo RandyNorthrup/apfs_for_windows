@@ -328,6 +328,20 @@ int main(int argc, char *argv[]) {
       makeHardlinkImageIndex >= 0 && makeHardlinkImageIndex + 1 < args.size()
           ? QFileInfo(args.at(makeHardlinkImageIndex + 1)).absoluteFilePath()
           : QString{};
+  const int makeEaCollisionImageIndex =
+      args.indexOf(QStringLiteral("--make-ea-collision-image"));
+  const QString makeEaCollisionImagePath =
+      makeEaCollisionImageIndex >= 0 &&
+              makeEaCollisionImageIndex + 1 < args.size()
+          ? QFileInfo(args.at(makeEaCollisionImageIndex + 1)).absoluteFilePath()
+          : QString{};
+  const int makeDirectoryStreamImageIndex =
+      args.indexOf(QStringLiteral("--make-directory-stream-image"));
+  const QString makeDirectoryStreamImagePath =
+      makeDirectoryStreamImageIndex >= 0 &&
+              makeDirectoryStreamImageIndex + 1 < args.size()
+          ? QFileInfo(args.at(makeDirectoryStreamImageIndex + 1)).absoluteFilePath()
+          : QString{};
 
   QTemporaryDir temp;
   if (!temp.isValid()) {
@@ -1211,6 +1225,48 @@ int main(int argc, char *argv[]) {
        {QStringLiteral("group"),
         QString::number(rootMetadata.inode_group_id)}});
 
+  const QString rootStreamName = QStringLiteral("user.apfswin_root_stream");
+  const QString rootStreamImage =
+      tempDir.filePath(QStringLiteral("root-stream-xattr.apfs"));
+  sak::PartitionApfsInodeMetadataUpdate rootStreamUpdate;
+  rootStreamUpdate.xattr_mutations.append(
+      {.name = rootStreamName, .value = largeXattrValue});
+  const auto rootStreamSet =
+      sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
+          {.source_image_path = rootMetadataImage,
+           .written_image_path = rootStreamImage,
+           .target_name = QStringLiteral("/"),
+           .target_is_directory = true,
+           .metadata = rootStreamUpdate,
+           .options = options});
+  const auto rootStreamRead =
+      sak::PartitionApfsFileSystemReader::readXattrsFromImage(
+          rootStreamImage, QStringLiteral("/"));
+  QFile rootStreamFile(rootStreamImage);
+  if (!rootStreamFile.open(QIODevice::ReadOnly)) {
+    return fail(QStringLiteral("verify volume-root data-stream xattr"),
+                QStringLiteral("unable to open root stream-xattr image"));
+  }
+  const auto rootStreamDebug = sak::PartitionApfsFileSystemReader::debugFile(
+      &rootStreamFile, QStringLiteral("/"));
+  const bool rootStreamDescriptor = std::any_of(
+      rootStreamDebug.xattrs.cbegin(), rootStreamDebug.xattrs.cend(),
+      [&](const auto &xattr) {
+        return xattr.name == rootStreamName && !xattr.embedded &&
+               xattr.size_bytes == static_cast<uint64_t>(largeXattrValue.size());
+      });
+  if (!rootStreamSet.ok || !rootStreamRead.ok ||
+      !hasExactXattr(rootStreamRead, rootStreamName, largeXattrValue) ||
+      !rootStreamDebug.ok || !rootStreamDescriptor ||
+      !hasRootXattr(rootStreamRead)) {
+    return fail(QStringLiteral("verify volume-root data-stream xattr"),
+                QStringLiteral("root data-stream xattr or embedded xattr mismatch"),
+                rootStreamSet.blockers + rootStreamRead.blockers +
+                    rootStreamDebug.blockers);
+  }
+  appendProof(&proofs, QStringLiteral("create volume-root data-stream xattr"),
+              {{QStringLiteral("bytes"), largeXattrValue.size()}});
+
   const QString directoryXattrImage =
       tempDir.filePath(QStringLiteral("directory-xattr.apfs"));
   sak::PartitionApfsInodeMetadataUpdate directoryXattrUpdate;
@@ -1219,7 +1275,7 @@ int main(int argc, char *argv[]) {
        .value = QByteArray("directory EA payload")});
   const auto directoryXattrSet =
       sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
-          {.source_image_path = rootMetadataImage,
+          {.source_image_path = rootStreamImage,
            .written_image_path = directoryXattrImage,
            .target_name = QStringLiteral("Proof Folder"),
            .target_is_directory = true,
@@ -1253,11 +1309,74 @@ int main(int argc, char *argv[]) {
   }
   appendProof(&proofs, QStringLiteral("commit directory embedded xattr"));
 
+  const QString directoryStreamName =
+      QStringLiteral("user.apfswin_directory_stream");
+  const QString directoryStreamImage =
+      tempDir.filePath(QStringLiteral("directory-stream-xattr.apfs"));
+  sak::PartitionApfsInodeMetadataUpdate directoryStreamUpdate;
+  directoryStreamUpdate.xattr_mutations.append(
+      {.name = directoryStreamName, .value = largeXattrValue});
+  const auto directoryStreamSet =
+      sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
+          {.source_image_path = directoryXattrImage,
+           .written_image_path = directoryStreamImage,
+           .target_name = QStringLiteral("Proof Folder"),
+           .target_is_directory = true,
+           .metadata = directoryStreamUpdate,
+           .options = options});
+  const auto directoryStreamRead =
+      sak::PartitionApfsFileSystemReader::readXattrsFromImage(
+          directoryStreamImage, QStringLiteral("/Proof Folder"));
+  QFile directoryStreamFile(directoryStreamImage);
+  if (!directoryStreamFile.open(QIODevice::ReadOnly)) {
+    return fail(QStringLiteral("verify directory data-stream xattr"),
+                QStringLiteral("unable to open directory stream-xattr image"));
+  }
+  const auto directoryStreamDebug =
+      sak::PartitionApfsFileSystemReader::debugFile(
+          &directoryStreamFile, QStringLiteral("/Proof Folder"));
+  const bool directoryStreamDescriptor = std::any_of(
+      directoryStreamDebug.xattrs.cbegin(), directoryStreamDebug.xattrs.cend(),
+      [&](const auto &xattr) {
+        return xattr.name == directoryStreamName && !xattr.embedded &&
+               xattr.size_bytes == static_cast<uint64_t>(largeXattrValue.size());
+      });
+  const auto rootStreamAfterDirectorySet =
+      sak::PartitionApfsFileSystemReader::readXattrsFromImage(
+          directoryStreamImage, QStringLiteral("/"));
+  if (!directoryStreamSet.ok || !directoryStreamRead.ok ||
+      !hasExactXattr(directoryStreamRead, directoryStreamName,
+                     largeXattrValue) ||
+      !directoryStreamDebug.ok || !directoryStreamDescriptor ||
+      !rootStreamAfterDirectorySet.ok ||
+      !hasExactXattr(rootStreamAfterDirectorySet, rootStreamName,
+                     largeXattrValue)) {
+    return fail(QStringLiteral("verify directory data-stream xattr"),
+                QStringLiteral("directory or root stream xattr mismatch"),
+                directoryStreamSet.blockers + directoryStreamRead.blockers +
+                    directoryStreamDebug.blockers +
+                    rootStreamAfterDirectorySet.blockers);
+  }
+  appendProof(&proofs, QStringLiteral("create directory data-stream xattr"),
+              {{QStringLiteral("bytes"), largeXattrValue.size()}});
+  if (!makeDirectoryStreamImagePath.isEmpty()) {
+    const QFileInfo imageInfo(makeDirectoryStreamImagePath);
+    QDir().mkpath(imageInfo.absolutePath());
+    QFile::remove(makeDirectoryStreamImagePath);
+    if (!QFile::copy(directoryStreamImage, makeDirectoryStreamImagePath)) {
+      return fail(QStringLiteral("make directory stream image"),
+                  QStringLiteral("unable to copy directory stream image"));
+    }
+    appendProof(&proofs, QStringLiteral("make directory stream image"),
+                {{QStringLiteral("path"), makeDirectoryStreamImagePath},
+                 {QStringLiteral("bytes_per_stream"), largeXattrValue.size()}});
+  }
+
   const QByteArray childData("APFS for Windows copied-core child write proof");
   const QString childImage = tempDir.filePath(QStringLiteral("child.apfs"));
   const auto childWrite =
       sak::PartitionApfsWriter::commitImageOnlyDirectoryChildWrite(
-          {.source_image_path = directoryXattrImage,
+          {.source_image_path = directoryStreamImage,
            .written_image_path = childImage,
            .directory_name = QStringLiteral("Proof Folder"),
            .file_name = QStringLiteral("child.txt"),
@@ -1296,6 +1415,135 @@ int main(int argc, char *argv[]) {
                 QStringLiteral("volume-root xattr was not preserved"),
                 rootXattrAfterChild.blockers);
   }
+  if (!hasExactXattr(directoryXattrAfterChild, directoryStreamName,
+                     largeXattrValue) ||
+      !hasExactXattr(rootXattrAfterChild, rootStreamName, largeXattrValue)) {
+    return fail(QStringLiteral("preserve directory streams across child write"),
+                QStringLiteral("directory or root data-stream xattr was not preserved"));
+  }
+
+  const QString directoryStreamReplacedImage =
+      tempDir.filePath(QStringLiteral("directory-stream-replaced.apfs"));
+  sak::PartitionApfsInodeMetadataUpdate directoryStreamReplace;
+  directoryStreamReplace.xattr_mutations.append(
+      {.name = directoryStreamName, .value = replacementXattrValue});
+  const auto directoryStreamReplaced =
+      sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
+          {.source_image_path = childImage,
+           .written_image_path = directoryStreamReplacedImage,
+           .target_name = QStringLiteral("Proof Folder"),
+           .target_is_directory = true,
+           .metadata = directoryStreamReplace,
+           .options = options});
+  const auto directoryStreamAfterReplace =
+      sak::PartitionApfsFileSystemReader::readXattrsFromImage(
+          directoryStreamReplacedImage, QStringLiteral("/Proof Folder"));
+  if (!directoryStreamReplaced.ok || !directoryStreamAfterReplace.ok ||
+      !hasExactXattr(directoryStreamAfterReplace, directoryStreamName,
+                     replacementXattrValue) ||
+      !hasDirectoryXattr(directoryStreamAfterReplace)) {
+    return fail(QStringLiteral("replace directory data-stream xattr"),
+                QStringLiteral("directory replacement or embedded xattr mismatch"),
+                directoryStreamReplaced.blockers +
+                    directoryStreamAfterReplace.blockers);
+  }
+
+  const QString directoryStreamRemovedImage =
+      tempDir.filePath(QStringLiteral("directory-stream-removed.apfs"));
+  sak::PartitionApfsInodeMetadataUpdate directoryStreamRemove;
+  directoryStreamRemove.xattr_mutations.append(
+      {.name = directoryStreamName, .remove = true});
+  const auto directoryStreamRemoved =
+      sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
+          {.source_image_path = directoryStreamReplacedImage,
+           .written_image_path = directoryStreamRemovedImage,
+           .target_name = QStringLiteral("Proof Folder"),
+           .target_is_directory = true,
+           .metadata = directoryStreamRemove,
+           .options = options});
+  const auto directoryStreamAfterRemove =
+      sak::PartitionApfsFileSystemReader::readXattrsFromImage(
+          directoryStreamRemovedImage, QStringLiteral("/Proof Folder"));
+  const bool directoryStreamStillPresent = std::any_of(
+      directoryStreamAfterRemove.xattrs.cbegin(),
+      directoryStreamAfterRemove.xattrs.cend(), [&](const auto &xattr) {
+        return xattr.first == directoryStreamName;
+      });
+  if (!directoryStreamRemoved.ok || !directoryStreamAfterRemove.ok ||
+      directoryStreamStillPresent ||
+      !hasDirectoryXattr(directoryStreamAfterRemove)) {
+    return fail(QStringLiteral("delete directory data-stream xattr"),
+                QStringLiteral("directory stream delete or embedded xattr mismatch"),
+                directoryStreamRemoved.blockers +
+                    directoryStreamAfterRemove.blockers);
+  }
+
+  const QString rootStreamReplacedImage =
+      tempDir.filePath(QStringLiteral("root-stream-replaced.apfs"));
+  sak::PartitionApfsInodeMetadataUpdate rootStreamReplace;
+  rootStreamReplace.xattr_mutations.append(
+      {.name = rootStreamName, .value = replacementXattrValue});
+  const auto rootStreamReplaced =
+      sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
+          {.source_image_path = directoryStreamRemovedImage,
+           .written_image_path = rootStreamReplacedImage,
+           .target_name = QStringLiteral("/"),
+           .target_is_directory = true,
+           .metadata = rootStreamReplace,
+           .options = options});
+  const auto rootStreamAfterReplace =
+      sak::PartitionApfsFileSystemReader::readXattrsFromImage(
+          rootStreamReplacedImage, QStringLiteral("/"));
+  if (!rootStreamReplaced.ok || !rootStreamAfterReplace.ok ||
+      !hasExactXattr(rootStreamAfterReplace, rootStreamName,
+                     replacementXattrValue) ||
+      !hasRootXattr(rootStreamAfterReplace)) {
+    return fail(QStringLiteral("replace volume-root data-stream xattr"),
+                QStringLiteral("root replacement or embedded xattr mismatch"),
+                rootStreamReplaced.blockers + rootStreamAfterReplace.blockers);
+  }
+
+  const QString rootStreamEmbeddedImage =
+      tempDir.filePath(QStringLiteral("root-stream-to-embedded.apfs"));
+  const QByteArray rootStreamEmbeddedValue("root stream became embedded");
+  sak::PartitionApfsInodeMetadataUpdate rootStreamToEmbedded;
+  rootStreamToEmbedded.xattr_mutations.append(
+      {.name = rootStreamName, .value = rootStreamEmbeddedValue});
+  const auto rootStreamEmbedded =
+      sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
+          {.source_image_path = rootStreamReplacedImage,
+           .written_image_path = rootStreamEmbeddedImage,
+           .target_name = QStringLiteral("/"),
+           .target_is_directory = true,
+           .metadata = rootStreamToEmbedded,
+           .options = options});
+  const auto rootStreamAfterEmbedded =
+      sak::PartitionApfsFileSystemReader::readXattrsFromImage(
+          rootStreamEmbeddedImage, QStringLiteral("/"));
+  QFile rootEmbeddedFile(rootStreamEmbeddedImage);
+  if (!rootEmbeddedFile.open(QIODevice::ReadOnly)) {
+    return fail(QStringLiteral("convert volume-root stream xattr"),
+                QStringLiteral("unable to open converted root xattr image"));
+  }
+  const auto rootEmbeddedDebug = sak::PartitionApfsFileSystemReader::debugFile(
+      &rootEmbeddedFile, QStringLiteral("/"));
+  const bool rootEmbeddedDescriptor = std::any_of(
+      rootEmbeddedDebug.xattrs.cbegin(), rootEmbeddedDebug.xattrs.cend(),
+      [&](const auto &xattr) {
+        return xattr.name == rootStreamName && xattr.embedded &&
+               xattr.size_bytes ==
+                   static_cast<uint64_t>(rootStreamEmbeddedValue.size());
+      });
+  if (!rootStreamEmbedded.ok || !rootStreamAfterEmbedded.ok ||
+      !hasExactXattr(rootStreamAfterEmbedded, rootStreamName,
+                     rootStreamEmbeddedValue) ||
+      !rootEmbeddedDebug.ok || !rootEmbeddedDescriptor) {
+    return fail(QStringLiteral("convert volume-root stream xattr"),
+                QStringLiteral("root stream-to-embedded conversion mismatch"),
+                rootStreamEmbedded.blockers + rootStreamAfterEmbedded.blockers +
+                    rootEmbeddedDebug.blockers);
+  }
+  appendProof(&proofs, QStringLiteral("directory and root stream xattr lifecycle"));
 
   const QString directoryXattrRemovedImage =
       tempDir.filePath(QStringLiteral("directory-xattr-removed.apfs"));
@@ -1304,7 +1552,7 @@ int main(int argc, char *argv[]) {
       {.name = QStringLiteral("user.apfswin_directory"), .remove = true});
   const auto directoryXattrDelete =
       sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
-          {.source_image_path = childImage,
+          {.source_image_path = rootStreamEmbeddedImage,
            .written_image_path = directoryXattrRemovedImage,
            .target_name = QStringLiteral("Proof Folder"),
            .target_is_directory = true,
@@ -1334,6 +1582,8 @@ int main(int argc, char *argv[]) {
   sak::PartitionApfsInodeMetadataUpdate rootXattrRemove;
   rootXattrRemove.xattr_mutations.append(
       {.name = QStringLiteral("user.apfswin_root"), .remove = true});
+  rootXattrRemove.xattr_mutations.append(
+      {.name = rootStreamName, .remove = true});
   const auto rootXattrDelete =
       sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
           {.source_image_path = directoryXattrRemovedImage,
@@ -1345,8 +1595,11 @@ int main(int argc, char *argv[]) {
   const auto rootXattrAfterDelete =
       sak::PartitionApfsFileSystemReader::readXattrsFromImage(
           rootXattrRemovedImage, QStringLiteral("/"));
+  const bool rootStreamAfterDelete = std::any_of(
+      rootXattrAfterDelete.xattrs.cbegin(), rootXattrAfterDelete.xattrs.cend(),
+      [&](const auto &xattr) { return xattr.first == rootStreamName; });
   if (!rootXattrDelete.ok || !rootXattrAfterDelete.ok ||
-      hasRootXattr(rootXattrAfterDelete)) {
+      hasRootXattr(rootXattrAfterDelete) || rootStreamAfterDelete) {
     return fail(QStringLiteral("delete volume-root embedded xattr"),
                 QStringLiteral("volume-root xattr delete failed"),
                 rootXattrDelete.blockers + rootXattrAfterDelete.blockers);
@@ -1449,11 +1702,123 @@ int main(int argc, char *argv[]) {
       &proofs, QStringLiteral("list directory-deleted root"),
       {{QStringLiteral("entries"), directoryDeletedListing.entries.size()}});
 
+  const QString streamDeleteDirectoryImage =
+      tempDir.filePath(QStringLiteral("stream-delete-directory.apfs"));
+  const auto streamDeleteDirectoryCreate =
+      sak::PartitionApfsWriter::commitImageOnlyDirectoryCreate(
+          {.source_image_path = directoryDeletedImage,
+           .written_image_path = streamDeleteDirectoryImage,
+           .directory_name = QStringLiteral("Stream Delete"),
+           .options = options});
+  const QString streamDeleteXattrImage =
+      tempDir.filePath(QStringLiteral("stream-delete-xattr.apfs"));
+  sak::PartitionApfsInodeMetadataUpdate streamDeleteXattrUpdate;
+  streamDeleteXattrUpdate.xattr_mutations.append(
+      {.name = QStringLiteral("user.apfswin_delete_stream"),
+       .value = largeXattrValue});
+  const auto streamDeleteXattrSet =
+      sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
+          {.source_image_path = streamDeleteDirectoryImage,
+           .written_image_path = streamDeleteXattrImage,
+           .target_name = QStringLiteral("Stream Delete"),
+           .target_is_directory = true,
+           .metadata = streamDeleteXattrUpdate,
+           .options = options});
+  sak::PartitionApfsFileDebugResult streamDeleteDebug;
+  QSet<uint64_t> streamDeletePhysicalBlocks;
+  {
+    QFile streamDeleteFile(streamDeleteXattrImage);
+    if (streamDeleteFile.open(QIODevice::ReadOnly)) {
+      streamDeleteDebug = sak::PartitionApfsFileSystemReader::debugFile(
+          &streamDeleteFile, QStringLiteral("/Stream Delete"));
+      uint64_t streamObjectId = 0;
+      for (const auto &xattr : streamDeleteDebug.xattrs) {
+        if (xattr.name == QStringLiteral("user.apfswin_delete_stream")) {
+          streamObjectId = xattr.object_id;
+          break;
+        }
+      }
+      for (const auto &extent : streamDeleteDebug.extents) {
+        if (extent.owner_id != streamObjectId ||
+            streamDeleteDebug.block_size == 0) {
+          continue;
+        }
+        const uint64_t blockCount =
+            (extent.length + streamDeleteDebug.block_size - 1) /
+            streamDeleteDebug.block_size;
+        for (uint64_t offset = 0; offset < blockCount; ++offset) {
+          streamDeletePhysicalBlocks.insert(extent.physical_block + offset);
+        }
+      }
+    }
+  }
+  const auto streamDeleteBefore =
+      sak::PartitionApfsWriter::probeLiveLayout(streamDeleteXattrImage);
+  const QString streamDeleteRemovedImage =
+      tempDir.filePath(QStringLiteral("stream-delete-removed.apfs"));
+  const auto streamDelete =
+      sak::PartitionApfsWriter::commitImageOnlyDirectoryDelete(
+          {.source_image_path = streamDeleteXattrImage,
+           .written_image_path = streamDeleteRemovedImage,
+           .directory_name = QStringLiteral("Stream Delete"),
+           .options = options});
+  const auto streamDeleteAfter =
+      sak::PartitionApfsWriter::probeLiveLayout(streamDeleteRemovedImage);
+  const auto streamDeleteListing =
+      sak::PartitionApfsFileSystemReader::listDirectoryFromImage(
+          streamDeleteRemovedImage, QStringLiteral("/"), 20);
+  const QVector<quint64> streamDeleteQueuedVector =
+      sak::PartitionApfsWriter::readLiveMainFreeQueueBlocksForTesting(
+          streamDeleteRemovedImage);
+  QSet<uint64_t> streamDeleteQueuedBlocks;
+  for (const quint64 block : streamDeleteQueuedVector) {
+    streamDeleteQueuedBlocks.insert(block);
+  }
+  const uint64_t streamDeleteBlocks =
+      streamDeleteBefore.block_size == 0
+          ? 0
+          : (static_cast<uint64_t>(largeXattrValue.size()) +
+             streamDeleteBefore.block_size - 1) /
+                streamDeleteBefore.block_size;
+  const bool streamDeleteBlocksQueued =
+      std::all_of(streamDeletePhysicalBlocks.cbegin(),
+                  streamDeletePhysicalBlocks.cend(),
+                  [&](uint64_t block) {
+                    return streamDeleteQueuedBlocks.contains(block);
+                  });
+  if (!streamDeleteDirectoryCreate.ok || !streamDeleteXattrSet.ok ||
+      !streamDeleteDebug.ok || !streamDeleteBefore.ok || !streamDelete.ok ||
+      !streamDeleteAfter.ok || !streamDeleteListing.ok ||
+      streamDeleteBlocks == 0 ||
+      streamDeletePhysicalBlocks.size() !=
+          static_cast<qsizetype>(streamDeleteBlocks) ||
+      !streamDeleteBlocksQueued ||
+      rootHas(streamDeleteListing, QStringLiteral("Stream Delete"), true) ||
+      streamDeleteQueuedBlocks.isEmpty()) {
+    return fail(QStringLiteral("delete directory data-stream xattr owner"),
+                QStringLiteral("directory stream blocks were not queued for reclaim: "
+                               "stream_blocks=%1 queued_matches=%2 queue_blocks=%3")
+                    .arg(streamDeletePhysicalBlocks.size())
+                    .arg(streamDeleteBlocksQueued)
+                    .arg(streamDeleteQueuedBlocks.size()),
+                streamDeleteDirectoryCreate.blockers +
+                    streamDeleteXattrSet.blockers +
+                    streamDeleteDebug.blockers +
+                    streamDeleteBefore.blockers + streamDelete.blockers +
+                    streamDeleteAfter.blockers +
+                    streamDeleteListing.blockers);
+  }
+  appendProof(
+      &proofs, QStringLiteral("delete directory data-stream xattr owner"),
+      {{QStringLiteral("stream_blocks"), QString::number(streamDeleteBlocks)},
+       {QStringLiteral("queued_blocks"),
+        QString::number(streamDeleteQueuedBlocks.size())}});
+
   const QString nestedRootImage =
       tempDir.filePath(QStringLiteral("nested-root.apfs"));
   const auto nestedRootCreate =
       sak::PartitionApfsWriter::commitImageOnlyDirectoryCreate(
-          {.source_image_path = directoryDeletedImage,
+          {.source_image_path = streamDeleteRemovedImage,
            .written_image_path = nestedRootImage,
            .directory_name = QStringLiteral("docs"),
            .options = options});
@@ -2303,6 +2668,50 @@ int main(int argc, char *argv[]) {
     }
     appendProof(&proofs, QStringLiteral("make image"),
                 {{QStringLiteral("path"), makeImagePath}});
+  }
+
+  if (!makeEaCollisionImagePath.isEmpty()) {
+    const QFileInfo imageInfo(makeEaCollisionImagePath);
+    QDir().mkpath(imageInfo.absolutePath());
+    QFile::remove(makeEaCollisionImagePath);
+    sak::PartitionApfsInodeMetadataUpdate collisionUpdate;
+    collisionUpdate.xattr_mutations.append(
+        {.name = QStringLiteral("user.apfswin.CaseProof"),
+         .value = QByteArray("upper-case APFS xattr")});
+    collisionUpdate.xattr_mutations.append(
+        {.name = QStringLiteral("user.apfswin.caseproof"),
+         .value = QByteArray("lower-case APFS xattr")});
+    const auto collisionImage =
+        sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
+            {.source_image_path = deletedImage,
+             .written_image_path = makeEaCollisionImagePath,
+             .target_name = QStringLiteral("/"),
+             .target_is_directory = true,
+             .metadata = collisionUpdate,
+             .options = options});
+    const auto collisionRead =
+        sak::PartitionApfsFileSystemReader::readXattrsFromImage(
+            makeEaCollisionImagePath, QStringLiteral("/"));
+    const auto hasCollisionValue = [&](const QString &name,
+                                       const QByteArray &value) {
+      return std::any_of(
+          collisionRead.xattrs.cbegin(), collisionRead.xattrs.cend(),
+          [&](const auto &xattr) {
+            return xattr.first == name && xattr.second == value;
+          });
+    };
+    if (!collisionImage.ok || !collisionRead.ok ||
+        !hasCollisionValue(QStringLiteral("user.apfswin.CaseProof"),
+                           QByteArray("upper-case APFS xattr")) ||
+        !hasCollisionValue(QStringLiteral("user.apfswin.caseproof"),
+                           QByteArray("lower-case APFS xattr"))) {
+      return fail(QStringLiteral("make EA collision image"),
+                  QStringLiteral("exact case-colliding APFS xattrs mismatch"),
+                  collisionImage.blockers + collisionRead.blockers);
+    }
+    appendProof(&proofs, QStringLiteral("make EA collision image"),
+                {{QStringLiteral("path"), makeEaCollisionImagePath},
+                 {QStringLiteral("exact_names"), 2}});
   }
 
   if (!makeLargeImagePath.isEmpty()) {

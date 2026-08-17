@@ -189,9 +189,31 @@ namespace ApfsForWindows {
             SetRaw(path, AliasName(name), escapedValue);
         }
 
+        public static void SetAliased(string path, string name, byte[] value) {
+            ApfsNameBytes(name);
+            if (value == null) value = new byte[0];
+            byte[] escapedValue = new byte[value.Length + 1];
+            escapedValue[0] = ALIAS_VALUE_VERSION;
+            Array.Copy(value, 0, escapedValue, 1, value.Length);
+            SetRaw(path, AliasName(name), escapedValue);
+        }
+
         public static byte[] Get(string path, string name) {
             ApfsNameBytes(name);
             if (IsDirectName(name)) return ExistsRaw(path, name) ? GetRaw(path, name) : null;
+            string alias = AliasName(name);
+            if (!ExistsRaw(path, alias)) return null;
+            byte[] escapedValue = GetRaw(path, alias);
+            if (escapedValue == null) return null;
+            if (escapedValue.Length == 0 || escapedValue[0] != ALIAS_VALUE_VERSION)
+                throw new InvalidDataException("APFS xattr alias value is invalid.");
+            byte[] value = new byte[escapedValue.Length - 1];
+            Array.Copy(escapedValue, 1, value, 0, value.Length);
+            return value;
+        }
+
+        public static byte[] GetAliased(string path, string name) {
+            ApfsNameBytes(name);
             string alias = AliasName(name);
             if (!ExistsRaw(path, alias)) return null;
             byte[] escapedValue = GetRaw(path, alias);
@@ -208,9 +230,19 @@ namespace ApfsForWindows {
             return ExistsRaw(path, IsDirectName(name) ? name : AliasName(name));
         }
 
+        public static bool ExistsAliased(string path, string name) {
+            ApfsNameBytes(name);
+            return ExistsRaw(path, AliasName(name));
+        }
+
         public static void Remove(string path, string name) {
             ApfsNameBytes(name);
             SetRaw(path, IsDirectName(name) ? name : AliasName(name), new byte[0]);
+        }
+
+        public static void RemoveAliased(string path, string name) {
+            ApfsNameBytes(name);
+            SetRaw(path, AliasName(name), new byte[0]);
         }
     }
 }
@@ -221,19 +253,30 @@ function Set-NativeExtendedAttribute {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][string]$Name,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]]$Value
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]]$Value,
+        [switch]$ForceAlias
     )
     Initialize-NativeEaType
-    [ApfsForWindows.NativeEa]::Set($Path, $Name, $Value)
+    if ($ForceAlias) {
+        [ApfsForWindows.NativeEa]::SetAliased($Path, $Name, $Value)
+    } else {
+        [ApfsForWindows.NativeEa]::Set($Path, $Name, $Value)
+    }
 }
 
 function Get-NativeExtendedAttribute {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$Name
+        [Parameter(Mandatory = $true)][string]$Name,
+        [switch]$ForceAlias
     )
     Initialize-NativeEaType
-    $value = [ApfsForWindows.NativeEa]::Get($Path, $Name)
+    $value = $null
+    if ($ForceAlias) {
+        $value = [ApfsForWindows.NativeEa]::GetAliased($Path, $Name)
+    } else {
+        $value = [ApfsForWindows.NativeEa]::Get($Path, $Name)
+    }
     if ($null -eq $value) { return $null }
     return ,([byte[]]$value)
 }
@@ -241,18 +284,27 @@ function Get-NativeExtendedAttribute {
 function Remove-NativeExtendedAttribute {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$Name
+        [Parameter(Mandatory = $true)][string]$Name,
+        [switch]$ForceAlias
     )
     Initialize-NativeEaType
-    [ApfsForWindows.NativeEa]::Remove($Path, $Name)
+    if ($ForceAlias) {
+        [ApfsForWindows.NativeEa]::RemoveAliased($Path, $Name)
+    } else {
+        [ApfsForWindows.NativeEa]::Remove($Path, $Name)
+    }
 }
 
 function Test-NativeExtendedAttribute {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$Name
+        [Parameter(Mandatory = $true)][string]$Name,
+        [switch]$ForceAlias
     )
     Initialize-NativeEaType
+    if ($ForceAlias) {
+        return [ApfsForWindows.NativeEa]::ExistsAliased($Path, $Name)
+    }
     return [ApfsForWindows.NativeEa]::Exists($Path, $Name)
 }
 

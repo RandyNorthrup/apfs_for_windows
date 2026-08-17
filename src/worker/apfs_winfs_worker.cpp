@@ -15,6 +15,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QIODevice>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -22,6 +23,7 @@
 #include <QMutexLocker>
 #include <QProcess>
 #include <QRegularExpression>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <QTextStream>
@@ -173,6 +175,76 @@ bool decodeWindowsEaAlias(const QByteArray &wireName, QString *name) {
 
 QByteArray encodeWindowsEaAlias(const QString &name) {
   return windowsEaAliasPrefixBytes() + encodeBase32(name.toUtf8());
+}
+
+QString windowsEaCaseKey(const QString &name) { return name.toCaseFolded(); }
+
+QSet<QString> windowsEaCollisionKeys(const QVector<QString> &names) {
+  QHash<QString, QString> firstNameByKey;
+  QSet<QString> collisions;
+  for (const QString &name : names) {
+    const QString key = windowsEaCaseKey(name);
+    const auto first = firstNameByKey.constFind(key);
+    if (first == firstNameByKey.cend()) {
+      firstNameByKey.insert(key, name);
+    } else if (*first != name) {
+      collisions.insert(key);
+    }
+  }
+  return collisions;
+}
+
+struct WindowsEaPolicyMutation {
+  QString name;
+  bool remove{false};
+  bool aliased{false};
+};
+
+bool validateWindowsEaMutations(QVector<QString> names,
+                                const QVector<WindowsEaPolicyMutation> &mutations) {
+  for (const WindowsEaPolicyMutation &mutation : mutations) {
+    const bool exactExists = names.contains(mutation.name);
+    const QString key = windowsEaCaseKey(mutation.name);
+    const bool differentCaseExists = std::any_of(
+        names.cbegin(), names.cend(), [&](const QString &name) {
+          return name != mutation.name && windowsEaCaseKey(name) == key;
+        });
+    if (differentCaseExists && (!exactExists || !mutation.aliased)) {
+      return false;
+    }
+    if (mutation.remove) {
+      names.removeAll(mutation.name);
+    } else if (!exactExists) {
+      names.append(mutation.name);
+    }
+  }
+  return true;
+}
+
+bool windowsEaPolicySelfTest() {
+  const QVector<QString> collisionNames{QStringLiteral("user.Proof"),
+                                        QStringLiteral("user.proof"),
+                                        QStringLiteral("user.unique")};
+  const QSet<QString> collisionKeys = windowsEaCollisionKeys(collisionNames);
+  const QString collisionKey = windowsEaCaseKey(QStringLiteral("user.Proof"));
+  return collisionKeys.contains(collisionKey) &&
+         !collisionKeys.contains(windowsEaCaseKey(QStringLiteral("user.unique"))) &&
+         !validateWindowsEaMutations(
+             {QStringLiteral("user.Proof")},
+             {{QStringLiteral("user.proof"), false, false}}) &&
+         !validateWindowsEaMutations(
+             {QStringLiteral("user.Proof"), QStringLiteral("user.proof")},
+             {{QStringLiteral("user.Proof"), false, false}}) &&
+         validateWindowsEaMutations(
+             {QStringLiteral("user.Proof"), QStringLiteral("user.proof")},
+             {{QStringLiteral("user.Proof"), false, true}}) &&
+         validateWindowsEaMutations(
+             {QStringLiteral("user.Proof")},
+             {{QStringLiteral("user.Proof"), false, false}}) &&
+         !validateWindowsEaMutations(
+             {},
+             {{QStringLiteral("user.Proof"), false, false},
+              {QStringLiteral("user.proof"), false, false}});
 }
 
 QString normalizeApfsPath(const QString &input) {
@@ -444,6 +516,7 @@ struct FileContext {
 
 struct EaMutationCollectContext {
   QVector<sak::PartitionApfsXattrMutation> mutations;
+  QVector<WindowsEaPolicyMutation> policyMutations;
 };
 
 NTSTATUS collectEaMutation(FSP_FILE_SYSTEM *, PVOID contextValue,
@@ -458,8 +531,10 @@ NTSTATUS collectEaMutation(FSP_FILE_SYSTEM *, PVOID contextValue,
   QByteArray decodedBytes;
   QByteArray decodedValue;
   bool remove = ea->EaValueLength == 0;
+  bool aliased = false;
   const QByteArray aliasPrefix = windowsEaAliasPrefixBytes();
   if (wireName.left(aliasPrefix.size()).toUpper() == aliasPrefix) {
+    aliased = true;
     if (!decodeWindowsEaAlias(wireName, &decodedName)) {
       return STATUS_EA_LIST_INCONSISTENT;
     }
@@ -486,6 +561,8 @@ NTSTATUS collectEaMutation(FSP_FILE_SYSTEM *, PVOID contextValue,
   auto *context = static_cast<EaMutationCollectContext *>(contextValue);
   context->mutations.append(
       {.name = decodedName, .value = decodedValue, .remove = remove});
+  context->policyMutations.append(
+      {.name = decodedName, .remove = remove, .aliased = aliased});
   return STATUS_SUCCESS;
 }
 
@@ -2400,6 +2477,7 @@ private:
       QByteArray value;
     };
     QVector<WindowsEaRecord> attributes;
+    QVector<QPair<QString, QByteArray>> apfsAttributes;
     {
       QMutexLocker locker(&ioMutex_);
       const auto read = readerSession_->readXattrs(context->entry.path);
@@ -2416,9 +2494,20 @@ private:
             isContentCriticalXattr(apfsName)) {
           continue;
         }
+        apfsAttributes.append(attribute);
+      }
+    }
+    QVector<QString> apfsNames;
+    apfsNames.reserve(apfsAttributes.size());
+    for (const auto &attribute : std::as_const(apfsAttributes)) {
+      apfsNames.append(attribute.first);
+    }
+    const QSet<QString> collisionKeys = windowsEaCollisionKeys(apfsNames);
+    for (const auto &attribute : std::as_const(apfsAttributes)) {
         QByteArray wireName;
         QByteArray wireValue = attribute.second;
-        if (!isDirectWindowsEaName(attribute.first, &wireName)) {
+        if (!isDirectWindowsEaName(attribute.first, &wireName) ||
+            collisionKeys.contains(windowsEaCaseKey(attribute.first))) {
           wireName = encodeWindowsEaAlias(attribute.first);
           wireValue.prepend(kWindowsEaAliasValueVersion);
         }
@@ -2427,7 +2516,6 @@ private:
           attributes.append({wireName, wireValue});
         }
       }
-    }
     std::sort(attributes.begin(), attributes.end(),
               [](const auto &left, const auto &right) {
                 return left.name.toUpper() < right.name.toUpper();
@@ -2471,6 +2559,25 @@ private:
       return parseStatus;
     }
     if (!collected.mutations.isEmpty()) {
+      QMutexLocker eaMutationLocker(&eaMutationMutex_);
+      QVector<QString> existingNames;
+      {
+        QMutexLocker ioLocker(&ioMutex_);
+        const auto read = readerSession_->readXattrs(context->entry.path);
+        if (!read.ok || !read.blockers.isEmpty()) {
+          trace(QStringLiteral("read EAs before mutation failed: %1")
+                    .arg(read.blockers.join(QStringLiteral("; "))));
+          return STATUS_ACCESS_DENIED;
+        }
+        existingNames.reserve(read.xattrs.size());
+        for (const auto &xattr : read.xattrs) {
+          existingNames.append(xattr.first);
+        }
+      }
+      if (!validateWindowsEaMutations(existingNames,
+                                      collected.policyMutations)) {
+        return STATUS_OBJECT_NAME_COLLISION;
+      }
       sak::PartitionApfsInodeMetadataUpdate update;
       update.update_changed_time = true;
       update.changed_time_ns = unixNsFromFileTime(currentFileTime());
@@ -2798,6 +2905,7 @@ private:
   std::unique_ptr<QIODevice> device_;
   std::unique_ptr<sak::PartitionApfsFileSystemReaderSession> readerSession_;
   mutable QMutex ioMutex_;
+  mutable QMutex eaMutationMutex_;
   mutable QMutex contextMutex_;
   std::vector<std::unique_ptr<FileContext>> activeContexts_;
   std::vector<std::unique_ptr<FileContext>> retiredContexts_;
@@ -3299,9 +3407,12 @@ NTSTATUS runMount(const QString &target, const QString &mountPoint,
 
 #endif
 
-void printStatus() {
+void printStatus(bool eaPolicyReady) {
   QJsonObject status{
       {QStringLiteral("component"), QStringLiteral("apfs_winfs_worker")},
+      {QStringLiteral("ea_case_collision_policy"),
+       eaPolicyReady ? QStringLiteral("aliased_fail_closed")
+                     : QStringLiteral("self_test_failed")},
 #if APFS_HAVE_WINFSP
       {QStringLiteral("status"), QStringLiteral("ready")},
       {QStringLiteral("winfsp_sdk"), QStringLiteral("found")},
@@ -3376,8 +3487,9 @@ int main(int argc, char *argv[]) {
 
   if (parser.isSet(statusOption) ||
       (!parser.isSet(targetOption) && !parser.isSet(mountOption))) {
-    printStatus();
-    return 0;
+    const bool eaPolicyReady = windowsEaPolicySelfTest();
+    printStatus(eaPolicyReady);
+    return eaPolicyReady ? 0 : 5;
   }
 
 #if !APFS_HAVE_WINFSP

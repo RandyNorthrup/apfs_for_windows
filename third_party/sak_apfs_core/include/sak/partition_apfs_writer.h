@@ -1007,6 +1007,10 @@ public:
     ///        reclamation. Diagnostic for the keystone S3 COW: the old spilled-chunk
     ///        bitmap slot a repeated spill retired must appear here.
     [[nodiscard]] static QVector<quint64> readGeneratedIpFreeQueueGhosts(const QString& image_path);
+
+    /// @brief Expanded live main free-queue block addresses for delete/reclaim tests.
+    [[nodiscard]] static QVector<quint64> readLiveMainFreeQueueBlocksForTesting(
+        const QString& image_path);
     [[nodiscard]] static QStringList enterpriseCertificationRequirements();
     [[nodiscard]] static PartitionApfsWritePreflight preflightExistingContainer(
         const PartitionFileSystemDetection& detection,

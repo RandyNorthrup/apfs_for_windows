@@ -267,6 +267,8 @@ QJsonObject debugFileJson(QIODevice* device, const QString& path) {
     QJsonArray xattrs;
     for (const auto& xattr : debug.xattrs) {
         xattrs.append(QJsonObject{{QStringLiteral("name"), xattr.name},
+                                  {QStringLiteral("object_id"),
+                                   QString::number(xattr.object_id)},
                                   {QStringLiteral("size_bytes"),
                                    QString::number(xattr.size_bytes)},
                                   {QStringLiteral("embedded"), xattr.embedded}});

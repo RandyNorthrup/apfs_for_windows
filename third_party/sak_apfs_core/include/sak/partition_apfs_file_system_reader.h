@@ -96,6 +96,7 @@ struct PartitionApfsFileExtentDebug {
 
 struct PartitionApfsFileXattrDebug {
     QString name;
+    uint64_t object_id{0};
     uint64_t size_bytes{0};
     bool embedded{true};
 };
