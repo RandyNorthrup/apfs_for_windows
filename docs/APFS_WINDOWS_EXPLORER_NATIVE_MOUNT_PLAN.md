@@ -1354,4 +1354,4 @@ Exit gate: release checklist passes with artifacts under this repo.
   interrupted image to macOS. Native `fsck_apfs -n` passed before and after a
   kernel read-only mount; APFS, media read-only, volume read-only, invariant
   hash, empty old-generation size/hash, detach, and remote cleanup all passed.
-  Evidence: `docs/evidence/apple-vm-raw-interruption-2026-08-17.json`.
+  Evidence: `docs/evidence/apple-vm-raw-interruption-final-2026-08-17.json`.

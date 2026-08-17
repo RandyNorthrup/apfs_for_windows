@@ -120,7 +120,7 @@ and the sanitized result are retained in
 `docs/evidence/windows-vm-raw-interruption-final-2026-08-17.json`.
 The selected interrupted image also passed two native macOS `fsck_apfs -n`
 runs and a kernel read-only mount with exact invariant and complete old-generation
-hashes. See `docs/evidence/apple-vm-raw-interruption-2026-08-17.json`.
+hashes. See `docs/evidence/apple-vm-raw-interruption-final-2026-08-17.json`.
 
 ## Strict check
 
