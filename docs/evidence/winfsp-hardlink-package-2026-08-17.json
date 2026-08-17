@@ -42,13 +42,24 @@
     "fsck_apfs_passes": 3,
     "final_payload_sha256": "15DA8E34298403E6D03C3E0FF47C65877E60D008C8BEABA10317D6C9D7B4B108"
   },
+  "local_winfsp_stream_xattr": {
+    "ok": true,
+    "first_bytes": 9001,
+    "first_sha256": "835E374AE7C3C8942FDAF4CB0ABDE0D5DA0CD3C8E57BE98654A590A0B37A055D",
+    "persisted_after_remount": true,
+    "updated_bytes": 12017,
+    "updated_sha256": "D3767F4F92BD8767349E80B7D72E59B94AD41081A8C4C18D4A4776123218DC6A",
+    "absent_after_delete": true,
+    "proof_sha256": "E5B49FE112C74A0C849459444E60DD308FD0976AF81AB9E045ED99838E9B7FBE"
+  },
   "test_package": {
     "name": "APFS-for-Windows-0.1.0-test-signed.zip",
-    "sha256": "170E6EA93F6F54293BA449E71058A7C4424B7D1C8076DBD768E88D660F67EABC",
+    "sha256": "8A179018DFB17415A176697B8C91FE6BC809A966EF906CF7335DDEAF4573BFB7",
     "file_count": 31,
     "driver_signing_mode": "test",
     "production_ready": false,
-    "payload_verification_ok": true
+    "payload_verification_ok": true,
+    "worker_sha256": "379A9B18F169D20ED781B8E0D20FDF870E929EF700B0C0A20844E22872DEB5F4"
   },
   "windows_vm_package_lifecycle": {
     "ok": true,
@@ -64,14 +75,16 @@
     "uninstall_ok": true,
     "driver_unregistered_without_additional_reboot": true,
     "product_residue": false,
-    "host_rebooted": false
+    "host_rebooted": false,
+    "proof_sha256": "7A5ED9E76B225EAC632BD1A0983DB25239A8F8A8D40AA29943C55B13A3A38901"
   },
   "physical_usb_mounted_file_actions": {
     "ok": true,
-    "scope": "current_build_installed_mount",
+    "scope": "source-equivalent-current-build-installed-mount",
     "current_build_worker_certified": true,
     "worker_sha256": "9F01F88C8D7FD7FA6169A03D778FBC4F2340724E5167DE88F7A2657FB20125B2",
     "exact_test_package_worker_certified": false,
+    "final_test_package_worker_sha256": "379A9B18F169D20ED781B8E0D20FDF870E929EF700B0C0A20844E22872DEB5F4",
     "operations": [
       "create",
       "read",
@@ -96,6 +109,7 @@
     "Authenticode application signing",
     "retained clean CI and kernel-test provenance",
     "production-signed exact-package lifecycle",
+    "production-signed exact-package physical USB proof",
     "surprise-unplug and interrupted-write physical recovery",
     "directory/root stream-xattr, case-collision, and protected-filesystem policy",
     "release governance"

@@ -1212,7 +1212,7 @@ Exit gate: release checklist passes with artifacts under this repo.
   the default hard gate. Test signing requires explicit
   `-DriverSigningMode Test -AllowTestSignedDriver`.
 - Test package `APFS-for-Windows-0.1.0-test-signed.zip`, SHA-256
-  `170E6EA93F6F54293BA449E71058A7C4424B7D1C8076DBD768E88D660F67EABC`,
+  `8A179018DFB17415A176697B8C91FE6BC809A966EF906CF7335DDEAF4573BFB7`,
   contains 31 files. Clean Windows VM install, Automatic service, dedicated
   driver path, exact loaded DLL, saved mount, VM reboot persistence, one stacked
   `AP` over `FS` tray icon with `Open`/`Exit`, and complete uninstall passed.
@@ -1231,8 +1231,9 @@ Exit gate: release checklist passes with artifacts under this repo.
   `docs/evidence/winfsp-hardlink-package-2026-08-17.json`.
 - Remaining production blockers: Microsoft-compatible driver signing,
   Authenticode application signing, retained clean-CI/kernel-test provenance,
-  production-signed exact-package lifecycle, disposable-media surprise-unplug
-  and interrupted-write recovery, directory/root stream-xattr policy,
+  production-signed exact-package lifecycle and physical USB proof,
+  disposable-media surprise-unplug and interrupted-write recovery,
+  directory/root stream-xattr policy,
   case-colliding EA policy, sealed/FileVault policy, and release governance.
 
 ## 2026-08-17 Current-Build Stream Xattr and Host Update
@@ -1248,6 +1249,8 @@ Exit gate: release checklist passes with artifacts under this repo.
 - `apfs_core_selftest` passes create/read at 9,001 bytes, replacement at 12,017
   bytes, delete, recreate, stream-to-embedded conversion, descriptor storage,
   and file-payload preservation. Release CTest passes 13/13.
+- The local WinFsp metadata lane independently passes 9,001-byte create/read,
+  remount persistence, 12,017-byte replacement, exact hashes, and deletion.
 - Current app binaries were deployed without changing the WinFsp driver, Test
   Mode, or boot state. The installed/build worker SHA-256 matched
   `9F01F88C8D7FD7FA6169A03D778FBC4F2340724E5167DE88F7A2657FB20125B2`.
@@ -1265,6 +1268,6 @@ Exit gate: release checklist passes with artifacts under this repo.
 - Sanitized proof: `docs/evidence/stream-xattr-usb-2026-08-17.json`.
 - Remaining production blockers are production driver signing, application
   Authenticode signing, retained clean CI/kernel-test provenance,
-  production-signed exact-package lifecycle, physical surprise-unplug and
-  interrupted-write recovery, directory/root stream-xattr policy,
+  production-signed exact-package lifecycle and physical USB proof, physical
+  surprise-unplug and interrupted-write recovery, directory/root stream-xattr policy,
   case-colliding EA policy, sealed/FileVault policy, and release governance.

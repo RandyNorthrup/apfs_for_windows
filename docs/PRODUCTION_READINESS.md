@@ -25,7 +25,7 @@ Current classification: **development-certified, not production-ready**.
 
 Current hard-link/runtime/package evidence is summarized in
 `docs/evidence/winfsp-hardlink-package-2026-08-17.json`. The test package SHA-256
-is `170E6EA93F6F54293BA449E71058A7C4424B7D1C8076DBD768E88D660F67EABC`.
+is `8A179018DFB17415A176697B8C91FE6BC809A966EF906CF7335DDEAF4573BFB7`.
 It is explicitly test-signed and is not a production artifact.
 
 ## Open production blockers
@@ -35,6 +35,7 @@ It is explicitly test-signed and is not a production artifact.
 | Driver trust | Microsoft-compatible production signing; no Test Mode or integrity bypass |
 | Application trust | Authenticode-sign project executables and release installer/package flow |
 | Production package lifecycle | Repeat clean install, startup, mount, Explorer mutation, reboot, tray Exit, and uninstall with the production-signed package SHA-256 |
+| Production physical USB package | Repeat Explorer read/write/delete and stream-xattr proof with exact production-signed package binaries |
 | Reproducible build | Move the proven clean VS2022/WDK build into retained CI with kernel tests and provenance |
 | Fault recovery | Real surprise-unplug and interrupted-write/power-loss recovery on disposable physical APFS media |
 | Remaining APFS policy | Directory/root stream-backed xattrs, case-colliding names, and sealed/FileVault/filesystem-owned policy beyond fail-closed behavior |
