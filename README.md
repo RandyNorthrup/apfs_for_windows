@@ -321,9 +321,8 @@ Exact source commit `09c4653308ebe91ba1677588165981f9f7379e30` passed the
 earlier same-runtime two-worktree proof with two 13/13 CTest runs and
 byte-identical binaries, metadata, and test-signed package ZIP SHA-256
 `D8E7A7792351A391A21C53710E383FC0C566071D527F2870327EB680B38A9ADE`.
-That evidence predates the PowerShell 5.1/7 parity gate. Sanitized evidence is retained in
-`docs\evidence\reproducible-build-2026-08-17.json`.
-Current retained proof is `docs\evidence\reproducible-build-2026-08-17.json`.
+That evidence predates the PowerShell 5.1/7 parity gate. Sanitized evidence is
+retained in `docs\evidence\reproducible-build-2026-08-17.json`.
 
 The explicit test path uses `-DriverSigningMode Test -AllowTestSignedDriver` on
 both scripts and emits `APFS-for-Windows-0.1.0-test-signed.zip`. The current test
