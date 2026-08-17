@@ -38,6 +38,8 @@ $checkoutExists = Test-Path -LiteralPath (Join-Path $resolvedCheckout ".git")
 $checkoutHead = $null
 $checkoutStatus = @()
 $checkoutRemote = $null
+$checkoutBranch = $null
+$checkoutBranches = @()
 $checkoutError = $null
 if ($checkoutExists) {
     try {
@@ -48,14 +50,23 @@ if ($checkoutExists) {
         if ($LASTEXITCODE -ne 0) { throw "Unable to read checkout status." }
         $checkoutRemote = [string](& git -C $resolvedCheckout remote get-url origin 2>$null)
         if ($LASTEXITCODE -ne 0) { throw "Unable to read runtime checkout origin remote." }
+        $checkoutBranch = [string](& git -C $resolvedCheckout branch --show-current 2>$null)
+        if ($LASTEXITCODE -ne 0) { throw "Unable to read runtime checkout branch." }
+        $checkoutBranches = @(& git -C $resolvedCheckout for-each-ref `
+            "--format=%(refname:short)" refs/heads 2>$null | ForEach-Object { [string]$_ })
+        if ($LASTEXITCODE -ne 0) { throw "Unable to enumerate runtime checkout branches." }
     } catch {
         $checkoutError = $_.Exception.Message
     }
 }
 
+$checkoutDetached = [string]::IsNullOrWhiteSpace($checkoutBranch)
+$checkoutMainOnly = ($checkoutBranch -eq "main" -or $checkoutDetached) -and
+    @($checkoutBranches | Where-Object { $_ -ne "main" }).Count -eq 0
 $checkoutOk = $checkoutExists -and -not $checkoutError -and $manifestOk -and
     $checkoutHead -eq [string]$manifest.commit -and $checkoutStatus.Count -eq 0 -and
-    $checkoutRemote.TrimEnd('/') -eq ([string]$manifest.repository).TrimEnd('/')
+    $checkoutRemote.TrimEnd('/') -eq ([string]$manifest.repository).TrimEnd('/') -and
+    $checkoutMainOnly
 $ok = $manifestOk -and ($checkoutOk -or -not $RequireCheckout)
 
 $result = [ordered]@{
@@ -77,6 +88,9 @@ $result = [ordered]@{
     checkout_clean = [bool]($checkoutExists -and $checkoutStatus.Count -eq 0)
     checkout_status = @($checkoutStatus)
     checkout_remote = $checkoutRemote
+    checkout_branch = $checkoutBranch
+    checkout_local_branches = @($checkoutBranches)
+    checkout_main_only = [bool]$checkoutMainOnly
     checkout_error = $checkoutError
     completed_utc = (Get-Date).ToUniversalTime().ToString("o")
 }

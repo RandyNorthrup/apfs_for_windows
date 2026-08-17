@@ -333,6 +333,9 @@ work is reported but does not invalidate unchanged imported APFS paths.
 
 Repository and production gates:
 
+Repository hygiene enforces `main` as the only owned local branch. Detached
+GitHub Actions checkouts are accepted, but additional owned branches fail.
+
 ```powershell
 .\scripts\verify-repository-hygiene.ps1
 .\scripts\verify-winfsp-runtime-boundary.ps1

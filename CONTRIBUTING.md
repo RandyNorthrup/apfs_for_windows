@@ -3,10 +3,11 @@
 ## Source boundaries
 
 - Make all project changes inside this repository.
-- Keep one owned-repository branch: `main`. Use forks for external pull requests.
+- Keep one owned-repository branch: `main`. External pull requests must not add
+  branches to owned repositories.
 - Never edit `C:\Users\Randy\Coding\S.A.K.-Utility` from this project.
 - Import APFS core changes through
-  `scripts/update-sak-import-manifest.ps1`, then review the local fork diff.
+  `scripts/update-sak-import-manifest.ps1`, then review the local-copy diff.
 - Do not commit `build*`, `artifacts`, `temp`, credentials, keys, certificates,
   binaries, VM state, or physical-media captures.
 

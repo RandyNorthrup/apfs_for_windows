@@ -124,6 +124,21 @@ foreach ($file in @($projectFiles | Where-Object {
 $diffCheck = Invoke-Git -Arguments @("diff", "--check")
 $cachedDiffCheck = Invoke-Git -Arguments @("diff", "--cached", "--check")
 $status = Invoke-Git -Arguments @("status", "--short")
+$currentBranchResult = Invoke-Git -Arguments @("branch", "--show-current")
+$localBranchesResult = Invoke-Git -Arguments @(
+    "for-each-ref", "--format=%(refname:short)", "refs/heads")
+$currentBranch = if ($currentBranchResult.exit_code -eq 0) {
+    [string]($currentBranchResult.output | Select-Object -First 1)
+} else { $null }
+$localBranches = if ($localBranchesResult.exit_code -eq 0) {
+    @($localBranchesResult.output | Where-Object { $_ })
+} else { @() }
+$detachedCiCheckout = $env:GITHUB_ACTIONS -eq "true" -and
+    [string]::IsNullOrWhiteSpace($currentBranch)
+$mainOnlyBranches = $currentBranchResult.exit_code -eq 0 -and
+    $localBranchesResult.exit_code -eq 0 -and
+    ($currentBranch -eq "main" -or $detachedCiCheckout) -and
+    @($localBranches | Where-Object { $_ -ne "main" }).Count -eq 0
 
 $hashCandidates = @($projectFiles | Where-Object {
     $_ -match '(?i)(CMakeLists\.txt|\.(c|cmake|cpp|h|json|ps1|sh|yaml|yml))$'
@@ -177,6 +192,7 @@ $checks = [ordered]@{
     working_diff_check = $diffCheck.exit_code -eq 0
     staged_diff_check = $cachedDiffCheck.exit_code -eq 0
     duplicate_code_files_absent = $duplicateFiles.Count -eq 0
+    main_only_branches = [bool]$mainOnlyBranches
     version_format = [bool]$versionFormatOk
     version_defaults_match = $versionMismatches.Count -eq 0
     worktree_clean = $status.output.Count -eq 0
@@ -205,6 +221,9 @@ $result = [ordered]@{
     working_diff_errors = @($diffCheck.output)
     staged_diff_errors = @($cachedDiffCheck.output)
     duplicate_code_files = @($duplicateFiles)
+    current_branch = $currentBranch
+    local_branches = @($localBranches)
+    detached_ci_checkout = [bool]$detachedCiCheckout
     version_mismatches = @($versionMismatches)
     worktree_status = @($status.output)
     completed_utc = (Get-Date).ToUniversalTime().ToString("o")
