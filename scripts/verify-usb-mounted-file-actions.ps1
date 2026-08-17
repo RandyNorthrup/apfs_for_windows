@@ -84,6 +84,61 @@ function Get-DirectoryBasicInfoState {
     }
 }
 
+function Get-EaEdgeState {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$EmptyName,
+        [Parameter(Mandatory = $true)][string]$UnicodeName
+    )
+    $emptyValue = Get-NativeExtendedAttribute -Path $Path -Name $EmptyName
+    $unicodeValue = Get-NativeExtendedAttribute -Path $Path -Name $UnicodeName
+    [ordered]@{
+        empty_exists = [bool](Test-NativeExtendedAttribute -Path $Path -Name $EmptyName)
+        empty_bytes = if ($null -eq $emptyValue) { -1 } else { ([byte[]]$emptyValue).Length }
+        unicode_exists = [bool](Test-NativeExtendedAttribute -Path $Path -Name $UnicodeName)
+        unicode_value = if ($null -eq $unicodeValue) {
+            $null
+        } else {
+            [Text.Encoding]::UTF8.GetString([byte[]]$unicodeValue)
+        }
+    }
+}
+
+function Invoke-EaEdgeProof {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$EmptyName,
+        [Parameter(Mandatory = $true)][string]$UnicodeName
+    )
+    Set-NativeExtendedAttribute -Path $Path -Name $EmptyName -Value ([byte[]]::new(0))
+    Set-NativeExtendedAttribute -Path $Path -Name $UnicodeName `
+        -Value ([Text.Encoding]::UTF8.GetBytes("USB Unicode EA first payload"))
+    $first = Get-EaEdgeState -Path $Path -EmptyName $EmptyName -UnicodeName $UnicodeName
+    Set-NativeExtendedAttribute -Path $Path -Name $UnicodeName `
+        -Value ([Text.Encoding]::UTF8.GetBytes("USB Unicode EA updated payload"))
+    $updated = Get-EaEdgeState -Path $Path -EmptyName $EmptyName -UnicodeName $UnicodeName
+    Remove-NativeExtendedAttribute -Path $Path -Name $EmptyName
+    Remove-NativeExtendedAttribute -Path $Path -Name $UnicodeName
+    [ordered]@{
+        first = $first
+        updated = $updated
+        deleted = Get-EaEdgeState -Path $Path -EmptyName $EmptyName -UnicodeName $UnicodeName
+    }
+}
+
+function Test-EaEdgeProof {
+    param([object]$State)
+    $null -ne $State -and
+        $State.first.empty_exists -and $State.first.empty_bytes -eq 0 -and
+        $State.first.unicode_exists -and
+        $State.first.unicode_value -eq "USB Unicode EA first payload" -and
+        $State.updated.empty_exists -and $State.updated.empty_bytes -eq 0 -and
+        $State.updated.unicode_exists -and
+        $State.updated.unicode_value -eq "USB Unicode EA updated payload" -and
+        -not $State.deleted.empty_exists -and $State.deleted.empty_bytes -eq -1 -and
+        -not $State.deleted.unicode_exists -and $null -eq $State.deleted.unicode_value
+}
+
 function New-NativeFileSymbolicLink {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -263,6 +318,12 @@ $eaState = $null
 $directoryEaState = $null
 $rootEaState = $null
 $rootEaName = "user.apfswin_usb_root"
+$edgeEmptyEaName = "user.apfswin_usb_empty"
+$edgeUnicodeEaName = "user.apfswin_usb_r$([char]0x00E9)sum$([char]0x00E9)_" +
+    "$([char]0x65E5)$([char]0x672C)$([char]0x8A9E)"
+$rootEdgeEaState = $null
+$directoryEdgeEaState = $null
+$fileEdgeEaState = $null
 $rootBasicOriginal = $null
 $rootBasicProof = $null
 $rootBasicRestored = $null
@@ -360,6 +421,8 @@ try {
             absent_after_delete = [bool](-not (Test-NativeExtendedAttribute `
                 -Path $mountRoot -Name $rootEaName))
         }
+        $rootEdgeEaState = Invoke-EaEdgeProof -Path $mountRoot `
+            -EmptyName $edgeEmptyEaName -UnicodeName $edgeUnicodeEaName
         Invoke-FsMutationWithRetry -Name "create proof directory" -Timeout $TimeoutSeconds -Operation {
             [IO.Directory]::CreateDirectory($testDir) | Out-Null
         }
@@ -380,6 +443,8 @@ try {
             absent_after_delete = [bool](-not (Test-NativeExtendedAttribute `
                 -Path $testDir -Name $directoryEaName))
         }
+        $directoryEdgeEaState = Invoke-EaEdgeProof -Path $testDir `
+            -EmptyName $edgeEmptyEaName -UnicodeName $edgeUnicodeEaName
         Invoke-FsMutationWithRetry -Name "write proof file" -Timeout $TimeoutSeconds -Operation {
             [IO.File]::WriteAllBytes($filePath, $payload)
         }
@@ -432,6 +497,8 @@ try {
             absent_after_delete = [bool](-not (Test-NativeExtendedAttribute `
                 -Path $metadataPath -Name $eaName))
         }
+        $fileEdgeEaState = Invoke-EaEdgeProof -Path $metadataPath `
+            -EmptyName $edgeEmptyEaName -UnicodeName $edgeUnicodeEaName
         $metadataItem = Get-Item -LiteralPath $metadataPath -Force
         $metadataState = [ordered]@{
             creation_utc = $metadataItem.CreationTimeUtc.ToString("O")
@@ -501,6 +568,16 @@ try {
         }
     } catch {
         $cleanupErrors += "${rootEaName}: $($_.Exception.Message)"
+    }
+    foreach ($edgeName in @($edgeEmptyEaName, $edgeUnicodeEaName)) {
+        try {
+            if ($rootReady -and
+                (Test-NativeExtendedAttribute -Path $mountRoot -Name $edgeName)) {
+                Remove-NativeExtendedAttribute -Path $mountRoot -Name $edgeName
+            }
+        } catch {
+            $cleanupErrors += "${edgeName}: $($_.Exception.Message)"
+        }
     }
     if ($rootBasicRestorePending -and $rootBasicOriginal) {
         try {
@@ -581,6 +658,9 @@ $ok = ($preflightOk -or ($rootReady -and
     ($rootEaState.first_value -eq "USB Windows root EA payload") -and
     ($rootEaState.updated_value -eq "USB updated root EA payload") -and
     $rootEaState.absent_after_delete -and
+    (Test-EaEdgeProof $rootEdgeEaState) -and
+    (Test-EaEdgeProof $directoryEdgeEaState) -and
+    (Test-EaEdgeProof $fileEdgeEaState) -and
     $rootBasicProof.hidden -and $rootBasicProof.archive -and
     (Test-TimeNear ([datetime]$rootBasicProof.creation_utc) $rootProofCreation) -and
     (Test-TimeNear ([datetime]$rootBasicProof.access_utc) $rootProofAccess) -and
@@ -644,6 +724,10 @@ $result = [ordered]@{
     extended_attribute = $eaState
     directory_extended_attribute = $directoryEaState
     root_extended_attribute = $rootEaState
+    edge_extended_attribute_name = $edgeUnicodeEaName
+    root_edge_extended_attribute = $rootEdgeEaState
+    directory_edge_extended_attribute = $directoryEdgeEaState
+    file_edge_extended_attribute = $fileEdgeEaState
     root_basic_info = [ordered]@{
         original = $rootBasicOriginal
         proof = $rootBasicProof

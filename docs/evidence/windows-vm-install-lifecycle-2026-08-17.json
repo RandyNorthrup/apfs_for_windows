@@ -2,8 +2,8 @@
   "component": "apfs_for_windows",
   "check": "windows_vm_install_reboot_uninstall_lifecycle",
   "ok": true,
-  "started_utc": "2026-08-17T00:32:16.062043Z",
-  "completed_utc": "2026-08-17T00:34:38.4202463Z",
+  "started_utc": "2026-08-17T01:33:41.0905126Z",
+  "completed_utc": "2026-08-17T01:36:11.7001386Z",
   "no_host_reboot_performed": true,
   "windows_vm_rebooted": true,
   "credential_material_recorded": false,
@@ -11,13 +11,16 @@
   "package": {
     "version": "0.1.0",
     "file_count": 17,
-    "sha256": "C703700C79FD477207D9D99911D253F38B617924D2E5348990A04D4432C6C521",
+    "artifact": "artifacts/package/APFS-for-Windows-0.1.0-D2F1D99D.zip",
+    "sha256": "D2F1D99DE9DCA8308673FAEE5CA716DBB6E1F19F0E94A5637BF971A72D25E49B",
+    "sha256_after": "D2F1D99DE9DCA8308673FAEE5CA716DBB6E1F19F0E94A5637BF971A72D25E49B",
+    "source_unchanged": true,
     "package_verification_ok": true,
     "install_payload_validation_ok": true,
     "repair_payload_validation_ok": true
   },
   "fixture": {
-    "sha256": "D1715EB62E66B1D61C7136676DA714ADA709BF3CA4302B00388FBBB763FCE0A3",
+    "sha256": "08D384E555B7DE551CB4F7F8A9F7B352A199D7284EE1902E035A2E9CF25CBCA1",
     "mount": "R:",
     "expected_file": "WinProof/Nested/windows.txt",
     "expected_file_sha256": "B58EE1D8BF6C0FF48A5D0AB28DCC938E941CE9AC9091E9C103D85C3784C1E4FC"

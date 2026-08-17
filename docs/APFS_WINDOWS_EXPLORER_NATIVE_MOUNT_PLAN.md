@@ -263,8 +263,11 @@ Exit gate: release checklist passes with artifacts under this repo.
   POSIX security metadata, symbolic-link, and supported
   regular-file/named-directory/volume-root EA exit gates pass on disposable
   image, physical USB where non-destructive, and native macOS round-trip media.
-  Hard-link creation, zero-length EA values, non-ASCII-name EAs, and large
-  stream-backed xattr mutation remain outside the current Windows callback surface.
+  Exact UTF-8 xattr names and zero-byte values pass through the reserved Windows
+  EA alias transport without changing APFS on-disk names or values. Hard-link
+  creation, case-colliding APFS xattr names, and large stream-backed xattr
+  mutation remain outside the current Windows callback surface; content-critical
+  filesystem xattrs remain protected.
 - M4 exit gate passes in a clean Windows 11 VM. Package install, Automatic service,
   saved mount restoration across a reboot, Start Menu, Apps & Features, one
   interactive tray process, installed hashes, and complete uninstall cleanup pass.
@@ -394,7 +397,9 @@ Exit gate: release checklist passes with artifacts under this repo.
 - `scripts\start-repair-elevated.ps1` is the normal-user guarded repair launcher.
   It writes `artifacts\repair\start-repair-elevated-proof.json`, refuses to spawn
   another UAC prompt while `consent.exe` is already pending, and waits for the
-  elevated repair proof artifact when launched.
+  elevated repair proof artifact when launched. Its encoded command preserves
+  leading `\\?\` raw-target paths through `Start-Process`; deterministic
+  `-SelfTest` coverage is part of release-package verification.
 - `scripts\verify-service-recovery-policy.ps1` is the non-admin installed-service
   persistence verifier. It checks Automatic start, at least three SCM restart
   actions, reset period `86400`, and non-crash failure recovery.
@@ -620,10 +625,11 @@ Exit gate: release checklist passes with artifacts under this repo.
   `installed_persistence_ok=true`, `mounted_usb_file_actions_ok=true`,
   `usb_preflight_ready=true`, and `full_usb_rw_ok=true` from the current
   `-RunUsbWriteProof -RunUsbMountedFileActions` run. The orchestrated direct
-  mounted-file lane, serial-pinned USB RW lane, and deterministic image worker
-  crash lane now pass. Broader public-claim lanes still need physical raw-media
-  power-loss recovery, Apple/macOS validation, surprise-unplug, and wider
-  metadata coverage.
+  mounted-file lane, serial-pinned USB RW lane, deterministic image worker crash
+  lane, native Apple round trip, and four `fsck_apfs` checks now pass. Broader
+  public-claim lanes still need physical raw-media
+  power-loss recovery, surprise-unplug, hard-link creation transport, and large
+  stream-backed xattr mutation.
 - Current self-test proof is saved at
   `artifacts\core-selftest\apfs-core-selftest-large-raw-run.log`. It records
   successful XID
@@ -825,13 +831,22 @@ Exit gate: release checklist passes with artifacts under this repo.
   create/read/update/delete, and reversible volume-root basic-info now pass on
   that raw target. Physical root security was intentionally not changed; its
   implementation is covered by local remount and native macOS lanes. Remaining
-  work before public RW default: hard-link creation; zero-length, non-ASCII-name,
-  and large stream-backed xattr mutation;
+  work before public RW default: hard-link creation; large stream-backed xattr
+  mutation; case-colliding APFS xattr names; policy-specific filesystem-owned
+  xattr handling;
   physical raw-media crash/power-loss recovery proof; and real surprise-unplug
   behavior. Apple-created xattr/symlink/hardlink preservation and supported EA
   mutation pass a native macOS round trip. Deterministic image worker crash
   recovery also passes.
   `\\.\PhysicalDrive2` remains read-only.
+- Windows `FILE_FULL_EA_INFORMATION` permits only ASCII names and defines a
+  zero-length set as deletion. Worker therefore reserves
+  `APFS.XATTR.<BASE32-UTF8-NAME>` with value marker `0x01` as a reversible wire
+  transport. Direct ASCII/non-empty EAs remain unchanged. Local remount, native
+  macOS, and serial-pinned physical USB proofs confirm exact UTF-8 APFS names and
+  zero-byte values on files, named directories, and volume root; raw probes
+  confirm transport aliases are never stored in APFS. Microsoft protocol:
+  `https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/0eb94f48-6aac-41df-a878-79f4dcfd8989`.
 - Current local state is safe to pause: no UAC prompt is pending, no USB verifier
   process remains, service is Automatic/running, installed binaries match the
   current build, one tray manager is running, and `V:` is read-only with raw
@@ -1032,17 +1047,18 @@ Exit gate: release checklist passes with artifacts under this repo.
   unrelated embedded xattrs. Directory state, including root inode 2, is
   batch-recovered in one fs-tree walk and preserved across unrelated COW
   mutations; directory stream-backed xattrs fail
-  closed instead of being dropped. WinFsp `GetEa`/`SetEa` exposes printable ASCII
-  names from 1 through 127 bytes and values up to the APFS embedded limit of
+  closed instead of being dropped. WinFsp `GetEa`/`SetEa` exposes direct
+  printable ASCII names plus reversible Base32 aliases for exact UTF-8 APFS
+  names and zero-byte values. Embedded values remain capped at the APFS limit of
   3,804 bytes. Protected
   `com.apple.decmpfs`, `com.apple.ResourceFork`, and `com.apple.fs.symlink`
-  attributes fail closed. Non-ASCII-name and large stream-backed xattr mutation
-  remain outside current scope.
+  attributes fail closed. Large stream-backed xattr mutation remains outside
+  current scope.
 - Local WinFsp proof passed file, named-directory, and volume-root EA create/read,
-  restart persistence, update, and delete. Physical `V:` proof passed file,
-  directory, and volume-root operations using `user.apfswin_usb`,
-  `user.apfswin_usb_directory`, and `user.apfswin_usb_root`, then removed its
-  proof tree and restored read-only/raw-disabled policy.
+  restart persistence, update, and delete for direct names, empty values, and
+  exact UTF-8 names. Physical `V:` proof passed the same file, directory, and
+  volume-root operations, then removed all transient xattrs and its proof tree
+  and restored read-only/raw-disabled policy.
   `apfs_core_selftest` also verifies copied-core directory-EA preservation across
   child-file writes plus set/read/delete and protected-name rejection.
 - `scripts\verify-apple-vm-roundtrip.ps1` is a credential-free tracked harness:
@@ -1103,32 +1119,48 @@ Exit gate: release checklist passes with artifacts under this repo.
 - Local non-admin WinFsp proof sets root times, Hidden/Archive flags, and a
   compatibility ACL, verifies raw inode mode `040777`, owner/group `544:544`,
   BSD flags `0x18000`, root xattr coexistence, and identical state after remount.
-- Native Windows -> macOS -> Windows -> macOS round trip passed in 35.809 seconds.
+- Native Windows -> macOS -> Windows -> macOS round trip passed in 37.596 seconds.
   Apple validated Windows root birth time, flags, mode, and xattrs; macOS changed
   root mtime, flags, and mode; Windows read and replaced them; final Apple mount
   validated Windows replacement plus four clean `fsck_apfs -n` runs. Raw APFS
   owner/group remained `544:544`; macOS presented `501:20` because image
-  ownership was disabled. Final image SHA-256:
-  `AE08EFBEA34A951F6E74F2C6ED9993C305DB0C9D0D8C299F1402578974C74D31`.
+  ownership was disabled. Windows and macOS also exchanged exact UTF-8 xattr
+  names and empty values on file, named directory, and root in both directions,
+  then verified update/delete behavior. Final image SHA-256:
+  `5EE131DEA6ADFA4B68B641298F12DA6EF735CFC098E94F41EC8961622899CDEE`.
 - Serial-pinned physical USB proof transiently set volume-root
   create/access/write times and Hidden/Archive flags, then restored original
   Windows-visible values and flags. Windows `FILETIME` resolution is 100 ns, so
   sub-100 ns APFS timestamp tails, change time, and write generation are not
   claimed bit-identical. Physical root security was intentionally not changed.
-  Root/file/directory EAs and proof tree were removed; `V:` finished read-only
-  with raw writes disabled.
-- Integrated no-host-reboot certification passed 28 steps from
-  `2026-08-17T00:23:33Z` through `2026-08-17T00:26:53Z`: local gates, installed
+  Root/file/directory direct, empty-value, and exact UTF-8-name EAs plus proof
+  tree were removed; `V:` finished read-only with raw writes disabled. Current
+  physical edge proof completed at `2026-08-17T00:58:11Z`.
+- Integrated no-host-reboot certification completed 28 passing steps plus one
+  intentionally skipped already-completed repair step from
+  `2026-08-17T00:58:45Z` through `2026-08-17T01:02:08Z`: local gates, installed
   Automatic service, native Apple round trip, raw-alias deduplication, mounted
   USB metadata/EA/symbolic-link actions, serial-pinned USB RW, Unicode,
   394-character path, 1 MiB Robocopy, concurrent readers, cleanup, and final
-  read-only restoration all passed. No host reboot occurred.
+  empty/UTF-8 xattrs, 394-character path, 1 MiB Robocopy, concurrent readers,
+  cleanup, and final read-only restoration all passed. No host reboot occurred.
 - Fresh release ZIP
-  `C703700C79FD477207D9D99911D253F38B617924D2E5348990A04D4432C6C521`
-  passed exact-archive Windows 11 VM lifecycle from `2026-08-17T00:32:16Z`
-  through `2026-08-17T00:34:38Z`: clean install, Automatic service, saved `R:`
+  `D2F1D99DE9DCA8308673FAEE5CA716DBB6E1F19F0E94A5637BF971A72D25E49B`
+  passed exact-archive Windows 11 VM lifecycle from `2026-08-17T01:33:41Z`
+  through `2026-08-17T01:36:11Z`: clean install, Automatic service, saved `R:`
   APFS mount restoration after VM reboot, expected file hash, read-only denial,
   one interactive tray with `Open`/`Exit`, and installed binary hashes all
   passed. Packaged uninstall removed all product residue and remote artifacts.
-  Host PC was not rebooted. Sanitized evidence:
+  Lifecycle used hash-named frozen copy
+  `APFS-for-Windows-0.1.0-D2F1D99D.zip`; harness confirmed source SHA-256 was
+  unchanged after test and default release ZIP remained byte-identical. Host PC
+  was not rebooted. Sanitized evidence:
   `docs\evidence\windows-vm-install-lifecycle-2026-08-17.json`.
+- Empty/UTF-8 xattr transport details and copied-core, local remount, native
+  macOS, and physical USB results are tracked in
+  `docs\evidence\xattr-edge-cases-2026-08-17.json`.
+- Elevated repair now transports its command as UTF-16 PowerShell
+  `-EncodedCommand`, preventing `\\?\GLOBALROOT` targets from losing a leading
+  slash through `Start-Process` argument joining. Release-package verification
+  decodes the staged launcher command and requires exact target/mount roundtrip
+  without requesting elevation.

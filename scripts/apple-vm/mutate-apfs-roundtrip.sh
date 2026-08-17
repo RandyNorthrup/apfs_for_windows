@@ -67,6 +67,16 @@ windows_bsd_flags=$(stat -f '%f' "$windows_file")
 windows_xattr=$(xattr -p user.apfswin_windows "$windows_file")
 windows_directory_xattr=$(xattr -p user.apfswin_windows_directory "$mount_point/WinProof")
 windows_root_xattr=$(xattr -p user.apfswin_windows_root "$mount_point")
+edge_empty_name='user.apfswin_empty'
+edge_unicode_name='user.apfswin_résumé_日本語'
+edge_macos_empty_name='user.apfswin_macos_empty'
+edge_targets=("$windows_file" "$mount_point/WinProof" "$mount_point")
+for edge_target in "${edge_targets[@]}"; do
+    edge_empty_size=$(xattr -px "$edge_empty_name" "$edge_target" | tr -d '[:space:]' | wc -c | tr -d '[:space:]')
+    edge_unicode_value=$(xattr -p "$edge_unicode_name" "$edge_target")
+    assert_equal "$edge_empty_size" "0" "Windows-created empty xattr size"
+    assert_equal "$edge_unicode_value" "Windows Unicode EA payload" "Windows-created Unicode xattr"
+done
 windows_root_birth_epoch=$(stat -f '%B' "$mount_point")
 windows_root_mtime_epoch=$(stat -f '%m' "$mount_point")
 windows_root_bsd_flags=$(stat -f '%f' "$mount_point")
@@ -88,6 +98,10 @@ assert_equal "$windows_root_bsd_flags" "98304" "Windows-created root BSD flags"
 assert_equal "$windows_root_mode" "drwxrwxrwx" "Windows-created root mode"
 assert_equal "$windows_root_uid" "501" "macOS-presented root uid"
 assert_equal "$windows_root_gid" "20" "macOS-presented root gid"
+for edge_target in "${edge_targets[@]}"; do
+    xattr -w "$edge_unicode_name" 'macOS updated Unicode EA payload' "$edge_target"
+    xattr -w "$edge_macos_empty_name" '' "$edge_target"
+done
 xattr -w user.apfswin_windows 'macOS updated Windows EA payload' "$windows_file"
 xattr -w user.apfswin_windows_directory 'macOS updated Windows directory EA payload' "$mount_point/WinProof"
 xattr -w user.apfswin_windows_root 'macOS updated Windows root EA payload' "$mount_point"
@@ -163,6 +177,9 @@ WINDOWS_BSD_FLAGS=$windows_bsd_flags
 WINDOWS_XATTR=$windows_xattr
 WINDOWS_DIRECTORY_XATTR=$windows_directory_xattr
 WINDOWS_ROOT_XATTR=$windows_root_xattr
+WINDOWS_EDGE_EMPTY_OK=1
+WINDOWS_EDGE_UNICODE_OK=1
+MACOS_EDGE_EMPTY_CREATED=1
 WINDOWS_ROOT_BIRTH_EPOCH=$windows_root_birth_epoch
 WINDOWS_ROOT_MTIME_EPOCH=$windows_root_mtime_epoch
 WINDOWS_ROOT_BSD_FLAGS=$windows_root_bsd_flags

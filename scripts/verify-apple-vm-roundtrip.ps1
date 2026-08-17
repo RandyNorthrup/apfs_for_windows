@@ -138,6 +138,58 @@ function ConvertTo-PosixSingleQuoted {
     return $singleQuote + $Text.Replace($singleQuote, $replacement) + $singleQuote
 }
 
+function Test-NativeEaEmpty {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    if (-not (Test-NativeExtendedAttribute -Path $Path -Name $Name)) { return $false }
+    $value = Get-NativeExtendedAttribute -Path $Path -Name $Name
+    return $null -ne $value -and ([byte[]]$value).Length -eq 0
+}
+
+function Get-NativeEaText {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    $value = Get-NativeExtendedAttribute -Path $Path -Name $Name
+    if ($null -eq $value) { return $null }
+    return [Text.Encoding]::UTF8.GetString([byte[]]$value)
+}
+
+function Get-EaEdgeState {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$UnicodeName,
+        [Parameter(Mandatory = $true)][string]$OriginalEmptyName,
+        [Parameter(Mandatory = $true)][string]$MacEmptyName,
+        [Parameter(Mandatory = $true)][string]$FinalEmptyName
+    )
+    [ordered]@{
+        unicode_value = Get-NativeEaText -Path $Path -Name $UnicodeName
+        original_empty = Test-NativeEaEmpty -Path $Path -Name $OriginalEmptyName
+        macos_empty = Test-NativeEaEmpty -Path $Path -Name $MacEmptyName
+        final_empty = Test-NativeEaEmpty -Path $Path -Name $FinalEmptyName
+        original_absent = [bool](-not (Test-NativeExtendedAttribute `
+            -Path $Path -Name $OriginalEmptyName))
+        macos_absent = [bool](-not (Test-NativeExtendedAttribute `
+            -Path $Path -Name $MacEmptyName))
+    }
+}
+
+function Test-EaEdgeStateFromMac {
+    param([object]$State)
+    $State.unicode_value -eq "macOS updated Unicode EA payload" -and
+        $State.original_empty -and $State.macos_empty
+}
+
+function Test-EaEdgeStateAfterWindows {
+    param([object]$State)
+    $State.unicode_value -eq "Windows final Unicode EA payload" -and
+        $State.original_absent -and $State.macos_absent -and $State.final_empty
+}
+
 function Write-LfScriptCopy {
     param(
         [Parameter(Mandatory = $true)][string]$Source,
@@ -317,6 +369,11 @@ try {
     $rootFinalCreation = [datetime]::SpecifyKind([datetime]"2022-09-10T11:12:13", "Utc")
     $rootFinalAccess = [datetime]::SpecifyKind([datetime]"2023-10-11T12:13:14", "Utc")
     $rootFinalWrite = [datetime]::SpecifyKind([datetime]"2024-11-12T13:14:15", "Utc")
+    $emptyEaName = "user.apfswin_empty"
+    $macEmptyEaName = "user.apfswin_macos_empty"
+    $finalEmptyEaName = "user.apfswin_windows_final_empty"
+    $unicodeEaName = "user.apfswin_r$([char]0x00E9)sum$([char]0x00E9)_" +
+        "$([char]0x65E5)$([char]0x672C)$([char]0x8A9E)"
     $rootOriginWindows = $null
     $rootOriginAclExitCode = $null
     $normalIdentity = (& whoami.exe).Trim()
@@ -352,6 +409,13 @@ try {
             -Value ([Text.Encoding]::UTF8.GetBytes("Windows directory EA payload"))
         Set-NativeExtendedAttribute -Path $mountRoot -Name "user.apfswin_windows_root" `
             -Value ([Text.Encoding]::UTF8.GetBytes("Windows root EA payload"))
+        $windowsOriginDirectory = Join-Path $mountRoot "WinProof"
+        foreach ($edgePath in @($windowsFile, $windowsOriginDirectory, $mountRoot)) {
+            Set-NativeExtendedAttribute -Path $edgePath -Name $emptyEaName `
+                -Value ([byte[]]::new(0))
+            Set-NativeExtendedAttribute -Path $edgePath -Name $unicodeEaName `
+                -Value ([Text.Encoding]::UTF8.GetBytes("Windows Unicode EA payload"))
+        }
         $windowsCreatedLink = Join-Path $mountRoot "WinProof\windows-created-symlink"
         New-NativeFileSymbolicLink -Path $windowsCreatedLink `
             -Target "Nested\windows.txt"
@@ -500,6 +564,17 @@ try {
             -Path $macDirectory -Name "user.apfswin_directory_delete"
         $deleteRootEaPresentBefore = Test-NativeExtendedAttribute `
             -Path $mountRoot -Name "user.apfswin_root_delete"
+        $edgeFromMac = [ordered]@{
+            file = Get-EaEdgeState -Path $renamedByMac -UnicodeName $unicodeEaName `
+                -OriginalEmptyName $emptyEaName -MacEmptyName $macEmptyEaName `
+                -FinalEmptyName $finalEmptyEaName
+            directory = Get-EaEdgeState -Path $windowsDirectory -UnicodeName $unicodeEaName `
+                -OriginalEmptyName $emptyEaName -MacEmptyName $macEmptyEaName `
+                -FinalEmptyName $finalEmptyEaName
+            root = Get-EaEdgeState -Path $mountRoot -UnicodeName $unicodeEaName `
+                -OriginalEmptyName $emptyEaName -MacEmptyName $macEmptyEaName `
+                -FinalEmptyName $finalEmptyEaName
+        }
         Set-NativeExtendedAttribute -Path $xattrFile -Name "user.apfswin_rw" `
             -Value ([Text.Encoding]::UTF8.GetBytes("Windows updated xattr payload"))
         Remove-NativeExtendedAttribute -Path $xattrFile -Name "user.apfswin_delete"
@@ -515,6 +590,14 @@ try {
             -Value ([Text.Encoding]::UTF8.GetBytes("Windows final directory EA payload"))
         Set-NativeExtendedAttribute -Path $mountRoot -Name "user.apfswin_windows_root" `
             -Value ([Text.Encoding]::UTF8.GetBytes("Windows final root EA payload"))
+        foreach ($edgePath in @($renamedByMac, $windowsDirectory, $mountRoot)) {
+            Set-NativeExtendedAttribute -Path $edgePath -Name $unicodeEaName `
+                -Value ([Text.Encoding]::UTF8.GetBytes("Windows final Unicode EA payload"))
+            Remove-NativeExtendedAttribute -Path $edgePath -Name $emptyEaName
+            Remove-NativeExtendedAttribute -Path $edgePath -Name $macEmptyEaName
+            Set-NativeExtendedAttribute -Path $edgePath -Name $finalEmptyEaName `
+                -Value ([byte[]]::new(0))
+        }
         $returnDirectory = Join-Path $mountRoot "WindowsReturn\Nested"
         New-Item -ItemType Directory -Path $returnDirectory -Force | Out-Null
         $returnFile = Join-Path $returnDirectory "final.txt"
@@ -552,6 +635,17 @@ try {
             hidden = [bool](($rootItemFinal.Attributes -band [IO.FileAttributes]::Hidden) -ne 0)
             archive = [bool](($rootItemFinal.Attributes -band [IO.FileAttributes]::Archive) -ne 0)
             acl_exit_code = $rootFinalAclExitCode
+        }
+        $edgeAfterWindows = [ordered]@{
+            file = Get-EaEdgeState -Path $renamedByWindows -UnicodeName $unicodeEaName `
+                -OriginalEmptyName $emptyEaName -MacEmptyName $macEmptyEaName `
+                -FinalEmptyName $finalEmptyEaName
+            directory = Get-EaEdgeState -Path $windowsDirectory -UnicodeName $unicodeEaName `
+                -OriginalEmptyName $emptyEaName -MacEmptyName $macEmptyEaName `
+                -FinalEmptyName $finalEmptyEaName
+            root = Get-EaEdgeState -Path $mountRoot -UnicodeName $unicodeEaName `
+                -OriginalEmptyName $emptyEaName -MacEmptyName $macEmptyEaName `
+                -FinalEmptyName $finalEmptyEaName
         }
         $windowsReturn = [ordered]@{
             mac_sha256 = $macHash
@@ -596,6 +690,8 @@ try {
                 Get-NativeExtendedAttribute -Path $mountRoot -Name "user.apfswin_root_rw"))
             final_windows_root_ea = [Text.Encoding]::UTF8.GetString([byte[]](
                 Get-NativeExtendedAttribute -Path $mountRoot -Name "user.apfswin_windows_root"))
+            edge_from_macos = $edgeFromMac
+            edge_after_windows = $edgeAfterWindows
             root_from_macos = $rootFromMacWindows
             final_root = $rootFinalWindows
         }
@@ -682,6 +778,15 @@ try {
         $windowsReturn.delete_root_ea_absent_after -and
         $windowsReturn.updated_root_ea -eq "Windows updated root xattr payload" -and
         $windowsReturn.final_windows_root_ea -eq "Windows final root EA payload" -and
+        $remoteMutation.WINDOWS_EDGE_EMPTY_OK -eq "1" -and
+        $remoteMutation.WINDOWS_EDGE_UNICODE_OK -eq "1" -and
+        $remoteMutation.MACOS_EDGE_EMPTY_CREATED -eq "1" -and
+        (Test-EaEdgeStateFromMac $windowsReturn.edge_from_macos.file) -and
+        (Test-EaEdgeStateFromMac $windowsReturn.edge_from_macos.directory) -and
+        (Test-EaEdgeStateFromMac $windowsReturn.edge_from_macos.root) -and
+        (Test-EaEdgeStateAfterWindows $windowsReturn.edge_after_windows.file) -and
+        (Test-EaEdgeStateAfterWindows $windowsReturn.edge_after_windows.directory) -and
+        (Test-EaEdgeStateAfterWindows $windowsReturn.edge_after_windows.root) -and
         $rootOriginWindowsValid -and $rootOriginRawValid -and
         $rootMacMutationValid -and $rootFinalMutationValid)
     if (-not $metadataPreserved -or -not $symlinkMetadataValid -or
@@ -698,7 +803,10 @@ try {
         "bash $(ConvertTo-PosixSingleQuoted "$remoteRun/validate-apfs-roundtrip.sh") $(ConvertTo-PosixSingleQuoted "$remoteRun/windows-return.apfs") $(ConvertTo-PosixSingleQuoted "$remoteRun/macos-final") $(ConvertTo-PosixSingleQuoted $returnImageHash)"
     $remoteValidation = ConvertFrom-KeyValueOutput $remoteValidationOutput
     if ($remoteValidation.APPLE_RETURN_OK -ne "1" -or
-        $remoteValidation.IMAGE_SHA256 -ne $returnImageHash) {
+        $remoteValidation.IMAGE_SHA256 -ne $returnImageHash -or
+        $remoteValidation.EDGE_UNICODE_FINAL_OK -ne "1" -or
+        $remoteValidation.EDGE_FINAL_EMPTY_OK -ne "1" -or
+        $remoteValidation.EDGE_OLD_EMPTY_DELETIONS_OK -ne "1") {
         throw "macOS final validation did not report success: $remoteValidationOutput"
     }
 

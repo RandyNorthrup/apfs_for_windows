@@ -2,9 +2,13 @@
   "component": "apfs_for_windows",
   "check": "certification_orchestrator",
   "ok": true,
-  "started_utc": "2026-08-17T00:23:33.4574706Z",
-  "completed_utc": "2026-08-17T00:26:53.5665765Z",
-  "step_count": 28,
+  "started_utc": "2026-08-17T00:58:45.6315365Z",
+  "completed_utc": "2026-08-17T01:02:08.2799224Z",
+  "step_count": 29,
+  "passed_steps": 28,
+  "skipped_steps": [
+    "repair_install_already_completed_before_run"
+  ],
   "failed_steps": [],
   "no_host_reboot_performed": true,
   "gates": {
@@ -17,11 +21,13 @@
     "release_package": true,
     "local_worker_content_namespace": true,
     "local_worker_file_directory_and_root_metadata_security_ea": true,
+    "local_worker_empty_and_unicode_xattrs": true,
     "local_worker_crash_recovery": true,
     "apple_vm_roundtrip_and_four_fsck": true,
     "installed_service_state": true,
     "raw_alias_deduplication": true,
     "mounted_usb_file_directory_and_root_actions": true,
+    "mounted_usb_empty_and_unicode_xattrs": true,
     "serial_pinned_usb_rw": true,
     "extended_usb_unicode_long_path_robocopy_concurrent_reads": true
   },
@@ -35,8 +41,10 @@
     "root_basic_info_transient_and_restored": true,
     "physical_root_security_modified": false,
     "file_directory_and_root_ea": true,
+    "empty_xattr_values": true,
+    "exact_unicode_xattr_names": true,
     "symbolic_link_create_follow_delete": true,
-    "unicode_names": true,
+    "unicode_file_names": true,
     "long_path_characters": 394,
     "robocopy_payload_bytes": 1048576,
     "concurrent_reader_count": 4,
@@ -57,7 +65,7 @@
   "release": {
     "version": "0.1.0",
     "file_count": 17,
-    "zip_sha256": "C703700C79FD477207D9D99911D253F38B617924D2E5348990A04D4432C6C521",
+    "zip_sha256": "D2F1D99DE9DCA8308673FAEE5CA716DBB6E1F19F0E94A5637BF971A72D25E49B",
     "package_verification_ok": true,
     "exact_archive_windows_vm_lifecycle_ok": true,
     "windows_vm_rebooted": true,
@@ -65,8 +73,6 @@
   },
   "remaining_scope": [
     "physical surprise-unplug and raw-media power-loss recovery",
-    "empty Windows EA value as a distinct value because zero length requests deletion",
-    "non-ASCII Windows EA names",
     "large APFS stream-backed xattr mutation",
     "content-critical filesystem-owned xattrs through the generic Windows EA callback",
     "hard-link creation requires a WinFsp protocol/kernel fork or another filesystem driver transport"

@@ -86,6 +86,44 @@ function Test-TimeNear {
     [Math]::Abs(($Actual.ToUniversalTime() - $Expected.ToUniversalTime()).TotalSeconds) -le 1
 }
 
+function Get-EaEdgeState {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$EmptyName,
+        [Parameter(Mandatory = $true)][string]$UnicodeName
+    )
+    $emptyValue = Get-NativeExtendedAttribute -Path $Path -Name $EmptyName
+    $unicodeValue = Get-NativeExtendedAttribute -Path $Path -Name $UnicodeName
+    [pscustomobject][ordered]@{
+        empty_exists = [bool](Test-NativeExtendedAttribute -Path $Path -Name $EmptyName)
+        empty_bytes = if ($null -eq $emptyValue) { -1 } else { ([byte[]]$emptyValue).Length }
+        unicode_exists = [bool](Test-NativeExtendedAttribute -Path $Path -Name $UnicodeName)
+        unicode_value = if ($null -eq $unicodeValue) {
+            $null
+        } else {
+            [Text.Encoding]::UTF8.GetString([byte[]]$unicodeValue)
+        }
+    }
+}
+
+function Test-EaEdgePresent {
+    param([object]$State, [string]$UnicodeValue)
+    $null -ne $State -and $State.empty_exists -and $State.empty_bytes -eq 0 -and
+        $State.unicode_exists -and $State.unicode_value -eq $UnicodeValue
+}
+
+function Test-EaEdgeAbsent {
+    param([object]$State)
+    $null -ne $State -and -not $State.empty_exists -and $State.empty_bytes -eq -1 -and
+        -not $State.unicode_exists -and $null -eq $State.unicode_value
+}
+
+function Test-ApfsEaEdgeState {
+    param([object]$State, [int]$UnicodeBytes)
+    $null -ne $State -and $State.empty_exact_count -eq 1 -and $State.empty_bytes -eq 0 -and
+        $State.unicode_exact_count -eq 1 -and $State.unicode_bytes -eq $UnicodeBytes
+}
+
 function New-NativeFileSymbolicLink {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -185,9 +223,10 @@ $stderr1 = Join-Path $artifactDir "worker-first.err.txt"
 $stdout2 = Join-Path $artifactDir "worker-second.out.txt"
 $stderr2 = Join-Path $artifactDir "worker-second.err.txt"
 $debugPath = Join-Path $artifactDir "target-debug.json"
+$directoryDebugPath = Join-Path $artifactDir "directory-debug.json"
 $rootDebugPath = Join-Path $artifactDir "root-debug.json"
 Remove-Item -LiteralPath $image, $trace, $stdout1, $stderr1, $stdout2, $stderr2, `
-    $debugPath, $rootDebugPath, $output -Force -ErrorAction SilentlyContinue
+    $debugPath, $directoryDebugPath, $rootDebugPath, $output -Force -ErrorAction SilentlyContinue
 
 & $selftest --make-image $image | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Unable to create APFS image." }
@@ -213,6 +252,11 @@ $directoryEaUpdatedText = "Windows directory EA updated payload"
 $rootEaName = "user.apfswin_root"
 $rootEaFirstText = "Windows root EA first payload"
 $rootEaUpdatedText = "Windows root EA updated payload"
+$emptyEaName = "user.apfswin_empty"
+$unicodeEaName = "user.apfswin_r$([char]0x00E9)sum$([char]0x00E9)_" +
+    "$([char]0x65E5)$([char]0x672C)$([char]0x8A9E)"
+$unicodeEaFirstText = "Windows Unicode EA first payload"
+$unicodeEaUpdatedText = "Windows Unicode EA updated payload"
 $first = $null
 $second = $null
 $errorText = $null
@@ -236,6 +280,9 @@ $directoryEaDeleteState = $null
 $rootEaFirstState = $null
 $rootEaSecondState = $null
 $rootEaDeleteState = $null
+$edgeEaFirstState = $null
+$edgeEaSecondState = $null
+$edgeEaDeleteState = $null
 $rootFirstState = $null
 $rootSecondState = $null
 try {
@@ -248,6 +295,9 @@ try {
     $deleteReparseLink = Join-Path $dir "delete-reparse-link"
     Set-NativeExtendedAttribute -Path $mountRoot -Name $rootEaName `
         -Value ([Text.Encoding]::UTF8.GetBytes($rootEaFirstText))
+    Set-NativeExtendedAttribute -Path $mountRoot -Name $emptyEaName -Value ([byte[]]::new(0))
+    Set-NativeExtendedAttribute -Path $mountRoot -Name $unicodeEaName `
+        -Value ([Text.Encoding]::UTF8.GetBytes($unicodeEaFirstText))
     $rootEaFirstState = [pscustomobject][ordered]@{
         name = $rootEaName
         value = [Text.Encoding]::UTF8.GetString([byte[]](
@@ -276,6 +326,9 @@ try {
     New-Item -ItemType Directory -Path $dir | Out-Null
     Set-NativeExtendedAttribute -Path $dir -Name $directoryEaName `
         -Value ([Text.Encoding]::UTF8.GetBytes($directoryEaFirstText))
+    Set-NativeExtendedAttribute -Path $dir -Name $emptyEaName -Value ([byte[]]::new(0))
+    Set-NativeExtendedAttribute -Path $dir -Name $unicodeEaName `
+        -Value ([Text.Encoding]::UTF8.GetBytes($unicodeEaFirstText))
     $directoryEaFirstRead = Get-NativeExtendedAttribute -Path $dir -Name $directoryEaName
     $directoryEaFirstState = [pscustomobject][ordered]@{
         name = $directoryEaName
@@ -304,10 +357,24 @@ try {
 
     Set-NativeExtendedAttribute -Path $file -Name $eaName `
         -Value ([Text.Encoding]::UTF8.GetBytes($eaFirstText))
+    Set-NativeExtendedAttribute -Path $file -Name $emptyEaName -Value ([byte[]]::new(0))
+    Set-NativeExtendedAttribute -Path $file -Name $unicodeEaName `
+        -Value ([Text.Encoding]::UTF8.GetBytes($unicodeEaFirstText))
     $eaFirstRead = Get-NativeExtendedAttribute -Path $file -Name $eaName
     $eaFirstState = [pscustomobject][ordered]@{
         name = $eaName
         value = [Text.Encoding]::UTF8.GetString([byte[]]$eaFirstRead)
+    }
+    $edgeEaFirstState = [pscustomobject][ordered]@{
+        empty_set_wire_name = Get-NativeExtendedAttributeWireName `
+            -Name $emptyEaName -ForceAlias
+        unicode_wire_name = Get-NativeExtendedAttributeWireName -Name $unicodeEaName
+        root = Get-EaEdgeState -Path $mountRoot -EmptyName $emptyEaName `
+            -UnicodeName $unicodeEaName
+        directory = Get-EaEdgeState -Path $dir -EmptyName $emptyEaName `
+            -UnicodeName $unicodeEaName
+        file = Get-EaEdgeState -Path $file -EmptyName $emptyEaName `
+            -UnicodeName $unicodeEaName
     }
 
     New-NativeFileSymbolicLink -Path $link -Target "target.txt"
@@ -350,6 +417,11 @@ try {
     $debugRaw = @(& $probe --target $image --debug-file "/MetadataProof/target.txt" 2>&1)
     if ($LASTEXITCODE -ne 0) { throw "APFS metadata probe failed: $($debugRaw -join ' ')" }
     $debugRaw | Set-Content -LiteralPath $debugPath -Encoding UTF8
+    $directoryDebugRaw = @(& $probe --target $image --debug-file "/MetadataProof" 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "APFS directory metadata probe failed: $($directoryDebugRaw -join ' ')"
+    }
+    $directoryDebugRaw | Set-Content -LiteralPath $directoryDebugPath -Encoding UTF8
     $rootDebugRaw = @(& $probe --target $image --debug-file "/" 2>&1)
     if ($LASTEXITCODE -ne 0) {
         throw "APFS root metadata probe failed: $($rootDebugRaw -join ' ')"
@@ -401,6 +473,41 @@ try {
     Remove-NativeExtendedAttribute -Path $file -Name $eaName
     $eaDeleteState = [pscustomobject][ordered]@{
         absent = [bool](-not (Test-NativeExtendedAttribute -Path $file -Name $eaName))
+    }
+    $edgeEaPersistentState = [pscustomobject][ordered]@{
+        root = Get-EaEdgeState -Path $mountRoot -EmptyName $emptyEaName `
+            -UnicodeName $unicodeEaName
+        directory = Get-EaEdgeState -Path $dir -EmptyName $emptyEaName `
+            -UnicodeName $unicodeEaName
+        file = Get-EaEdgeState -Path $file -EmptyName $emptyEaName `
+            -UnicodeName $unicodeEaName
+    }
+    foreach ($edgePath in @($mountRoot, $dir, $file)) {
+        Set-NativeExtendedAttribute -Path $edgePath -Name $unicodeEaName `
+            -Value ([Text.Encoding]::UTF8.GetBytes($unicodeEaUpdatedText))
+    }
+    $edgeEaSecondState = [pscustomobject][ordered]@{
+        persisted = $edgeEaPersistentState
+        updated = [pscustomobject][ordered]@{
+            root = Get-EaEdgeState -Path $mountRoot -EmptyName $emptyEaName `
+                -UnicodeName $unicodeEaName
+            directory = Get-EaEdgeState -Path $dir -EmptyName $emptyEaName `
+                -UnicodeName $unicodeEaName
+            file = Get-EaEdgeState -Path $file -EmptyName $emptyEaName `
+                -UnicodeName $unicodeEaName
+        }
+    }
+    foreach ($edgePath in @($mountRoot, $dir, $file)) {
+        Remove-NativeExtendedAttribute -Path $edgePath -Name $emptyEaName
+        Remove-NativeExtendedAttribute -Path $edgePath -Name $unicodeEaName
+    }
+    $edgeEaDeleteState = [pscustomobject][ordered]@{
+        root = Get-EaEdgeState -Path $mountRoot -EmptyName $emptyEaName `
+            -UnicodeName $unicodeEaName
+        directory = Get-EaEdgeState -Path $dir -EmptyName $emptyEaName `
+            -UnicodeName $unicodeEaName
+        file = Get-EaEdgeState -Path $file -EmptyName $emptyEaName `
+            -UnicodeName $unicodeEaName
     }
     $fileItem = Get-Item -LiteralPath $file -Force
     $linkItem = Get-Item -LiteralPath $link -Force
@@ -457,10 +564,38 @@ $debugJson = if (Test-Path -LiteralPath $debugPath) {
 } else { $null }
 $debugFile = if ($debugJson) { $debugJson.whole_device_debug_file } else { $null }
 $debugEa = @($debugFile.xattrs | Where-Object { $_.name -eq $eaName })
+$directoryDebugJson = if (Test-Path -LiteralPath $directoryDebugPath) {
+    Get-Content -LiteralPath $directoryDebugPath -Raw | ConvertFrom-Json
+} else { $null }
+$directoryDebugFile = if ($directoryDebugJson) {
+    $directoryDebugJson.whole_device_debug_file
+} else { $null }
 $rootDebugJson = if (Test-Path -LiteralPath $rootDebugPath) {
     Get-Content -LiteralPath $rootDebugPath -Raw | ConvertFrom-Json
 } else { $null }
 $rootDebugFile = if ($rootDebugJson) { $rootDebugJson.whole_device_debug_file } else { $null }
+$edgeApfsState = [pscustomobject][ordered]@{}
+$debugTargets = [ordered]@{
+    root = $rootDebugFile
+    directory = $directoryDebugFile
+    file = $debugFile
+}
+foreach ($debugTarget in $debugTargets.GetEnumerator()) {
+    $emptyAttributes = @($debugTarget.Value.xattrs | Where-Object { $_.name -eq $emptyEaName })
+    $unicodeAttributes = @(
+        $debugTarget.Value.xattrs | Where-Object { $_.name -eq $unicodeEaName })
+    $edgeApfsState | Add-Member -NotePropertyName $debugTarget.Key -NotePropertyValue (
+        [pscustomobject][ordered]@{
+            empty_exact_count = $emptyAttributes.Count
+            empty_bytes = if ($emptyAttributes.Count -eq 1) {
+                [int]$emptyAttributes[0].size_bytes
+            } else { -1 }
+            unicode_exact_count = $unicodeAttributes.Count
+            unicode_bytes = if ($unicodeAttributes.Count -eq 1) {
+                [int]$unicodeAttributes[0].size_bytes
+            } else { -1 }
+        })
+}
 $debugSummary = if ($debugFile) {
     [pscustomobject][ordered]@{
         ok = [bool]$debugFile.ok
@@ -503,6 +638,24 @@ $ok = -not $errorText -and $firstState.hidden -and $firstState.archive -and
     ($rootEaSecondState.persisted_value -eq $rootEaFirstText) -and
     ($rootEaSecondState.updated_value -eq $rootEaUpdatedText) -and
     $rootEaDeleteState.absent -and
+    (Test-EaEdgePresent $edgeEaFirstState.root $unicodeEaFirstText) -and
+    (Test-EaEdgePresent $edgeEaFirstState.directory $unicodeEaFirstText) -and
+    (Test-EaEdgePresent $edgeEaFirstState.file $unicodeEaFirstText) -and
+    (Test-EaEdgePresent $edgeEaSecondState.persisted.root $unicodeEaFirstText) -and
+    (Test-EaEdgePresent $edgeEaSecondState.persisted.directory $unicodeEaFirstText) -and
+    (Test-EaEdgePresent $edgeEaSecondState.persisted.file $unicodeEaFirstText) -and
+    (Test-EaEdgePresent $edgeEaSecondState.updated.root $unicodeEaUpdatedText) -and
+    (Test-EaEdgePresent $edgeEaSecondState.updated.directory $unicodeEaUpdatedText) -and
+    (Test-EaEdgePresent $edgeEaSecondState.updated.file $unicodeEaUpdatedText) -and
+    (Test-EaEdgeAbsent $edgeEaDeleteState.root) -and
+    (Test-EaEdgeAbsent $edgeEaDeleteState.directory) -and
+    (Test-EaEdgeAbsent $edgeEaDeleteState.file) -and
+    (Test-ApfsEaEdgeState $edgeApfsState.root `
+        ([Text.Encoding]::UTF8.GetByteCount($unicodeEaFirstText))) -and
+    (Test-ApfsEaEdgeState $edgeApfsState.directory `
+        ([Text.Encoding]::UTF8.GetByteCount($unicodeEaFirstText))) -and
+    (Test-ApfsEaEdgeState $edgeApfsState.file `
+        ([Text.Encoding]::UTF8.GetByteCount($unicodeEaFirstText))) -and
     ($debugEa.Count -eq 1) -and
     (Test-TimeNear ([datetime]$secondState.creation_utc) $creation) -and
     (Test-TimeNear ([datetime]$secondState.access_utc) $access) -and
@@ -561,6 +714,11 @@ $result = [pscustomobject][ordered]@{
     root_extended_attribute_first_mount = $rootEaFirstState
     root_extended_attribute_second_mount = $rootEaSecondState
     root_extended_attribute_delete = $rootEaDeleteState
+    edge_extended_attribute_name = $unicodeEaName
+    edge_extended_attribute_first_mount = $edgeEaFirstState
+    edge_extended_attribute_second_mount = $edgeEaSecondState
+    edge_extended_attribute_delete = $edgeEaDeleteState
+    edge_extended_attribute_apfs_exact = $edgeApfsState
     delete_reparse = $deleteReparseState
     apfs_inode = $debugSummary
     root_entries_after_cleanup = $rootNames

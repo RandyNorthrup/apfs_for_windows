@@ -8,7 +8,8 @@ param(
     [string]$UsbTarget = "",
     [string]$UsbMount = "",
     [int]$MaxPhysicalDrives = 32,
-    [int]$TimeoutSeconds = 300
+    [int]$TimeoutSeconds = 300,
+    [switch]$SelfTest
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,6 +27,34 @@ function Test-CurrentProcessAdmin {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function ConvertTo-PowerShellLiteral {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value)
+    return "'" + $Value.Replace("'", "''") + "'"
+}
+
+function New-RepairEncodedCommand {
+    $command = @(
+        "`$ErrorActionPreference = 'Stop'",
+        "try {",
+        "    & $(ConvertTo-PowerShellLiteral $resolvedRepairScript) " +
+            "-OutputPath $(ConvertTo-PowerShellLiteral $resolvedRepairOutput) " +
+            "-MaxPhysicalDrives $MaxPhysicalDrives"
+    )
+    if (-not [string]::IsNullOrWhiteSpace($UsbTarget)) {
+        $command[-1] += " -UsbTarget $(ConvertTo-PowerShellLiteral $UsbTarget)" +
+            " -UsbMount $(ConvertTo-PowerShellLiteral $UsbMount)"
+    }
+    $command += @(
+        "    if (-not `$?) { exit 1 }",
+        "    exit 0",
+        "} catch {",
+        "    Write-Error `$_.Exception.Message",
+        "    exit 1",
+        "}"
+    )
+    [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command -join "`r`n"))
 }
 
 function Get-PendingUacPrompt {
@@ -68,6 +97,32 @@ $startedUtc = (Get-Date).ToUniversalTime()
 $resolvedRepairScript = Resolve-RepoPath $RepairScript
 $resolvedRepairOutput = Resolve-RepoPath $RepairOutputPath
 $resolvedOutput = Resolve-RepoPath $OutputPath
+
+if ($SelfTest) {
+    $encodedCommand = New-RepairEncodedCommand
+    $decodedCommand = [Text.Encoding]::Unicode.GetString(
+        [Convert]::FromBase64String($encodedCommand))
+    $targetLiteral = ConvertTo-PowerShellLiteral $UsbTarget
+    $mountLiteral = ConvertTo-PowerShellLiteral $UsbMount
+    $ok = -not [string]::IsNullOrWhiteSpace($UsbTarget) -and
+        -not [string]::IsNullOrWhiteSpace($UsbMount) -and
+        $decodedCommand.Contains("-UsbTarget $targetLiteral") -and
+        $decodedCommand.Contains("-UsbMount $mountLiteral") -and
+        $decodedCommand.Contains((ConvertTo-PowerShellLiteral $resolvedRepairScript)) -and
+        $decodedCommand.Contains((ConvertTo-PowerShellLiteral $resolvedRepairOutput))
+    [ordered]@{
+        component = "apfs_for_windows"
+        check = "repair_elevated_encoded_command"
+        ok = [bool]$ok
+        no_elevation_requested = $true
+        target_roundtrip = [bool]$decodedCommand.Contains("-UsbTarget $targetLiteral")
+        mount_roundtrip = [bool]$decodedCommand.Contains("-UsbMount $mountLiteral")
+        command_decoded = $true
+    } | ConvertTo-Json -Depth 4
+    if (-not $ok) { exit 1 }
+    exit 0
+}
+
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $resolvedOutput) | Out-Null
 
 $pendingUac = @(Get-PendingUacPrompt)
@@ -132,18 +187,16 @@ if (Test-CurrentProcessAdmin) {
         exit_code = $repairExit
     }
 } else {
+    $encodedCommand = New-RepairEncodedCommand
     $args = @(
         "-NoProfile",
+        "-NonInteractive",
         "-ExecutionPolicy", "Bypass",
-        "-File", $resolvedRepairScript,
-        "-OutputPath", $resolvedRepairOutput,
-        "-MaxPhysicalDrives", [string]$MaxPhysicalDrives
+        "-EncodedCommand", $encodedCommand
     )
-    if (-not [string]::IsNullOrWhiteSpace($UsbTarget)) {
-        $args += @("-UsbTarget", $UsbTarget, "-UsbMount", $UsbMount)
-    }
     try {
-        $process = Start-Process -FilePath powershell -ArgumentList $args -Verb RunAs -PassThru -Wait
+        $process = Start-Process -FilePath powershell.exe -ArgumentList $args `
+            -Verb RunAs -PassThru -Wait
         $baseResult.elevated_process = [ordered]@{
             launched = $true
             id = [int]$process.Id

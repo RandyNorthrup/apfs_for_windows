@@ -45,10 +45,12 @@
     "windows_timestamp_resolution_ns": 100,
     "physical_root_security_modified": false,
     "root_ea_create_read_update_delete": true,
+    "root_empty_xattr_create_read_update_delete": true,
+    "root_exact_unicode_xattr_create_read_update_delete": true,
     "proof_tree_removed": true,
     "final_read_only": true,
     "final_allow_raw_writes": false,
-    "completed_utc": "2026-08-17T00:26:02.4816371Z"
+    "completed_utc": "2026-08-17T00:58:11.0428266Z"
   },
   "native_macos_roundtrip": {
     "ok": true,
@@ -80,9 +82,10 @@
     "macos_volume_ownership": "Disabled",
     "macos_presented_owner_group": "501:20",
     "native_fsck_before_and_after_each_mount": true,
-    "final_image_sha256": "AE08EFBEA34A951F6E74F2C6ED9993C305DB0C9D0D8C299F1402578974C74D31",
-    "duration_seconds": 35.809,
-    "completed_utc": "2026-08-17T00:25:13.7318473Z"
+    "empty_and_exact_unicode_root_xattrs_mutated_both_directions": true,
+    "final_image_sha256": "5EE131DEA6ADFA4B68B641298F12DA6EF735CFC098E94F41EC8961622899CDEE",
+    "duration_seconds": 37.596,
+    "completed_utc": "2026-08-17T01:00:28.7996293Z"
   },
   "claim_boundary": {
     "physical_usb_restore": "Windows-visible times and flags restored; APFS sub-100 ns timestamp tails, change time, and write generation are not bit-identical after a metadata transaction.",

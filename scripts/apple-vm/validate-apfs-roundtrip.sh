@@ -84,6 +84,27 @@ xattr_value=$(xattr -p user.apfswin_roundtrip "$mount_point/MacProof/mac-hardlin
 updated_xattr=$(xattr -p user.apfswin_rw "$mount_point/MacProof/xattr-roundtrip.txt")
 updated_directory_xattr=$(xattr -p user.apfswin_directory_rw "$mount_point/MacProof")
 updated_root_xattr=$(xattr -p user.apfswin_root_rw "$mount_point")
+edge_unicode_name='user.apfswin_résumé_日本語'
+edge_original_empty_name='user.apfswin_empty'
+edge_macos_empty_name='user.apfswin_macos_empty'
+edge_final_empty_name='user.apfswin_windows_final_empty'
+edge_targets=(
+    "$mount_point/WinProof/Nested/windows-renamed-back-by-windows.txt"
+    "$mount_point/WinProof"
+    "$mount_point"
+)
+for edge_target in "${edge_targets[@]}"; do
+    edge_unicode_value=$(xattr -p "$edge_unicode_name" "$edge_target")
+    edge_final_empty_size=$(xattr -px "$edge_final_empty_name" "$edge_target" | tr -d '[:space:]' | wc -c | tr -d '[:space:]')
+    assert_equal "$edge_unicode_value" "Windows final Unicode EA payload" "Windows-final Unicode xattr"
+    assert_equal "$edge_final_empty_size" "0" "Windows-final empty xattr size"
+    if xattr -p "$edge_original_empty_name" "$edge_target" >/dev/null 2>&1; then
+        fail "Windows-deleted original empty xattr remains"
+    fi
+    if xattr -p "$edge_macos_empty_name" "$edge_target" >/dev/null 2>&1; then
+        fail "Windows-deleted macOS empty xattr remains"
+    fi
+done
 if xattr -p user.apfswin_delete "$mount_point/MacProof/xattr-roundtrip.txt" >/dev/null 2>&1; then
     fail "Windows-deleted xattr remains"
 fi
@@ -159,6 +180,9 @@ XATTR_VALUE=$xattr_value
 UPDATED_XATTR_VALUE=$updated_xattr
 UPDATED_DIRECTORY_XATTR_VALUE=$updated_directory_xattr
 UPDATED_ROOT_XATTR_VALUE=$updated_root_xattr
+EDGE_UNICODE_FINAL_OK=1
+EDGE_FINAL_EMPTY_OK=1
+EDGE_OLD_EMPTY_DELETIONS_OK=1
 DELETED_XATTR_ABSENT=1
 DELETED_DIRECTORY_XATTR_ABSENT=1
 DELETED_ROOT_XATTR_ABSENT=1

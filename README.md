@@ -72,11 +72,16 @@ Current state:
   retarget, clear, or delete relative and same-volume absolute symbolic links.
   External absolute targets fail closed.
 - WinFsp `GetEa`/`SetEa` callbacks expose APFS extended attributes on regular
-  files, named directories, and the mounted volume root, with printable ASCII
-  names from 1 through 127 bytes and embedded values up to 3,804 bytes. Create,
-  read, restart persistence, update, and delete pass on local images, the
-  physical USB target, and native macOS round trips. Content-critical filesystem
-  attributes remain hidden from this generic interface.
+  files, named directories, and the mounted volume root. Direct Windows EA names
+  use printable ASCII and embedded APFS values are capped at 3,804 bytes. Windows
+  defines zero-length EA sets as deletion and EA names as ASCII, so exact empty
+  APFS values and UTF-8 APFS names use reserved `APFS.XATTR.<BASE32-UTF8>` wire
+  aliases with a version byte. Aliases are transport only; raw APFS probes and
+  macOS see exact original names and values. Create, read, remount persistence,
+  update, and delete pass on local images, the physical USB target, and native
+  macOS round trips. Content-critical filesystem attributes remain hidden from
+  this generic interface. Protocol boundary:
+  [Microsoft FILE_FULL_EA_INFORMATION](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/0eb94f48-6aac-41df-a878-79f4dcfd8989).
 - Copied SAK APFS source is Randy-authored project code imported into this
   repo. Copied source-app license tags and branding notices were removed from
   code/docs per owner direction. Third-party notices remain for Qt, WinFsp, and
@@ -111,7 +116,8 @@ elevated PowerShell:
 ```
 
 From a normal PowerShell, use the guarded launcher. It refuses to start a new
-UAC prompt if one is already pending:
+UAC prompt if one is already pending and uses an encoded PowerShell command so
+raw targets beginning with `\\?\` survive `Start-Process` argument handling:
 
 ```powershell
 .\scripts\start-repair-elevated.ps1
@@ -126,6 +132,8 @@ and installed binary hashes, and writes
 Packaged install/repair resolves Qt DLLs and `platforms\qwindows.dll` from the
 extracted package before using a developer Qt path. Both scripts support
 non-admin `-ValidatePayloadOnly` checks.
+`start-repair-elevated.ps1 -SelfTest` validates encoded target/mount round-trip
+without elevation; release-package verification runs this check automatically.
 
 To pin one known mount to read-only during repair, pass both values:
 
@@ -185,9 +193,10 @@ kernel plus `fsck_apfs`, mutates it again through WinFsp on Windows, then runs a
 second native macOS mount and `fsck_apfs` pair. File, named-directory, and
 volume-root xattrs are mutated in both directions; root basic-info and POSIX
 security metadata are also validated through raw APFS inode state and native
-macOS presentation. Latest sanitized evidence:
+macOS presentation. Empty xattr values and exact UTF-8 names are included on
+regular files, named directories, and the volume root. Latest sanitized evidence:
 `docs/evidence/apple-vm-roundtrip-2026-08-17.json` and
-`docs/evidence/root-metadata-2026-08-17.json`.
+`docs/evidence/xattr-edge-cases-2026-08-17.json`.
 
 Serial-pinned normal-user USB write/delete proof is current. The verifier keeps
 file actions in the non-admin parent process, uses service IPC only to switch
@@ -268,7 +277,7 @@ Automatic service start, saved `R:` mount restoration across a VM reboot,
 exact file hash and read-only enforcement, one interactive tray process with
 `Open` and `Exit`, and packaged uninstall with no product residue. WinFsp and the
 APFS fixture remain after uninstall. Sanitized proof is tracked at
-`docs\evidence\windows-vm-install-lifecycle-2026-08-16.json`. The host PC was not
+`docs\evidence\windows-vm-install-lifecycle-2026-08-17.json`. The host PC was not
 rebooted.
 
 License notices:
@@ -330,20 +339,23 @@ Verified USB evidence:
   `current_installed_mount_only`, and only mutates its own
   `sak-mounted-file-actions-proof-*` directory on the selected mount during full
   proof. It verifies file, named-directory, and volume-root EA
-  create/read/update/delete in addition to file namespace, metadata, ACL, and
-  symbolic-link operations. It also performs a transient volume-root basic-info
+  create/read/update/delete, including exact UTF-8 names and zero-byte values,
+  in addition to file namespace, metadata, ACL, and symbolic-link operations.
+  It also performs a transient volume-root basic-info
   proof and restores original Windows-visible times and flags within Windows
   `FILETIME` precision; it does not modify physical root security.
   Current certification wraps this proof in an explicit temporary writable
   policy window, then restores the selected mount read-only afterward.
-- Current volume-root USB proof completed at `2026-08-17T00:26:02Z` against the
+- Current volume-root USB proof completed at `2026-08-17T00:58:11Z` against the
   serial-pinned Partition 1 target at `V:`. Root basic-info accepted fixed
   create/access/write times plus Hidden/Archive flags, then restored original
   Windows-visible values within 100 ns `FILETIME` precision. Root,
-  named-directory, and file EA create/read/update/delete also passed; proof tree
+  named-directory, and file EA create/read/update/delete also passed for direct,
+  exact UTF-8-name, and empty-value cases; proof tree
   was removed; root security was not changed; `V:` was restored read-only with
   raw writes disabled. Artifact:
-  `artifacts\certification\root-metadata-certification.json`.
+  `artifacts\usb-rw\usb-mounted-ea-edge-proof.json` and sanitized evidence
+  `docs\evidence\xattr-edge-cases-2026-08-17.json`.
 - Current media layout changed during SAK recertification. On
   `2026-08-16T17:22:33Z`, the same pinned 31,042,043,904-byte USB disk exposed
   Windows MBR Partition 1 at `V:` while the exact target probe identified a
@@ -444,8 +456,11 @@ Verified USB evidence:
   basic-info is changed and restored within Windows 100 ns timestamp precision,
   while physical root security is intentionally left unchanged. Remaining public-RW
   gates are physical raw-media power-loss recovery, real surprise-unplug,
-  hard-link creation, zero-length EA values, and non-ASCII-name/large
-  stream-backed xattr mutation.
+  hard-link creation, large stream-backed xattr mutation, and policy-specific
+  filesystem-owned xattr handling. APFS xattr names that differ only by case
+  also need an explicit collision policy because Windows EA lookup is
+  case-insensitive. Empty values and exact UTF-8 xattr names are now certified
+  through the reserved Windows EA transport.
   Existing Apple hard links remain preserved across Windows mutations. WinFsp's
   current public protocol still marks hard-link support unimplemented, so native
   hard-link creation requires a WinFsp protocol/kernel fork or another filesystem

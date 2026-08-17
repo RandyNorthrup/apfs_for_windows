@@ -183,8 +183,15 @@ try {
     }
 }
 
+$packageHashAfter = if (Test-Path -LiteralPath $resolvedPackage -PathType Leaf) {
+    (Get-FileHash -LiteralPath $resolvedPackage -Algorithm SHA256).Hash
+} else {
+    $null
+}
+$packageUnchanged = $packageHashAfter -and ($packageHashAfter -ieq $packageHash)
 $ok = -not $errorText -and $install.ok -and $postReboot.ok -and $uninstall.ok -and
     $vmRestarted -and $remoteCleaned -and
+    $packageUnchanged -and
     ([string]$install.package_sha256 -ieq $packageHash) -and
     ([string]$postReboot.package_sha256 -ieq $packageHash) -and
     ([string]$uninstall.package_sha256 -ieq $packageHash)
@@ -197,6 +204,8 @@ $result = [ordered]@{
     credential_material_recorded = $false
     vm_endpoint = "$VmUser@$VmHost"
     package_sha256 = $packageHash
+    package_sha256_after = $packageHashAfter
+    package_source_unchanged = [bool]$packageUnchanged
     package_path = $resolvedPackage
     fixture_sha256 = (Get-FileHash -LiteralPath $resolvedFixture -Algorithm SHA256).Hash
     install = $install

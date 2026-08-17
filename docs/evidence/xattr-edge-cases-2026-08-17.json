@@ -1,0 +1,72 @@
+{
+  "component": "apfs_for_windows",
+  "check": "empty_and_unicode_xattr_transport",
+  "ok": true,
+  "no_host_reboot_performed": true,
+  "windows_protocol_boundary": {
+    "direct_ea_names": "Printable ASCII Windows EA names excluding reserved characters and APFS.XATTR prefix.",
+    "zero_length_set": "Windows FILE_FULL_EA_INFORMATION defines zero EaValueLength as deletion.",
+    "alias_prefix": "APFS.XATTR.",
+    "alias_name_payload": "Uppercase RFC 4648 Base32 of exact APFS UTF-8 name, without padding.",
+    "alias_value_payload": "Version byte 0x01 followed by exact APFS value; marker-only represents an empty value.",
+    "on_disk_alias_leak": false
+  },
+  "copied_core": {
+    "ctest_release": "12/12",
+    "explicit_empty_value_distinct_from_remove": true,
+    "exact_utf8_name_roundtrip": true,
+    "preserved_across_unrelated_cow_mutation": true,
+    "explicit_delete_verified": true
+  },
+  "local_winfs_remount": {
+    "ok": true,
+    "no_admin_required": true,
+    "targets": [
+      "regular_file",
+      "named_directory",
+      "volume_root"
+    ],
+    "empty_value_bytes": 0,
+    "exact_unicode_name": "user.apfswin_résumé_日本語",
+    "first_mount_read": true,
+    "remount_persistence": true,
+    "update": true,
+    "delete": true,
+    "raw_probe_exact_name_and_value": true
+  },
+  "native_macos_roundtrip": {
+    "ok": true,
+    "windows_empty_and_unicode_read_by_macos": true,
+    "macos_empty_and_unicode_read_by_windows": true,
+    "windows_final_empty_and_unicode_read_by_macos": true,
+    "windows_deleted_old_empty_xattrs_absent_on_macos": true,
+    "native_fsck_passes": 4,
+    "completed_utc": "2026-08-17T01:00:28.7996293Z"
+  },
+  "physical_usb": {
+    "ok": true,
+    "disk_number": 1,
+    "partition_number": 1,
+    "serial": "067D19C65080",
+    "physical_size_bytes": 31042043904,
+    "apfs_container_bytes": 536870912,
+    "target": "\\\\?\\GLOBALROOT\\Device\\Harddisk1\\Partition1",
+    "mount": "V:",
+    "exact_unicode_name": "user.apfswin_usb_résumé_日本語",
+    "regular_file": true,
+    "named_directory": true,
+    "volume_root": true,
+    "empty_value_bytes": 0,
+    "update": true,
+    "delete": true,
+    "proof_tree_removed": true,
+    "final_read_only": true,
+    "final_allow_raw_writes": false,
+    "completed_utc": "2026-08-17T00:58:11.0428266Z"
+  },
+  "remaining_scope": [
+    "large APFS stream-backed xattr mutation",
+    "content-critical filesystem-owned xattrs through the generic Windows EA callback",
+    "case-sensitive APFS xattr names that collide under Windows case-insensitive EA lookup"
+  ]
+}

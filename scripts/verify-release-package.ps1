@@ -42,6 +42,30 @@ function Invoke-PayloadValidation {
     }
 }
 
+function Invoke-RepairLauncherSelfTest {
+    param([Parameter(Mandatory = $true)][string]$ScriptPath)
+    $testTarget = "\\?\GLOBALROOT\Device\Harddisk1\Partition1"
+    $raw = @(powershell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath -SelfTest `
+        -UsbTarget $testTarget -UsbMount V: 2>&1)
+    $exitCode = $LASTEXITCODE
+    $json = $null
+    $errorText = $null
+    try {
+        $json = ($raw -join "`n") | ConvertFrom-Json
+    } catch {
+        $errorText = $_.Exception.Message
+    }
+    [ordered]@{
+        name = "repair_elevated_encoded_command"
+        ok = [bool]($exitCode -eq 0 -and $json -and $json.ok -and
+            $json.target_roundtrip -and $json.mount_roundtrip)
+        exit_code = $exitCode
+        result = $json
+        parse_error = $errorText
+        raw = if ($json) { $null } else { $raw -join "`n" }
+    }
+}
+
 $resolvedPackageRoot = Resolve-RepoPath $PackageRoot
 $resolvedOutput = Resolve-RepoPath $OutputPath
 $stageRoot = Join-Path $resolvedPackageRoot "APFS-for-Windows-$Version"
@@ -87,7 +111,10 @@ $installPayload = Invoke-PayloadValidation `
 $repairPayload = Invoke-PayloadValidation `
     -ScriptPath (Join-Path $stageRoot "repair-apfs-for-windows-install.ps1") `
     -Name "repair_payload"
-$ok = $zipExists -and ($missing.Count -eq 0) -and $installPayload.ok -and $repairPayload.ok
+$repairLauncher = Invoke-RepairLauncherSelfTest `
+    -ScriptPath (Join-Path $stageRoot "start-repair-elevated.ps1")
+$ok = $zipExists -and ($missing.Count -eq 0) -and $installPayload.ok -and
+    $repairPayload.ok -and $repairLauncher.ok
 
 $result = [ordered]@{
     component = "apfs_for_windows"
@@ -102,6 +129,7 @@ $result = [ordered]@{
     missing_required_files = @($missing)
     install_payload = $installPayload
     repair_payload = $repairPayload
+    repair_launcher = $repairLauncher
     files = @($fileReports)
     completed_utc = (Get-Date).ToUniversalTime().ToString("o")
 }
