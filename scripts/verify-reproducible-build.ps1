@@ -27,10 +27,13 @@ function Invoke-Checked {
         [Parameter(Mandatory = $true)][string]$WorkingDirectory
     )
     Push-Location $WorkingDirectory
+    $previousPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     try {
         $output = @(& $FilePath @Arguments 2>&1)
         $exitCode = $LASTEXITCODE
     } finally {
+        $ErrorActionPreference = $previousPreference
         Pop-Location
     }
     if ($exitCode -ne 0) {
