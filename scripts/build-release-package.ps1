@@ -59,52 +59,160 @@ function New-DeterministicZip {
         [Parameter(Mandatory = $true)][string]$Destination
     )
 
-    Add-Type -AssemblyName System.IO.Compression
-    $entryTimestamp = [DateTimeOffset]::new(
-        2000, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
     [string[]]$relativePaths = @(Get-ChildItem -LiteralPath $SourceRoot -Recurse -File |
         ForEach-Object {
             $_.FullName.Substring($SourceRoot.Length + 1).Replace("\", "/")
         })
     [Array]::Sort($relativePaths, [StringComparer]::Ordinal)
-    $stream = [IO.File]::Open(
-        $Destination,
-        [IO.FileMode]::CreateNew,
-        [IO.FileAccess]::Write,
-        [IO.FileShare]::None)
-    try {
-        $archive = [IO.Compression.ZipArchive]::new(
-            $stream, [IO.Compression.ZipArchiveMode]::Create, $true)
-        try {
-            foreach ($relativePath in $relativePaths) {
-                # Stored entries avoid runtime-specific Deflate output.
-                $entry = $archive.CreateEntry(
-                    $relativePath, [IO.Compression.CompressionLevel]::NoCompression)
-                $entry.LastWriteTime = $entryTimestamp
-                $entry.ExternalAttributes = 0
-                $sourcePath = Join-Path -Path $SourceRoot `
-                    -ChildPath ($relativePath.Replace("/", "\"))
-                if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
-                    throw "Deterministic archive source file is missing: $relativePath"
-                }
-                $source = [IO.File]::OpenRead($sourcePath)
-                try {
-                    $destinationStream = $entry.Open()
-                    try {
-                        $source.CopyTo($destinationStream)
-                    } finally {
-                        $destinationStream.Dispose()
-                    }
-                } finally {
-                    $source.Dispose()
-                }
-            }
-        } finally {
-            $archive.Dispose()
+    if (-not ("ApfsForWindows.DeterministicStoreZip" -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text;
+
+namespace ApfsForWindows
+{
+    public static class DeterministicStoreZip
+    {
+        private const ushort Utf8Flag = 0x0800;
+        private const ushort DosTime = 0x0000;
+        private const ushort DosDate = 0x2821;
+        private static readonly uint[] CrcTable = CreateCrcTable();
+
+        private sealed class Entry
+        {
+            public byte[] Name;
+            public uint Crc;
+            public uint Size;
+            public uint Offset;
         }
-    } finally {
-        $stream.Dispose()
+
+        public static void Create(string sourceRoot, string destination, string[] relativePaths)
+        {
+            if (relativePaths.Length > ushort.MaxValue)
+                throw new InvalidOperationException("ZIP entry count exceeds the non-ZIP64 limit.");
+
+            string root = Path.GetFullPath(sourceRoot).TrimEnd(
+                Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            var entries = new List<Entry>(relativePaths.Length);
+            using (var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            using (var writer = new BinaryWriter(output, new UTF8Encoding(false), true))
+            {
+                foreach (string relativePath in relativePaths)
+                {
+                    byte[] name = Encoding.UTF8.GetBytes(relativePath);
+                    if (name.Length > ushort.MaxValue)
+                        throw new InvalidOperationException("ZIP entry name is too long: " + relativePath);
+                    string sourcePath = Path.GetFullPath(Path.Combine(
+                        root, relativePath.Replace('/', Path.DirectorySeparatorChar)));
+                    if (!sourcePath.StartsWith(root, StringComparison.OrdinalIgnoreCase) || !File.Exists(sourcePath))
+                        throw new InvalidOperationException("Invalid ZIP source path: " + relativePath);
+                    long length = new FileInfo(sourcePath).Length;
+                    if (length > uint.MaxValue || output.Position > uint.MaxValue)
+                        throw new InvalidOperationException("ZIP64 is required but not supported by this package writer.");
+
+                    uint crc;
+                    using (var input = File.OpenRead(sourcePath))
+                        crc = ComputeCrc32(input);
+                    var entry = new Entry {
+                        Name = name,
+                        Crc = crc,
+                        Size = (uint)length,
+                        Offset = (uint)output.Position
+                    };
+                    entries.Add(entry);
+
+                    writer.Write(0x04034b50u);
+                    writer.Write((ushort)20);
+                    writer.Write(Utf8Flag);
+                    writer.Write((ushort)0);
+                    writer.Write(DosTime);
+                    writer.Write(DosDate);
+                    writer.Write(entry.Crc);
+                    writer.Write(entry.Size);
+                    writer.Write(entry.Size);
+                    writer.Write((ushort)entry.Name.Length);
+                    writer.Write((ushort)0);
+                    writer.Write(entry.Name);
+                    writer.Flush();
+                    using (var input = File.OpenRead(sourcePath))
+                        input.CopyTo(output);
+                }
+
+                if (output.Position > uint.MaxValue)
+                    throw new InvalidOperationException("ZIP64 is required but not supported by this package writer.");
+                uint centralOffset = (uint)output.Position;
+                foreach (Entry entry in entries)
+                {
+                    writer.Write(0x02014b50u);
+                    writer.Write((ushort)20);
+                    writer.Write((ushort)20);
+                    writer.Write(Utf8Flag);
+                    writer.Write((ushort)0);
+                    writer.Write(DosTime);
+                    writer.Write(DosDate);
+                    writer.Write(entry.Crc);
+                    writer.Write(entry.Size);
+                    writer.Write(entry.Size);
+                    writer.Write((ushort)entry.Name.Length);
+                    writer.Write((ushort)0);
+                    writer.Write((ushort)0);
+                    writer.Write((ushort)0);
+                    writer.Write((ushort)0);
+                    writer.Write(0u);
+                    writer.Write(entry.Offset);
+                    writer.Write(entry.Name);
+                }
+                writer.Flush();
+                long centralLength = output.Position - centralOffset;
+                if (centralLength > uint.MaxValue || output.Position > uint.MaxValue)
+                    throw new InvalidOperationException("ZIP64 is required but not supported by this package writer.");
+
+                writer.Write(0x06054b50u);
+                writer.Write((ushort)0);
+                writer.Write((ushort)0);
+                writer.Write((ushort)entries.Count);
+                writer.Write((ushort)entries.Count);
+                writer.Write((uint)centralLength);
+                writer.Write(centralOffset);
+                writer.Write((ushort)0);
+                writer.Flush();
+                output.Flush(true);
+            }
+        }
+
+        private static uint ComputeCrc32(Stream input)
+        {
+            uint crc = 0xffffffffu;
+            var buffer = new byte[1024 * 1024];
+            int count;
+            while ((count = input.Read(buffer, 0, buffer.Length)) > 0)
+                for (int index = 0; index < count; index++)
+                    crc = CrcTable[(crc ^ buffer[index]) & 0xff] ^ (crc >> 8);
+            return ~crc;
+        }
+
+        private static uint[] CreateCrcTable()
+        {
+            var table = new uint[256];
+            for (uint value = 0; value < table.Length; value++)
+            {
+                uint current = value;
+                for (int bit = 0; bit < 8; bit++)
+                    current = (current & 1) != 0 ? 0xedb88320u ^ (current >> 1) : current >> 1;
+                table[value] = current;
+            }
+            return table;
+        }
     }
+}
+"@
+    }
+    [ApfsForWindows.DeterministicStoreZip]::Create(
+        $SourceRoot,
+        $Destination,
+        $relativePaths)
 }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
@@ -345,7 +453,7 @@ $result = [ordered]@{
     zip_sha256 = $zipHash
     deterministic_archive = $true
     archive_compression_method = "store"
-    archive_entry_timestamp_utc = "2000-01-01T00:00:00Z"
+    archive_entry_timestamp = "2000-01-01T00:00:00"
     manifest_serialization = "compact-json-utf8-no-bom-lf"
     file_count = @($stageFiles).Count
     files = @($stageFiles)

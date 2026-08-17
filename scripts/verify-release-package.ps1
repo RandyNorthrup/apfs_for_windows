@@ -99,8 +99,7 @@ function Test-DeterministicArchive {
     )
 
     Add-Type -AssemblyName System.IO.Compression
-    $expectedTimestamp = [DateTimeOffset]::new(
-        2000, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
+    $expectedTimestamp = "2000-01-01T00:00:00"
     [string[]]$expectedPaths = @(Get-ChildItem -LiteralPath $StageRoot -Recurse -File |
         ForEach-Object {
             $_.FullName.Substring($StageRoot.Length + 1).Replace("\", "/")
@@ -140,7 +139,8 @@ function Test-DeterministicArchive {
                 [ordered]@{
                     relative_path = $entry.FullName
                     stored = [bool]($entry.CompressedLength -eq $entry.Length)
-                    timestamp_ok = [bool]($entry.LastWriteTime -eq $expectedTimestamp)
+                    timestamp_ok = [bool]($entry.LastWriteTime.ToString(
+                        "yyyy-MM-ddTHH:mm:ss") -ceq $expectedTimestamp)
                     hash_ok = [bool]($stageHash -and $entryHash -ceq $stageHash)
                 }
             })
