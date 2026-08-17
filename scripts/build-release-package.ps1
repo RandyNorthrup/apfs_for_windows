@@ -21,10 +21,10 @@ $Version = Get-ApfsProjectVersion -ExplicitVersion $Version -CallerRoot $PSScrip
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string]$Path)
     if ([IO.Path]::IsPathRooted($Path)) {
-        return $Path
+        return [IO.Path]::GetFullPath($Path)
     }
     $repoRoot = Split-Path -Parent $PSScriptRoot
-    return Join-Path $repoRoot $Path
+    return [IO.Path]::GetFullPath((Join-Path $repoRoot $Path))
 }
 
 function Copy-RequiredFile {
