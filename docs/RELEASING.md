@@ -26,10 +26,11 @@ Test Signing and must never be labeled production-ready.
 `VERSION` is the single package version source. Release tag must be:
 
 ```text
-v<VERSION>
+apfs-for-windows-v<VERSION>
 ```
 
-For version `0.1.0`, use tag `v0.1.0`. The workflow rejects mismatched tags.
+For version `0.1.0`, use tag `apfs-for-windows-v0.1.0`. The workflow rejects
+mismatched or product-ambiguous tags.
 
 ## Pre-Release Checklist
 

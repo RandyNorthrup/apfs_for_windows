@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     tags:
-      - "v*"
+      - "apfs-for-windows-v*"
 
 permissions:
   contents: write
@@ -49,7 +49,7 @@ jobs:
             throw "Release notes are missing: $notes"
           }
           if ($env:GITHUB_REF_TYPE -eq 'tag') {
-            $expectedTag = "v$version"
+            $expectedTag = "apfs-for-windows-v$version"
             if ($env:GITHUB_REF_NAME -cne $expectedTag) {
               throw "Release tag must be $expectedTag, got $env:GITHUB_REF_NAME"
             }
