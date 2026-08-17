@@ -1318,7 +1318,23 @@ bool serviceMayEnableRawWritesForTarget(const QString& target, QString* error = 
 QJsonObject mountHealthJson(const MountConfig& mount) {
     const QString root = mountRootPath(mount.mount);
     const DWORD attributes = GetFileAttributesW(reinterpret_cast<LPCWSTR>(root.utf16()));
-    const bool exists = attributes != INVALID_FILE_ATTRIBUTES;
+    const bool rootExists = attributes != INVALID_FILE_ATTRIBUTES;
+    wchar_t volumeName[MAX_PATH + 1]{};
+    wchar_t fileSystemName[MAX_PATH + 1]{};
+    const bool volumeInfoAvailable =
+        rootExists &&
+        GetVolumeInformationW(reinterpret_cast<LPCWSTR>(root.utf16()),
+                              volumeName,
+                              MAX_PATH,
+                              nullptr,
+                              nullptr,
+                              nullptr,
+                              fileSystemName,
+                              MAX_PATH);
+    const QString fileSystem =
+        volumeInfoAvailable ? QString::fromWCharArray(fileSystemName) : QString();
+    const bool exists = volumeInfoAvailable &&
+                        fileSystem.compare(QStringLiteral("APFS"), Qt::CaseInsensitive) == 0;
     QJsonArray entries;
     if (exists) {
         const QFileInfoList infos = QDir(root).entryInfoList(
@@ -1336,6 +1352,11 @@ QJsonObject mountHealthJson(const MountConfig& mount) {
                        {QStringLiteral("allow_raw_writes"), mount.allow_raw_writes},
                        {QStringLiteral("enabled"), mount.enabled},
                        {QStringLiteral("exists"), exists},
+                       {QStringLiteral("root_exists"), rootExists},
+                       {QStringLiteral("mount_collision"), rootExists && !exists},
+                       {QStringLiteral("file_system"), fileSystem},
+                       {QStringLiteral("volume_label"),
+                        volumeInfoAvailable ? QString::fromWCharArray(volumeName) : QString()},
                        {QStringLiteral("entries"), entries}};
 }
 

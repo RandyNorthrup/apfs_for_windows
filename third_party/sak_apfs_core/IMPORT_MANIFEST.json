@@ -66,7 +66,7 @@
       "relative_path": "include\\sak\\partition_apfs_writer.h",
       "source_blob_oid": "707547f346cce0bf01474bbc0fc064ed9f190279",
       "source_sha256": "B72F63502A6DB21559D342436F05570AD800B68FE7C5606FCA2DF730134A7661",
-      "vendored_sha256": "DDA6EB49721C7354E86D5EF187DCA8BD68DEA62B604A3B88FD941B88A892D8D8",
+      "vendored_sha256": "329898716B3333B9EF64FB8BF22BF9881E99BDCDA5D4C20236B0D283BB2B9B32",
       "locally_modified": true
     },
     {
@@ -115,14 +115,14 @@
       "relative_path": "src\\core\\partition_apfs_file_system_reader.cpp",
       "source_blob_oid": "97142cf0ad63e90a890ed4ed6f931437cee48cdf",
       "source_sha256": "2370AFF6C1FB6F1231325D9A87C60E1442208C83D287C5237A16729915D895AF",
-      "vendored_sha256": "4FDB843DC35D19C9CE7F9EF0CC6FFB82EC4BF6BFAC6E7AC91803E3378C262905",
+      "vendored_sha256": "1FA0C6DFB3A936BB0F91FA3ACAB3D464D2A6CF5F4A19B120BFD7FAD4981BC309",
       "locally_modified": true
     },
     {
       "relative_path": "src\\core\\partition_apfs_writer.cpp",
       "source_blob_oid": "aaa04f6e5694d2384a65440c95be057eb0ad8612",
       "source_sha256": "946A69139203F5C8004800CC1406BA4DD4AE36E1A820A2C16AAD521EBCCC1F5F",
-      "vendored_sha256": "792ADBD340F662923A1C63E77EB260F4B7AF278B55BEC0319EBA10117AD6A0CA",
+      "vendored_sha256": "7C9D5DC9299CC6AE1020E94B97FB6F133C2FC061CFE243736C26EA7D925217F9",
       "locally_modified": true
     },
     {

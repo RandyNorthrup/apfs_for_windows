@@ -86,6 +86,16 @@ function Test-TimeNear {
     [Math]::Abs(($Actual.ToUniversalTime() - $Expected.ToUniversalTime()).TotalSeconds) -le 1
 }
 
+function Get-BytesSha256 {
+    param([Parameter(Mandatory = $true)][byte[]]$Value)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        ([BitConverter]::ToString($sha256.ComputeHash($Value))).Replace("-", "")
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
 function Get-EaEdgeState {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -246,6 +256,15 @@ $expectedText = "APFS metadata and symbolic-link proof"
 $eaName = "user.apfswin_windows"
 $eaFirstText = "Windows EA first payload"
 $eaUpdatedText = "Windows EA updated payload"
+$streamEaName = "user.apfswin_stream"
+$streamEaFirstValue = [byte[]]::new(9001)
+$streamEaUpdatedValue = [byte[]]::new(12017)
+for ($index = 0; $index -lt $streamEaFirstValue.Length; $index++) {
+    $streamEaFirstValue[$index] = [byte](($index * 37 + 11) -band 0xff)
+}
+for ($index = 0; $index -lt $streamEaUpdatedValue.Length; $index++) {
+    $streamEaUpdatedValue[$index] = [byte](($index * 53 + 29) -band 0xff)
+}
 $directoryEaName = "user.apfswin_directory"
 $directoryEaFirstText = "Windows directory EA first payload"
 $directoryEaUpdatedText = "Windows directory EA updated payload"
@@ -274,6 +293,9 @@ $readonlyWriteBlocked = $false
 $eaFirstState = $null
 $eaSecondState = $null
 $eaDeleteState = $null
+$streamEaFirstState = $null
+$streamEaSecondState = $null
+$streamEaDeleteState = $null
 $directoryEaFirstState = $null
 $directoryEaSecondState = $null
 $directoryEaDeleteState = $null
@@ -364,6 +386,15 @@ try {
     $eaFirstState = [pscustomobject][ordered]@{
         name = $eaName
         value = [Text.Encoding]::UTF8.GetString([byte[]]$eaFirstRead)
+    }
+    Set-NativeExtendedAttribute -Path $file -Name $streamEaName -Value $streamEaFirstValue
+    $streamEaFirstRead = [byte[]](
+        Get-NativeExtendedAttribute -Path $file -Name $streamEaName)
+    $streamEaFirstState = [pscustomobject][ordered]@{
+        name = $streamEaName
+        bytes = $streamEaFirstRead.Length
+        sha256 = Get-BytesSha256 -Value $streamEaFirstRead
+        expected_sha256 = Get-BytesSha256 -Value $streamEaFirstValue
     }
     $edgeEaFirstState = [pscustomobject][ordered]@{
         empty_set_wire_name = Get-NativeExtendedAttributeWireName `
@@ -474,6 +505,24 @@ try {
     $eaDeleteState = [pscustomobject][ordered]@{
         absent = [bool](-not (Test-NativeExtendedAttribute -Path $file -Name $eaName))
     }
+    $streamEaPersistentRead = [byte[]](
+        Get-NativeExtendedAttribute -Path $file -Name $streamEaName)
+    Set-NativeExtendedAttribute -Path $file -Name $streamEaName -Value $streamEaUpdatedValue
+    $streamEaUpdatedRead = [byte[]](
+        Get-NativeExtendedAttribute -Path $file -Name $streamEaName)
+    $streamEaSecondState = [pscustomobject][ordered]@{
+        persisted_bytes = $streamEaPersistentRead.Length
+        persisted_sha256 = Get-BytesSha256 -Value $streamEaPersistentRead
+        expected_persisted_sha256 = Get-BytesSha256 -Value $streamEaFirstValue
+        updated_bytes = $streamEaUpdatedRead.Length
+        updated_sha256 = Get-BytesSha256 -Value $streamEaUpdatedRead
+        expected_updated_sha256 = Get-BytesSha256 -Value $streamEaUpdatedValue
+    }
+    Remove-NativeExtendedAttribute -Path $file -Name $streamEaName
+    $streamEaDeleteState = [pscustomobject][ordered]@{
+        absent = [bool](-not (
+            Test-NativeExtendedAttribute -Path $file -Name $streamEaName))
+    }
     $edgeEaPersistentState = [pscustomobject][ordered]@{
         root = Get-EaEdgeState -Path $mountRoot -EmptyName $emptyEaName `
             -UnicodeName $unicodeEaName
@@ -564,6 +613,7 @@ $debugJson = if (Test-Path -LiteralPath $debugPath) {
 } else { $null }
 $debugFile = if ($debugJson) { $debugJson.whole_device_debug_file } else { $null }
 $debugEa = @($debugFile.xattrs | Where-Object { $_.name -eq $eaName })
+$streamDebugEa = @($debugFile.xattrs | Where-Object { $_.name -eq $streamEaName })
 $directoryDebugJson = if (Test-Path -LiteralPath $directoryDebugPath) {
     Get-Content -LiteralPath $directoryDebugPath -Raw | ConvertFrom-Json
 } else { $null }
@@ -630,6 +680,13 @@ $ok = -not $errorText -and $firstState.hidden -and $firstState.archive -and
     ($eaSecondState.persisted_value -eq $eaFirstText) -and
     ($eaSecondState.updated_value -eq $eaUpdatedText) -and
     $eaDeleteState.absent -and
+    ($streamEaFirstState.bytes -eq $streamEaFirstValue.Length) -and
+    ($streamEaFirstState.sha256 -eq $streamEaFirstState.expected_sha256) -and
+    ($streamEaSecondState.persisted_bytes -eq $streamEaFirstValue.Length) -and
+    ($streamEaSecondState.persisted_sha256 -eq $streamEaSecondState.expected_persisted_sha256) -and
+    ($streamEaSecondState.updated_bytes -eq $streamEaUpdatedValue.Length) -and
+    ($streamEaSecondState.updated_sha256 -eq $streamEaSecondState.expected_updated_sha256) -and
+    $streamEaDeleteState.absent -and
     ($directoryEaFirstState.value -eq $directoryEaFirstText) -and
     ($directoryEaSecondState.persisted_value -eq $directoryEaFirstText) -and
     ($directoryEaSecondState.updated_value -eq $directoryEaUpdatedText) -and
@@ -657,6 +714,8 @@ $ok = -not $errorText -and $firstState.hidden -and $firstState.archive -and
     (Test-ApfsEaEdgeState $edgeApfsState.file `
         ([Text.Encoding]::UTF8.GetByteCount($unicodeEaFirstText))) -and
     ($debugEa.Count -eq 1) -and
+    ($streamDebugEa.Count -eq 1) -and -not $streamDebugEa[0].embedded -and
+    ([uint64]$streamDebugEa[0].size_bytes -eq [uint64]$streamEaFirstValue.Length) -and
     (Test-TimeNear ([datetime]$secondState.creation_utc) $creation) -and
     (Test-TimeNear ([datetime]$secondState.access_utc) $access) -and
     (Test-TimeNear ([datetime]$secondState.write_utc) $write) -and
@@ -704,6 +763,9 @@ $result = [pscustomobject][ordered]@{
     extended_attribute_first_mount = $eaFirstState
     extended_attribute_second_mount = $eaSecondState
     extended_attribute_delete = $eaDeleteState
+    stream_extended_attribute_first_mount = $streamEaFirstState
+    stream_extended_attribute_second_mount = $streamEaSecondState
+    stream_extended_attribute_delete = $streamEaDeleteState
     directory_extended_attribute_first_mount = $directoryEaFirstState
     directory_extended_attribute_second_mount = $directoryEaSecondState
     directory_extended_attribute_delete = $directoryEaDeleteState

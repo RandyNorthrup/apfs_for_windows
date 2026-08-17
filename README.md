@@ -12,10 +12,12 @@ Current state:
   inside this repository.
 - Apple LZFSE/LZVN reference code is vendored under `third_party/lzfse` for
   APFS compression paths.
-- Stock WinFsp runtime/SDK is supported for development mounts. Native Windows
-  hard-link transport is pinned to public fork
+- Stock WinFsp runtime/SDK remains supported for development mounts. Release
+  packages carry the dedicated side-by-side runtime/driver from public fork
   `RandyNorthrup/winfsp-apfs` commit
   `b4650b187f2d0d95a660bb687177f67efc07588f` through one submodule on `main`.
+  The dedicated driver coexists with stock WinFsp and transports native Windows
+  hard-link create requests.
 - `apfs_probe` can probe APFS images/raw devices, list the root directory, and
   read files by APFS path with SHA-256 output. It also has `--debug-file` for
   APFS inode/xattr/extent diagnostics on one path.
@@ -45,8 +47,10 @@ Current state:
   local service IPC path so installed CLI/manager requests can update safe mount
   policy through the service instead of writing ProgramData directly.
 - `apfs_mount_service --health` reports installed service state, startup type,
-  service recovery policy, configured mounts, visible root entries, and mount
-  availability as JSON.
+  service recovery policy, configured mounts, APFS filesystem identity, volume
+  label, visible root entries, and drive-letter collisions as JSON. An unrelated
+  volume occupying a configured letter is reported as a collision, not an APFS
+  mount.
 - Whole-device and zero-offset partition aliases are canonicalized to one raw
   region and one worker. The exact partition target wins, preventing two drive
   letters from mounting the same writable APFS bytes concurrently.
@@ -56,7 +60,7 @@ Current state:
 - `apfs_mount_manager` is now a Qt Widgets manager UI with an accessible mount
   table, refresh/discover/open/change-letter/read-write-mode/enable-disable/unmount/copy
   actions, raw health JSON view, and `--status`/`--self-test` verification
-  modes.
+  modes. `--help`, `-h`, and `/?` print usage and exit without starting the UI.
 - `apfs_mount_manager` creates a persistent tray icon using a stacked `AP` over
   `FS` icon. Right-click menu includes `Open` and `Exit`; closing the window no
   longer exits the app. Install/repair registers a machine-wide logon task plus
@@ -68,7 +72,8 @@ Current state:
   streaming nested file write, raw file rename/move/delete, and preservation of
   an existing 16 MiB file. It also creates an Apple-compatible symbolic link and
   proves a later copy-on-write mutation preserves its directory type, inode mode,
-  and `com.apple.fs.symlink` xattr.
+  and `com.apple.fs.symlink` xattr. It also creates, replaces, deletes, recreates,
+  and converts a regular-file data-stream xattr while preserving file content.
 - Writable mounts commit Windows basic-info changes on files, named directories,
   and the volume root to APFS create/access/modify/change times and BSD flags.
   Windows security changes on all three persist APFS POSIX mode, owner, and group while a
@@ -78,15 +83,19 @@ Current state:
   retarget, clear, or delete relative and same-volume absolute symbolic links.
   External absolute targets fail closed.
 - WinFsp `GetEa`/`SetEa` callbacks expose APFS extended attributes on regular
-  files, named directories, and the mounted volume root. Direct Windows EA names
-  use printable ASCII and embedded APFS values are capped at 3,804 bytes. Windows
-  defines zero-length EA sets as deletion and EA names as ASCII, so exact empty
-  APFS values and UTF-8 APFS names use reserved `APFS.XATTR.<BASE32-UTF8>` wire
-  aliases with a version byte. Aliases are transport only; raw APFS probes and
-  macOS see exact original names and values. Create, read, remount persistence,
-  update, and delete pass on local images, the physical USB target, and native
-  macOS round trips. Content-critical filesystem attributes remain hidden from
-  this generic interface. Protocol boundary:
+  files, named directories, and the mounted volume root. Values through 3,804
+  bytes remain embedded. Larger regular-file values transparently use APFS data
+  streams up to the Windows EA wire limit: 65,535 bytes for direct printable
+  ASCII names and 65,534 bytes for aliased names. Directory and volume-root
+  mutations remain embedded-only. Windows defines zero-length EA sets as
+  deletion and EA names as ASCII, so exact empty APFS values and UTF-8 APFS names
+  use reserved `APFS.XATTR.<BASE32-UTF8>` wire aliases with a version byte.
+  Aliases are transport only; raw APFS probes and macOS see exact original names
+  and values. Create, read, remount persistence, update, and delete pass on local
+  images and the physical USB target; embedded values also pass native macOS
+  round trips. Content-critical attributes remain hidden and all recovered APFS
+  `FILE_SYSTEM_OWNED` attributes fail closed on generic mutation. Protocol
+  boundary:
   [Microsoft FILE_FULL_EA_INFORMATION](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/0eb94f48-6aac-41df-a878-79f4dcfd8989).
 - Copied SAK APFS source is Randy-authored project code imported into this
   repo. Copied source-app license tags and branding notices were removed from
@@ -276,21 +285,24 @@ Build a release ZIP without installing:
 .\scripts\verify-release-package.ps1
 ```
 
-This stages `artifacts\package\APFS-for-Windows-0.1.0`, creates
+Production packaging is the default and requires a production-signed fork
+driver. It stages `artifacts\package\APFS-for-Windows-0.1.0`, creates
 `artifacts\package\APFS-for-Windows-0.1.0.zip`, and verifies the required
-binaries, Qt runtime files, install/repair/uninstall scripts, README, license
-notices, APFS/WinFsp provenance, build metadata, payload manifest, and SHA-256
-list. Package verification also rehashes every manifest entry and runs install
-and repair payload-only validation from the staged directory.
+binaries, bundled side-by-side WinFsp DLL/driver, Qt runtime files,
+install/repair/uninstall scripts, README, license notices, APFS/WinFsp
+provenance, build metadata, payload manifest, and SHA-256 list. Package
+verification also rehashes every manifest entry and runs install and repair
+payload-only validation from the staged directory.
 
-Historical Windows 11 VM lifecycle certification covers clean package install,
-Automatic service start, saved `R:` mount restoration across a VM reboot,
-exact file hash and read-only enforcement, one interactive tray process with
-`Open` and `Exit`, and packaged uninstall with no product residue. WinFsp and the
-APFS fixture remain after uninstall. Sanitized proof is tracked at
-`docs\evidence\windows-vm-install-lifecycle-2026-08-17.json`; it applies only to
-package hash `D2F1D99D...E49B`, not the current build. No VM action is part of
-repository or local production-readiness checks.
+The explicit test path uses `-DriverSigningMode Test -AllowTestSignedDriver` on
+both scripts and emits `APFS-for-Windows-0.1.0-test-signed.zip`. The current test
+candidate passed clean Windows 11 VM install, Automatic service and mount
+persistence across VM reboot, exact installed runtime hashes, one interactive
+stacked `AP`/`FS` tray icon with `Open` and `Exit`, and uninstall with no product
+or dedicated-driver residue. This closes the development lifecycle gate only;
+production still requires Microsoft-compatible driver signing and
+Authenticode-signed application binaries. Exact package identity is recorded
+outside the archive in `docs\evidence\winfsp-hardlink-package-2026-08-17.json`.
 
 License notices:
 
@@ -306,8 +318,9 @@ WinFsp prerequisite:
 .\scripts\verify-winfsp-prerequisite.ps1
 ```
 
-This verifies WinFsp registry registration, SDK header/import library, runtime
-DLL/driver, and that the built worker reports WinFsp support enabled.
+This development check verifies stock WinFsp registry registration, SDK
+header/import library, runtime DLL/driver, and worker support. Release packages
+instead install and verify their pinned dedicated side-by-side runtime.
 
 Copied APFS core source boundary:
 
@@ -326,9 +339,9 @@ Repository and production gates:
 .\scripts\verify-production-readiness.ps1
 ```
 
-Strict production readiness intentionally fails while signing, exact-package
-lifecycle, native hard-link runtime, and physical fault-recovery evidence remain
-open.
+Strict production readiness intentionally fails while production driver/app
+signing, production-signed exact-package lifecycle, physical fault recovery,
+remaining APFS policy, and release-governance evidence remain open.
 
 Verified USB evidence:
 
@@ -381,6 +394,15 @@ Verified USB evidence:
   raw writes disabled. Artifact:
   `artifacts\usb-rw\usb-mounted-ea-edge-proof.json` and sanitized evidence
   `docs\evidence\xattr-edge-cases-2026-08-17.json`.
+- Latest current-build USB proof completed at `2026-08-17T04:27:41Z` against
+  the exact Partition 1 target at `V:`. The installed and build workers matched
+  SHA-256 `9F01F88C...125B2`. Non-admin create/read/rename/overwrite/delete,
+  metadata, ACL, symlink, file/directory/root EAs, cleanup, and exact 9,001-byte
+  then 12,017-byte regular-file stream EA replacement/deletion passed. The proof
+  directory was removed and root metadata was restored. Per owner direction,
+  the pinned test mount remains explicitly read/write with raw writes enabled;
+  newly discovered mounts still default read-only. Sanitized evidence:
+  `docs\evidence\stream-xattr-usb-2026-08-17.json`.
 - Current media layout changed during SAK recertification. On
   `2026-08-16T17:22:33Z`, the same pinned 31,042,043,904-byte USB disk exposed
   Windows MBR Partition 1 at `V:` while the exact target probe identified a
@@ -399,10 +421,11 @@ Verified USB evidence:
   `\\.\PhysicalDrive1` and Partition 1 resolve to `disk:1:offset:0`, while only
   exact Partition 1 remains configured at `V:` across service resync intervals.
 - `scripts\verify-current-apfs-state.ps1` generated
-  `artifacts\state\current-apfs-state.json`. Current preflight is `ready=true`:
-  no UAC prompt is pending, installed binaries match the current build, stale
-  proof entries are gone, service is Automatic/running, and selected USB mount is restored
-  read-only with `allow_raw_writes=false`.
+  `artifacts\state\current-apfs-state.json`. The latest direct proof independently
+  confirms the installed worker matches the current build, stale proof entries
+  are gone, and the service is Automatic/running. The pinned `V:` test mapping
+  is intentionally writable; this does not change the default read-only policy
+  for newly discovered media.
 - `artifacts\usb-rw\icons8-jester-debug-before-delete.json` captured the stale
   `icons8-jester.svg` inode before cleanup. `apfs_probe --debug-file` showed no
   decmpfs/resource-fork payload and an impossible APFS extent block
@@ -479,22 +502,24 @@ Verified USB evidence:
   physical USB. Volume-root basic-info and POSIX security persistence also pass
   copied-core, local remount, and native macOS round-trip lanes; physical USB
   basic-info is changed and restored within Windows 100 ns timestamp precision,
-  while physical root security is intentionally left unchanged. Remaining public-RW
-  gates are physical raw-media power-loss recovery, real surprise-unplug,
-  hard-link creation, large stream-backed xattr mutation, and policy-specific
-  filesystem-owned xattr handling. APFS xattr names that differ only by case
-  also need an explicit collision policy because Windows EA lookup is
-  case-insensitive. Empty values and exact UTF-8 xattr names are now certified
-  through the reserved Windows EA transport.
+  while physical root security is intentionally left unchanged. Native hard-link
+  creation and regular-file stream-backed xattr mutation are implemented and
+  development-certified. Remaining public-RW gates are physical raw-media
+  power-loss recovery, real surprise-unplug, directory/root stream-backed xattr
+  policy, and sealed/FileVault/filesystem-owned mutation policy beyond the
+  current fail-closed behavior. APFS xattr names that differ only by case also
+  need an explicit collision policy because Windows EA lookup is case-insensitive.
+  Empty values and exact UTF-8 xattr names are certified through the reserved
+  Windows EA transport.
   Existing Apple hard links remain preserved across Windows mutations. Copied
   APFS core now creates arbitrary-depth hard links and preserves sibling IDs.
   Public `winfsp-apfs` fork transports native Windows hard-link requests and
-  reports link counts; WDK kernel tests, exact runtime installation proof, and
-  production driver signing remain open.
+  reports link counts. Exact test-driver/DLL/worker runtime proof and package
+  install/reboot/uninstall now pass; production driver signing remains open.
 
 Verified copied-core mutation evidence:
 
-- Current `ctest --test-dir build -C Release --output-on-failure` passes 12/12,
+- Current `ctest --test-dir build -C Release --output-on-failure` passes 13/13,
   including `apfs_service_partition_parser`, `apfs_service_control_self_test`,
   `apfs_service_ipc_self_test`, and `apfs_service_log_rotation`.
   These exercise service-side safe config requests, set-enabled/remove behavior,
@@ -512,7 +537,9 @@ Verified copied-core mutation evidence:
   create, and file-backed raw directory create/delete while preserving a 16 MiB
   existing file through the vendored `third_party\sak_apfs_core` code. It also
   creates, reads, preserves across unrelated COW mutations, and deletes a
-  volume-root embedded xattr.
+  volume-root embedded xattr. Regular-file xattr coverage includes data-stream
+  create/read at 9,001 bytes, replacement at 12,017 bytes, deletion, recreation,
+  and conversion back to embedded storage.
 - `apfs_core_selftest` also composes interrupted checkpoint images from the real
   pre-commit and committed bytes. The current insert changes 18 blocks: readers
   select the old generation before checkpoint-map publication, the old generation

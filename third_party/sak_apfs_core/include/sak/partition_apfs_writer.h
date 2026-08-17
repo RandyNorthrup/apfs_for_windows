@@ -437,8 +437,9 @@ struct PartitionApfsImageFileRenameCommitRequest {
     PartitionApfsWriteOptions options;
 };
 
-/// @brief One embedded APFS extended-attribute change. Removal is explicit so
-///        an empty value remains representable to non-Windows callers.
+/// @brief One APFS extended-attribute change. Values that fit in an fs-tree
+///        record are embedded; larger values use an APFS data stream. Removal
+///        is explicit so an empty value remains representable.
 struct PartitionApfsXattrMutation {
     QString name;
     QByteArray value;
@@ -464,8 +465,9 @@ struct PartitionApfsInodeMetadataUpdate {
     uint32_t owner_id{0};
     bool update_group_id{false};
     uint32_t group_id{0};
-    // Atomic embedded-xattr edits. Data-stream xattrs and content-critical
-    // filesystem-owned names fail closed; unrelated attributes are preserved.
+    // Atomic xattr edits. Large values transparently use data streams.
+    // Content-critical and filesystem-owned attributes fail closed; unrelated
+    // attributes are preserved.
     QVector<PartitionApfsXattrMutation> xattr_mutations;
     // Non-empty converts an empty regular file to an Apple symbolic link or
     // updates an existing link. Empty converts a symbolic link to an empty

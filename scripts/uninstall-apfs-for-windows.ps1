@@ -10,6 +10,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "lib\winfsp-runtime.ps1")
 
 function Assert-Admin {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -61,6 +62,9 @@ if (Test-Path -LiteralPath $serviceExe -PathType Leaf) {
 }
 
 $serviceAfter = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'" -ErrorAction SilentlyContinue
+$driverBefore = Get-ApfsWinFspDriverService
+$driverUninstall = Unregister-ApfsWinFspRuntime -RuntimeRoot $InstallRoot
+$driverAfter = Get-ApfsWinFspDriverService
 $managerPath = [IO.Path]::GetFullPath((Join-Path $InstallRoot "apfs_mount_manager.exe"))
 $managerProcessesBefore = @(Get-CimInstance Win32_Process -Filter "Name='apfs_mount_manager.exe'" -ErrorAction SilentlyContinue |
     Where-Object {
@@ -117,12 +121,13 @@ if ($startupTaskBefore) {
 }
 $startupTaskRemoved = $null -eq (Get-ScheduledTask -TaskName $startupTaskName -ErrorAction SilentlyContinue)
 $installRootRemoved = $false
-if ($RemoveFiles -and (Test-Path -LiteralPath $InstallRoot)) {
+if ($RemoveFiles -and -not $driverAfter -and (Test-Path -LiteralPath $InstallRoot)) {
     Remove-Item -LiteralPath $InstallRoot -Recurse -Force
     $installRootRemoved = -not (Test-Path -LiteralPath $InstallRoot)
 }
 
-$ok = $null -eq $serviceAfter -and $startMenuRemoved -and $registryRemoved -and
+$ok = $null -eq $serviceAfter -and $null -eq $driverAfter -and
+    $driverUninstall.unregistered -and $startMenuRemoved -and $registryRemoved -and
     $startupEntryRemoved -and $startupTaskRemoved -and $managerProcessesAfter.Count -eq 0 -and
     ((-not $RemoveFiles) -or $installRootRemoved)
 $result = [ordered]@{
@@ -153,6 +158,19 @@ $result = [ordered]@{
         $null
     }
     service_after_present = $null -ne $serviceAfter
+    winfsp_driver_before = if ($driverBefore) {
+        [ordered]@{
+            name = [string]$driverBefore.Name
+            state = [string]$driverBefore.State
+            start_mode = [string]$driverBefore.StartMode
+            path = [string]$driverBefore.PathName
+        }
+    } else {
+        $null
+    }
+    winfsp_driver_uninstall = $driverUninstall
+    winfsp_driver_after_present = $null -ne $driverAfter
+    reboot_required = [bool]($driverAfter -or $driverUninstall.reboot_required)
     service_uninstall_result = $uninstallResult
     fallback_used = [bool]$fallbackUsed
     started_utc = $startedUtc.ToString("o")

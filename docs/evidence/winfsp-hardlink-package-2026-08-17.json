@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "date": "2026-08-17",
+  "classification": "development-certified-not-production-ready",
+  "source_boundary": {
+    "upstream_sak_modified": false,
+    "copied_core_only": true
+  },
+  "winfsp_fork": {
+    "repository": "https://github.com/RandyNorthrup/winfsp-apfs.git",
+    "commit": "b4650b187f2d0d95a660bb687177f67efc07588f",
+    "upstream_repository": "https://github.com/winfsp/winfsp.git",
+    "side_by_side_coexistence": true
+  },
+  "clean_windows_vm_build": {
+    "ok": true,
+    "toolchain": "Visual Studio 2022 and WDK 10.0.26100",
+    "configuration": "Release x64",
+    "driver_signing": "WDK test certificate",
+    "winfsp_dll_sha256": "607E2E4A889385DFAD5EBCACC03BB8566F1FF89BFA07BC9D95B5633C3FCB30C2",
+    "winfsp_sys_sha256": "FC84B1024457A02A581A71C1DE82179A21CA1845233FBEB9448F53FC08A0E8A1",
+    "winfsp_lib_sha256": "4157016EF18AF73D121691A0C82109B85300504CA9F8E4E12DAF80CD5673352E"
+  },
+  "native_hardlink_transport": {
+    "ok": true,
+    "stock_and_apfs_drivers_running_together": true,
+    "file_supports_hard_links": true,
+    "root_create_api": "CreateHardLinkW/FileLinkInformation",
+    "nested_create_api": "NtSetInformationFile/FileLinkInformationEx",
+    "stable_file_id": 16,
+    "link_count_lifecycle": [1, 2, 3, 2, 1],
+    "mutation_visible_through_alias": true,
+    "clean_dll_unregister": true,
+    "proof_sha256": "99D28C7EB5540263E65B284BA386CF8DA17ECC5B188886D50E1686B4B0744B8E"
+  },
+  "native_macos_hardlink_roundtrip": {
+    "ok": true,
+    "stable_inode": 22,
+    "initial_link_count": 3,
+    "post_delete_link_count": 2,
+    "post_remount_link_count": 2,
+    "fsck_apfs_passes": 3,
+    "final_payload_sha256": "15DA8E34298403E6D03C3E0FF47C65877E60D008C8BEABA10317D6C9D7B4B108"
+  },
+  "test_package": {
+    "name": "APFS-for-Windows-0.1.0-test-signed.zip",
+    "sha256": "170E6EA93F6F54293BA449E71058A7C4424B7D1C8076DBD768E88D660F67EABC",
+    "file_count": 31,
+    "driver_signing_mode": "test",
+    "production_ready": false,
+    "payload_verification_ok": true
+  },
+  "windows_vm_package_lifecycle": {
+    "ok": true,
+    "package_source_unchanged": true,
+    "install_ok": true,
+    "automatic_service": true,
+    "dedicated_driver_running": true,
+    "installed_hashes_match": true,
+    "mount_persisted_after_vm_reboot": true,
+    "tray_icon_available": true,
+    "tray_context_actions": ["Open", "Exit"],
+    "single_interactive_tray_process": true,
+    "uninstall_ok": true,
+    "driver_unregistered_without_additional_reboot": true,
+    "product_residue": false,
+    "host_rebooted": false
+  },
+  "physical_usb_mounted_file_actions": {
+    "ok": true,
+    "scope": "current_build_installed_mount",
+    "current_build_worker_certified": true,
+    "worker_sha256": "9F01F88C8D7FD7FA6169A03D778FBC4F2340724E5167DE88F7A2657FB20125B2",
+    "exact_test_package_worker_certified": false,
+    "operations": [
+      "create",
+      "read",
+      "rename",
+      "overwrite",
+      "delete",
+      "basic-info",
+      "extended-attributes",
+      "regular-file-stream-extended-attributes",
+      "symbolic-link",
+      "acl-query",
+      "cleanup"
+    ],
+    "proof_residue": false,
+    "final_mount_read_only": false,
+    "final_raw_writes_enabled": true,
+    "owner_pinned_test_policy": true,
+    "host_rebooted": false
+  },
+  "open_production_blockers": [
+    "Microsoft-compatible production driver signing",
+    "Authenticode application signing",
+    "retained clean CI and kernel-test provenance",
+    "production-signed exact-package lifecycle",
+    "surprise-unplug and interrupted-write physical recovery",
+    "directory/root stream-xattr, case-collision, and protected-filesystem policy",
+    "release governance"
+  ]
+}

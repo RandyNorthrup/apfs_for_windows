@@ -1406,13 +1406,16 @@ struct ApfsDataExtent {
 
 // A large extended attribute stored as a DATA STREAM (macOS uses this above the ~3804-byte embedded
 // limit): a j_xattr_dstream naming a fresh object id whose file-extent records hold the value's
-// blocks. Recovered from a real Apple file so an in-place mutation preserves it byte-for-byte.
+// blocks. Recovered streams preserve their records; pendingValue marks a new/replaced stream whose
+// blocks are assigned and written by the metadata commit.
 struct ApfsDataStreamXattr {
     QByteArray name;
     uint64_t objId{0};
     uint64_t size{0};         // the attribute value's byte length (dstream size)
     uint64_t allocedSize{0};  // block-aligned allocated bytes (dstream alloced_size)
     QVector<ApfsDataExtent> extents;
+    uint16_t flags{kApfsXattrDataStream};
+    QByteArray pendingValue;
 };
 
 // One recovered extended attribute: its name (trailing NUL stripped), original
@@ -2110,13 +2113,17 @@ constexpr qsizetype kApfsXattrDstreamAllocedOffset = 16;
 // default_crypto_id, total_bytes_written, total_bytes_read } }. The data-stream extents
 // are owned by xattr_obj_id. default_crypto_id stays 0 (the certified unencrypted-volume
 // value, matching the inode dstream xfield and file-extent crypto id).
-QByteArray resourceForkXattrValue(uint64_t xattrObjId, uint64_t sizeBytes, uint64_t allocedBytes) {
+QByteArray resourceForkXattrValue(uint64_t xattrObjId,
+                                  uint64_t sizeBytes,
+                                  uint64_t allocedBytes,
+                                  uint16_t flags = kApfsXattrDataStream) {
     QByteArray xdata(kApfsXattrDstreamBytes, '\0');
     writeLe64(&xdata, 0, xattrObjId);
     writeLe64(&xdata, 8, sizeBytes);      // apfs_dstream.size (blob byte length)
     writeLe64(&xdata, 16, allocedBytes);  // apfs_dstream.alloced_size (block-aligned)
     writeLe64(&xdata, 32, sizeBytes);     // apfs_dstream.total_bytes_written
-    return xattrEmbeddedValue(kApfsXattrDataStream, xdata);
+    flags = static_cast<uint16_t>((flags & ~kApfsXattrDataEmbedded) | kApfsXattrDataStream);
+    return xattrEmbeddedValue(flags, xdata);
 }
 
 QByteArray fileExtentKey(uint64_t privateId, uint64_t logicalByteOffset) {
@@ -2299,7 +2306,7 @@ void appendResourceForkRecords(QVector<ApfsBtreeKeyValue>* records,
 void appendDataStreamXattrs(QVector<ApfsBtreeKeyValue>* records, const ApfsRootFilePayload& file) {
     for (const ApfsDataStreamXattr& sx : file.streamXattrs) {
         records->append({xattrKey(file.fileId, sx.name),
-                         resourceForkXattrValue(sx.objId, sx.size, sx.allocedSize)});
+                         resourceForkXattrValue(sx.objId, sx.size, sx.allocedSize, sx.flags)});
         for (const ApfsDataExtent& extent : sx.extents) {
             records->append(
                 {fileExtentKey(sx.objId, extent.logicalBlock * kSupportedApfsBlockSizeBytes),
@@ -8337,7 +8344,8 @@ ApfsDataStreamXattr recoveredStreamXattr(const ApfsRecoveredXattr& x) {
     return {.name = x.name,
             .objId = le64(x.xdata, 0),
             .size = le64(x.xdata, kApfsXattrDstreamSizeOffset),
-            .allocedSize = le64(x.xdata, kApfsXattrDstreamAllocedOffset)};
+            .allocedSize = le64(x.xdata, kApfsXattrDstreamAllocedOffset),
+            .flags = x.flags};
 }
 
 // Carry a preserved com.apple.decmpfs attribute: an EMBEDDED value holds the 16-byte header
@@ -19349,6 +19357,12 @@ struct ApfsInodeMetadataRequest {
     PartitionApfsInodeMetadataUpdate metadata;
 };
 
+struct ApfsInodeMetadataDataPlan {
+    uint64_t nextObjId{0};
+    uint64_t nextObjIdDelta{0};
+    QVector<ApfsDataExtent> releasedStreamExtents;
+};
+
 void applyCommonInodeMetadata(const PartitionApfsInodeMetadataUpdate& update,
                               uint16_t* inodeMode,
                               uint64_t* createdTimeNs,
@@ -19447,9 +19461,10 @@ bool applySymbolicLinkMetadata(const PartitionApfsInodeMetadataUpdate& update,
     return true;
 }
 
-bool applyEmbeddedXattrMetadata(const PartitionApfsInodeMetadataUpdate& update,
-                                ApfsRootFilePayload* file,
-                                QStringList* blockers) {
+bool applyFileXattrMetadata(const PartitionApfsInodeMetadataUpdate& update,
+                            ApfsRootFilePayload* file,
+                            ApfsInodeMetadataDataPlan* dataPlan,
+                            QStringList* blockers) {
     if (update.xattr_mutations.isEmpty()) {
         return true;
     }
@@ -19469,19 +19484,33 @@ bool applyEmbeddedXattrMetadata(const PartitionApfsInodeMetadataUpdate& update,
                                  .arg(mutation.name));
             return false;
         }
-        if (mutation.value.size() > kApfsXattrMaxEmbeddedSize) {
+        const auto preserved = std::find_if(
+            file->preservedXattrs.cbegin(),
+            file->preservedXattrs.cend(),
+            [&name](const ApfsRecoveredXattr& xattr) { return xattr.name == name; });
+        const auto stream = std::find_if(
+            file->streamXattrs.cbegin(),
+            file->streamXattrs.cend(),
+            [&name](const ApfsDataStreamXattr& xattr) { return xattr.name == name; });
+        if ((preserved != file->preservedXattrs.cend() &&
+             (preserved->flags & kApfsXattrFileSystemOwned) != 0) ||
+            (stream != file->streamXattrs.cend() &&
+             (stream->flags & kApfsXattrFileSystemOwned) != 0)) {
             blockers->append(QStringLiteral(
-                "APFS inode-metadata-commit: xattr '%1' exceeds the embedded-value limit")
+                "APFS inode-metadata-commit: filesystem-owned xattr '%1' is not mutable")
                                  .arg(mutation.name));
             return false;
         }
-        if (std::any_of(file->streamXattrs.cbegin(),
-                        file->streamXattrs.cend(),
-                        [&name](const ApfsDataStreamXattr& xattr) { return xattr.name == name; })) {
-            blockers->append(QStringLiteral(
-                "APFS inode-metadata-commit: data-stream xattr '%1' is preserved but not mutable")
-                                 .arg(mutation.name));
-            return false;
+
+        uint16_t preservedFlags = kApfsXattrDataEmbedded;
+        if (preserved != file->preservedXattrs.cend()) {
+            preservedFlags = preserved->flags;
+        }
+        uint64_t streamObjId = 0;
+        if (stream != file->streamXattrs.cend()) {
+            preservedFlags = stream->flags;
+            streamObjId = stream->objId;
+            dataPlan->releasedStreamExtents += stream->extents;
         }
 
         updated.erase(std::remove_if(updated.begin(),
@@ -19495,9 +19524,50 @@ bool applyEmbeddedXattrMetadata(const PartitionApfsInodeMetadataUpdate& update,
                                return xattr.name == name;
                            }),
             file->preservedXattrs.end());
-        if (!mutation.remove) {
-            updated.append({name, mutation.value});
+        file->streamXattrs.erase(
+            std::remove_if(file->streamXattrs.begin(),
+                           file->streamXattrs.end(),
+                           [&name](const ApfsDataStreamXattr& xattr) {
+                               return xattr.name == name;
+                           }),
+            file->streamXattrs.end());
+        if (mutation.remove) {
+            continue;
         }
+        if (mutation.value.size() <= kApfsXattrMaxEmbeddedSize) {
+            const uint16_t flags = static_cast<uint16_t>(
+                (preservedFlags & ~kApfsXattrDataStream) | kApfsXattrDataEmbedded);
+            if (flags == kApfsXattrDataEmbedded) {
+                updated.append({name, mutation.value});
+            } else {
+                file->preservedXattrs.append({name, flags, mutation.value});
+            }
+            continue;
+        }
+
+        if (streamObjId == 0) {
+            if (dataPlan->nextObjId == 0 ||
+                dataPlan->nextObjIdDelta >=
+                    std::numeric_limits<uint64_t>::max() - dataPlan->nextObjId) {
+                blockers->append(QStringLiteral(
+                    "APFS inode-metadata-commit: no object id is available for xattr '%1'")
+                                     .arg(mutation.name));
+                return false;
+            }
+            streamObjId = dataPlan->nextObjId + dataPlan->nextObjIdDelta;
+            ++dataPlan->nextObjIdDelta;
+        }
+        const uint64_t blocks = roundedBlockCount(
+            static_cast<uint64_t>(mutation.value.size()), kSupportedApfsBlockSizeBytes);
+        file->streamXattrs.append(
+            {.name = name,
+             .objId = streamObjId,
+             .size = static_cast<uint64_t>(mutation.value.size()),
+             .allocedSize = blocks * kSupportedApfsBlockSizeBytes,
+             .extents = {{0, 0, blocks}},
+             .flags = static_cast<uint16_t>((preservedFlags & ~kApfsXattrDataEmbedded) |
+                                            kApfsXattrDataStream),
+             .pendingValue = mutation.value});
     }
     file->xattrs = std::move(updated);
     return true;
@@ -19525,12 +19595,25 @@ bool applyEmbeddedDirectoryXattrMetadata(const PartitionApfsInodeMetadataUpdate&
                                  .arg(mutation.name));
             return false;
         }
+        const auto existing = std::find_if(
+            updated.cbegin(), updated.cend(), [&name](const ApfsRecoveredXattr& xattr) {
+                return xattr.name == name;
+            });
+        if (existing != updated.cend() &&
+            (existing->flags & kApfsXattrFileSystemOwned) != 0) {
+            blockers->append(QStringLiteral(
+                "APFS inode-metadata-commit: filesystem-owned xattr '%1' is not mutable")
+                                 .arg(mutation.name));
+            return false;
+        }
         if (mutation.value.size() > kApfsXattrMaxEmbeddedSize) {
             blockers->append(QStringLiteral(
                 "APFS inode-metadata-commit: xattr '%1' exceeds the embedded-value limit")
                                  .arg(mutation.name));
             return false;
         }
+        const uint16_t preservedFlags =
+            existing == updated.cend() ? kApfsXattrDataEmbedded : existing->flags;
         updated.erase(std::remove_if(updated.begin(),
                                      updated.end(),
                                      [&name](const ApfsRecoveredXattr& xattr) {
@@ -19538,7 +19621,11 @@ bool applyEmbeddedDirectoryXattrMetadata(const PartitionApfsInodeMetadataUpdate&
                                      }),
                       updated.end());
         if (!mutation.remove) {
-            updated.append({name, kApfsXattrDataEmbedded, mutation.value});
+            updated.append(
+                {name,
+                 static_cast<uint16_t>((preservedFlags & ~kApfsXattrDataStream) |
+                                       kApfsXattrDataEmbedded),
+                 mutation.value});
         }
     }
     directory->xattrs = std::move(updated);
@@ -19548,6 +19635,7 @@ bool applyEmbeddedDirectoryXattrMetadata(const PartitionApfsInodeMetadataUpdate&
 bool applyInodeMetadata(const ApfsInodeMetadataRequest& request,
                         QVector<ApfsRootFilePayload>* files,
                         QVector<ApfsRootDirectoryPayload>* directories,
+                        ApfsInodeMetadataDataPlan* dataPlan,
                         QStringList* blockers) {
     if (request.targetIsDirectory) {
         if (request.metadata.update_symbolic_link_target) {
@@ -19589,7 +19677,7 @@ bool applyInodeMetadata(const ApfsInodeMetadataRequest& request,
                                      &file.ownerId,
                                      &file.groupId);
             if (!applySymbolicLinkMetadata(request.metadata, &file, blockers) ||
-                !applyEmbeddedXattrMetadata(request.metadata, &file, blockers)) {
+                !applyFileXattrMetadata(request.metadata, &file, dataPlan, blockers)) {
                 return false;
             }
             if (file.specialMode != 0) {
@@ -19613,6 +19701,73 @@ bool applyInodeMetadata(const ApfsInodeMetadataRequest& request,
     return false;
 }
 
+uint64_t pendingXattrDataBlocks(const QVector<ApfsRootFilePayload>& files,
+                                uint32_t blockSize) {
+    uint64_t blocks = 0;
+    for (const ApfsRootFilePayload& file : files) {
+        for (const ApfsDataStreamXattr& xattr : file.streamXattrs) {
+            if (!xattr.pendingValue.isEmpty()) {
+                blocks += roundedBlockCount(
+                    static_cast<uint64_t>(xattr.pendingValue.size()), blockSize);
+            }
+        }
+    }
+    return blocks;
+}
+
+qsizetype pendingXattrStreamCount(const QVector<ApfsRootFilePayload>& files) {
+    qsizetype count = 0;
+    for (const ApfsRootFilePayload& file : files) {
+        count += static_cast<qsizetype>(std::count_if(
+            file.streamXattrs.cbegin(),
+            file.streamXattrs.cend(),
+            [](const ApfsDataStreamXattr& xattr) { return !xattr.pendingValue.isEmpty(); }));
+    }
+    return count;
+}
+
+bool materializePendingXattrStreams(const ApfsFsCommitContext& ctx,
+                                    const QVector<uint64_t>& dataBlocks,
+                                    QVector<ApfsRootFilePayload>* files,
+                                    QStringList* blockers) {
+    qsizetype cursor = 0;
+    for (ApfsRootFilePayload& file : *files) {
+        for (ApfsDataStreamXattr& xattr : file.streamXattrs) {
+            if (xattr.pendingValue.isEmpty()) {
+                continue;
+            }
+            const uint64_t blockCount = roundedBlockCount(
+                static_cast<uint64_t>(xattr.pendingValue.size()), ctx.geometry.blockSize);
+            if (blockCount > static_cast<uint64_t>(std::numeric_limits<qsizetype>::max()) ||
+                cursor > dataBlocks.size() ||
+                static_cast<qsizetype>(blockCount) > dataBlocks.size() - cursor) {
+                blockers->append(QStringLiteral(
+                    "APFS inode-metadata-commit: xattr data allocation is incomplete"));
+                return false;
+            }
+            const QVector<uint64_t> streamBlocks =
+                dataBlocks.mid(cursor, static_cast<qsizetype>(blockCount));
+            xattr.extents = groupContiguousRuns(streamBlocks);
+            xattr.size = static_cast<uint64_t>(xattr.pendingValue.size());
+            xattr.allocedSize = blockCount * ctx.geometry.blockSize;
+            if (!writeApfsFileDataBlocks(ctx.image,
+                                         ctx.geometry,
+                                         streamBlocks,
+                                         ApfsFileDataSource::fromBytes(xattr.pendingValue),
+                                         blockers)) {
+                return false;
+            }
+            cursor += static_cast<qsizetype>(blockCount);
+        }
+    }
+    if (cursor != dataBlocks.size()) {
+        blockers->append(QStringLiteral(
+            "APFS inode-metadata-commit: xattr data allocation has unused blocks"));
+        return false;
+    }
+    return true;
+}
+
 bool commitInPlaceInodeMetadata(QIODevice* image,
                                 const ApfsInodeMetadataRequest& request,
                                 ApfsInPlaceCheckpointResult* result,
@@ -19626,8 +19781,53 @@ bool commitInPlaceInodeMetadata(QIODevice* image,
             {ctx.image, ctx.geometry, ctx.chain}, request.existingFiles, &files, blockers)) {
         return false;
     }
+    QByteArray volume(ctx.geometry.blockSize, '\0');
+    if (!readApfsRepairBlock(ctx.image, ctx.geometry, ctx.chain.volSb, &volume, blockers)) {
+        return false;
+    }
+    ApfsInodeMetadataDataPlan dataPlan{
+        .nextObjId = le64(volume, kApfsVolumeNextObjectIdOffset)};
     QVector<ApfsRootDirectoryPayload> directories = request.existingDirectories;
-    if (!applyInodeMetadata(request, &files, &directories, blockers)) {
+    if (!applyInodeMetadata(request, &files, &directories, &dataPlan, blockers)) {
+        return false;
+    }
+    ApfsDivergeState diverge;
+    if (!computeDivergeState(ctx, &diverge, blockers)) {
+        return false;
+    }
+    const QVector<uint64_t> freedDataBlocks =
+        planPatchOldExtents(ctx, dataPlan.releasedStreamExtents, &diverge);
+    const uint64_t newDataBlocks = pendingXattrDataBlocks(files, ctx.geometry.blockSize);
+    const qsizetype newStreamCount = pendingXattrStreamCount(files);
+    const bool cowExtentRef = newDataBlocks != 0 || !dataPlan.releasedStreamExtents.isEmpty();
+
+    QVector<ApfsFsTreeNode> probeNodes;
+    if (!buildFsTreeNodes({ctx.geometry.blockSize,
+                           files,
+                           directories,
+                           ctx.firstLeafOid,
+                           ctx.chain.rootTreeOid},
+                          &probeNodes,
+                          blockers)) {
+        return false;
+    }
+    const qsizetype estimatedExtentRecords =
+        (diverge.active ? diverge.liveExtentRefRecords.size()
+                        : collectExtentRefRecords(ctx.geometry.blockSize, files).size()) +
+        newStreamCount;
+    ApfsInsertLayout layout;
+    if (!reserveInsertLayout(ctx,
+                             {.nodeCount = probeNodes.size(),
+                              .volMappingCount =
+                                  probeNodes.size() + diverge.retainedMappings.size(),
+                              .extentRefRecords = estimatedExtentRecords,
+                              .dataBlocks = newDataBlocks,
+                              .cowExtentRef = cowExtentRef},
+                             &layout,
+                             blockers)) {
+        return false;
+    }
+    if (!materializePendingXattrStreams(ctx, layout.dataBlockList, &files, blockers)) {
         return false;
     }
     QVector<ApfsFsTreeNode> fsNodes;
@@ -19640,28 +19840,39 @@ bool commitInPlaceInodeMetadata(QIODevice* image,
                           blockers)) {
         return false;
     }
-    QVector<uint64_t> newBlocks;
-    uint64_t chunk1Bitmap = 0;
-    if (!allocateFsCommitBlocks(
-            ctx, {fsNodes.size(), 0, 0}, &newBlocks, &chunk1Bitmap, blockers)) {
+    if (fsNodes.size() != probeNodes.size()) {
+        blockers->append(QStringLiteral(
+            "APFS inode-metadata-commit: fs-tree grew past the reserved node count after xattr "
+            "allocation"));
         return false;
     }
-    ApfsDivergeState diverge;
-    if (!computeDivergeState(ctx, &diverge, blockers)) {
+    extendDivergeExtentRecords(ctx, files, layout.dataBlockList, &diverge);
+    const qsizetype actualExtentRecords =
+        diverge.active ? diverge.liveExtentRefRecords.size()
+                       : collectExtentRefRecords(ctx.geometry.blockSize, files).size();
+    const qsizetype actualExtentSlots =
+        cowExtentRef
+            ? extentRefTreeBlockCount(actualExtentRecords, ctx.geometry.blockSize)
+            : 0;
+    if (actualExtentSlots != layout.extentRefBlocks.size()) {
+        blockers->append(QStringLiteral(
+            "APFS inode-metadata-commit: extent-ref tree grew past the reserved block count "
+            "after xattr allocation"));
         return false;
     }
     return finalizeFsCommit({.ctx = ctx,
                              .newXid = ctx.live.xid + 1,
                              .fsNodes = fsNodes,
-                             .newBlocks = newBlocks,
+                             .newBlocks = layout.newBlocks,
                              .files = files,
-                             .extentRefNew = 0,
-                             .freedDataBlocks = {},
-                             .dataBlocksNew = 0,
+                             .extentRefNew = layout.extentRefBlocks.value(0),
+                             .extentRefBlocks = layout.extentRefBlocks,
+                             .freedDataBlocks = freedDataBlocks,
+                             .dataBlocksNew = static_cast<int64_t>(newDataBlocks),
                              .fileCountDelta = 0,
                              .directoryCountDelta = 0,
-                             .nextObjIdDelta = 0,
-                             .chunk1BitmapBlock = chunk1Bitmap,
+                             .nextObjIdDelta = dataPlan.nextObjIdDelta,
+                             .chunk1BitmapBlock = layout.chunk1BitmapBlock,
                              .diverge = diverge},
                             result,
                             blockers);

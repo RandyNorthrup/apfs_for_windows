@@ -14,11 +14,13 @@ param(
     [int]$TimeoutSeconds = 60,
     [string]$OutputPath = "artifacts\repair\install-repair-proof.json",
     [switch]$SkipWinFspCheck,
+    [switch]$AllowTestSignedDriver,
     [switch]$ValidatePayloadOnly
 )
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "lib\project-version.ps1")
+. (Join-Path $PSScriptRoot "lib\winfsp-runtime.ps1")
 $AppVersion = Get-ApfsProjectVersion -ExplicitVersion $AppVersion -CallerRoot $PSScriptRoot
 
 if ([string]::IsNullOrWhiteSpace($BuildDir)) {
@@ -418,7 +420,12 @@ if ($ValidatePayloadOnly) {
         @("apfs_winfs_worker.exe", (Join-Path $resolvedBuild "apfs_winfs_worker.exe")),
         @("apfs_mount_manager.exe", (Join-Path $resolvedBuild "apfs_mount_manager.exe")),
         @("apfs_probe.exe", (Join-Path $resolvedBuild "apfs_probe.exe")),
+        @("winfsp-x64.dll", (Join-Path $resolvedBuild "winfsp-x64.dll")),
+        @("winfsp-x64.sys", (Join-Path $resolvedBuild "winfsp-x64.sys")),
+        @("winfsp.sxs", (Join-Path $resolvedBuild "winfsp.sxs")),
+        @("winfsp-driver.json", (Join-Path $resolvedBuild "winfsp-driver.json")),
         @("uninstall-apfs-for-windows.ps1", (Join-Path $PSScriptRoot "uninstall-apfs-for-windows.ps1")),
+        @("lib\winfsp-runtime.ps1", (Join-Path $PSScriptRoot "lib\winfsp-runtime.ps1")),
         @("Qt6Core.dll", (Join-Path $qtRuntimeRoot "Qt6Core.dll")),
         @("Qt6Gui.dll", (Join-Path $qtRuntimeRoot "Qt6Gui.dll")),
         @("Qt6Network.dll", (Join-Path $qtRuntimeRoot "Qt6Network.dll")),
@@ -433,16 +440,29 @@ if ($ValidatePayloadOnly) {
         }
     })
     $missingPayload = @($payloadFiles | Where-Object { -not $_.exists } | ForEach-Object { $_.name })
+    $winFspPayload = $null
+    $winFspError = $null
+    if ($missingPayload.Count -eq 0) {
+        try {
+            $winFspPayload = Test-ApfsWinFspRuntimePayload `
+                -RuntimeRoot $resolvedBuild `
+                -AllowTestSignedDriver:$AllowTestSignedDriver
+        } catch {
+            $winFspError = $_.Exception.Message
+        }
+    }
     $payloadResult = [ordered]@{
         component = "apfs_for_windows"
         check = "repair_payload"
-        ok = [bool]($missingPayload.Count -eq 0)
+        ok = [bool]($missingPayload.Count -eq 0 -and $winFspPayload -and -not $winFspError)
         validation_only = $true
         no_admin_required = $true
         build_dir = [string]$resolvedBuild
         qt_runtime_root = $qtRuntimeRoot
         qt_platform_source = $qtPlatformSource
         missing_payload = @($missingPayload)
+        winfsp_runtime = $winFspPayload
+        winfsp_error = $winFspError
         files = @($payloadFiles)
     }
     $payloadResult | ConvertTo-Json -Depth 6
@@ -463,23 +483,9 @@ if ($serviceCimBefore) {
     $servicePidBefore = [int]$serviceCimBefore.ProcessId
 }
 
-if (-not $SkipWinFspCheck) {
-    $winFspRoots = @(
-        (Join-Path $env:ProgramFiles "WinFsp"),
-        (Join-Path ${env:ProgramFiles(x86)} "WinFsp")
-    ) | Where-Object { $_ }
-    $winFspFound = $false
-    foreach ($root in $winFspRoots) {
-        if ((Test-Path -LiteralPath (Join-Path $root "bin\winfsp-x64.dll") -PathType Leaf) -or
-            (Test-Path -LiteralPath (Join-Path $root "inc\winfsp\winfsp.h") -PathType Leaf)) {
-            $winFspFound = $true
-            break
-        }
-    }
-    if (-not $winFspFound) {
-        throw "WinFsp is required before APFS volumes can mount in Explorer."
-    }
-}
+$winFspPayload = Test-ApfsWinFspRuntimePayload `
+    -RuntimeRoot $resolvedBuild `
+    -AllowTestSignedDriver:$AllowTestSignedDriver
 
 New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
 
@@ -495,6 +501,15 @@ $managerCleanup = Stop-InstalledManagerProcesses -InstallPath $InstallRoot -Time
 if (-not $managerCleanup.all_stopped) {
     throw "Installed APFS mount manager is still running after stop request."
 }
+$existingDriver = Get-ApfsWinFspDriverService
+if ($existingDriver) {
+    $existingRuntimeRoot = Get-ApfsWinFspServiceRuntimeRoot
+    $driverRemoval = Unregister-ApfsWinFspRuntime -RuntimeRoot $existingRuntimeRoot `
+        -TimeoutSeconds $TimeoutSeconds
+    if (-not $driverRemoval.unregistered) {
+        throw "The APFS WinFsp driver could not unload; restart Windows and run repair again."
+    }
+}
 
 $binaries = @(
     "apfs_mount_service.exe",
@@ -506,6 +521,25 @@ foreach ($binary in $binaries) {
     Copy-RequiredFile -Source (Join-Path $resolvedBuild $binary) -Destination (Join-Path $InstallRoot $binary)
 }
 Copy-RequiredFile -Source (Join-Path $PSScriptRoot "uninstall-apfs-for-windows.ps1") -Destination (Join-Path $InstallRoot "uninstall-apfs-for-windows.ps1")
+foreach ($winFspFile in @("winfsp-x64.dll", "winfsp-x64.sys", "winfsp.sxs", "winfsp-driver.json")) {
+    Copy-RequiredFile -Source (Join-Path $resolvedBuild $winFspFile) `
+        -Destination (Join-Path $InstallRoot $winFspFile)
+}
+$winFspCertificate = Join-Path $resolvedBuild "winfsp-x64.cer"
+if (Test-Path -LiteralPath $winFspCertificate -PathType Leaf) {
+    Copy-RequiredFile -Source $winFspCertificate `
+        -Destination (Join-Path $InstallRoot "winfsp-x64.cer")
+}
+$installLib = Join-Path $InstallRoot "lib"
+New-Item -ItemType Directory -Force -Path $installLib | Out-Null
+Copy-RequiredFile -Source (Join-Path $PSScriptRoot "lib\winfsp-runtime.ps1") `
+    -Destination (Join-Path $installLib "winfsp-runtime.ps1")
+$installedWinFspPayload = Test-ApfsWinFspRuntimePayload `
+    -RuntimeRoot $InstallRoot `
+    -AllowTestSignedDriver:$AllowTestSignedDriver
+$driverRegistration = Register-ApfsWinFspRuntime `
+    -RuntimeRoot $InstallRoot `
+    -TimeoutSeconds $TimeoutSeconds
 
 foreach ($qtDll in $qtDlls) {
     Copy-RequiredFile -Source (Join-Path $qtRuntimeRoot $qtDll) -Destination (Join-Path $InstallRoot $qtDll)
@@ -530,6 +564,13 @@ if ($existingService) {
 $recoveryPolicy = Set-ServiceRecoveryPolicy -Name $ServiceName
 $startMenuProof = Install-StartMenuEntries -Root $StartMenuDir -InstallPath $InstallRoot
 $registryProof = Install-UninstallRegistryEntry -InstallPath $InstallRoot -Version $AppVersion
+$uninstallKey = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\APFS for Windows"
+New-ItemProperty -Path $uninstallKey -Name WinFspDriverService `
+    -Value $driverRegistration.service_name -PropertyType String -Force | Out-Null
+New-ItemProperty -Path $uninstallKey -Name WinFspForkCommit `
+    -Value $installedWinFspPayload.fork_commit -PropertyType String -Force | Out-Null
+New-ItemProperty -Path $uninstallKey -Name DriverSigningMode `
+    -Value $installedWinFspPayload.driver_signing_mode -PropertyType String -Force | Out-Null
 $managerStartupProof = Install-ManagerStartupEntry -InstallPath $InstallRoot
 
 if ([string]::IsNullOrWhiteSpace($UsbTarget) -xor [string]::IsNullOrWhiteSpace($UsbMount)) {
@@ -574,6 +615,8 @@ if (-not [string]::IsNullOrWhiteSpace($UsbTarget)) {
 }
 
 $serviceCimAfter = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'" -ErrorAction Stop
+$driverCimAfter = Get-CimInstance Win32_SystemDriver `
+    -Filter "Name='WinFsp+apfs-main'" -ErrorAction Stop
 $binaryReports = @()
 foreach ($binary in $binaries) {
     $buildPath = Join-Path $resolvedBuild $binary
@@ -593,6 +636,7 @@ $allBinariesMatch = ($binaryReports | Where-Object { -not $_.installed_matches_b
 $ok = $allBinariesMatch -and
     $serviceCimAfter.State -eq "Running" -and
     $serviceCimAfter.StartMode -eq "Auto" -and
+    $driverCimAfter.State -eq "Running" -and
     $recoveryPolicy.non_crash_failures_enabled -eq $true -and
     $managerCleanup.all_stopped -eq $true -and
     $managerStartupProof.registered -eq $true -and
@@ -615,6 +659,13 @@ $result = [ordered]@{
         start_mode = $serviceCimAfter.StartMode
         process_id_before = $servicePidBefore
         process_id_after = [int]$serviceCimAfter.ProcessId
+    }
+    winfsp_driver = [ordered]@{
+        name = [string]$driverCimAfter.Name
+        state = [string]$driverCimAfter.State
+        start_mode = [string]$driverCimAfter.StartMode
+        path = [string]$driverCimAfter.PathName
+        runtime = $installedWinFspPayload
     }
     mount_verification = $mountProof
     discovery = $discovery

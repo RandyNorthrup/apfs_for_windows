@@ -1,6 +1,6 @@
 # Production Readiness
 
-Status date: 2026-08-16
+Status date: 2026-08-17
 
 Current classification: **development-certified, not production-ready**.
 
@@ -9,39 +9,44 @@ Current classification: **development-certified, not production-ready**.
 | Gate | Current evidence |
 |---|---|
 | APFS copied-core import | 20-file manifest pinned to source commit `5587736df4d27e0eb5ca6e9f60f3c69614023b13` |
-| Core/image/raw tests | Release build and CTest 12/12 |
+| Core/image/raw tests | Release build and CTest 13/13, including stream-backed regular-file xattr transactions |
 | Native macOS compatibility | Hard-link artifact mounted by macOS and passed three `fsck_apfs` runs |
 | Physical APFS USB operations | Read/write/delete, Unicode, long path, Robocopy, concurrent reads, cleanup |
-| Default media state | Physical target restored read-only with raw writes disabled |
+| Default mount policy | Newly discovered media is read-only; the owner-pinned `V:` test mapping is explicitly writable |
 | Persistence model | Automatic service plus per-user tray startup and explicit tray Exit |
 | Repository source boundary | Upstream S.A.K. APFS paths verified read-only and unchanged since import |
 | Repository hygiene | No duplicate code files, forbidden tracked roots, conflict markers, or tracked secrets |
-| Production compiler mode | Pinned coherent WinFsp input, native hard-link ABI, `/W4 /WX`, CTest 12/12 |
-| Package structure | 25-file candidate with build metadata, provenance, payload manifest, and SHA-256 list |
+| Production compiler mode | Pinned coherent WinFsp input, native hard-link ABI, `/W4 /WX`, CTest 13/13 |
+| Current-build physical APFS proof | Matching installed/build worker; non-admin namespace, metadata, EA, ACL, symlink, cleanup, and 9,001/12,017-byte stream EA operations |
+| Native Windows hard-link transport | Exact fork driver/DLL/worker pairing; root and nested create, link-count lifecycle, alias mutation, stock-driver coexistence |
+| Fork driver build | Clean VS2022/WDK 10.0.26100 x64 SYS and DLL build from pinned public commit |
+| Development package lifecycle | 31-file test-signed candidate; clean install, VM reboot persistence, tray Open/Exit, exact hashes, clean uninstall |
+| Package structure | Bundled SxS driver/runtime, build metadata, provenance, payload manifest, and SHA-256 list |
 
-Latest no-host-reboot certification artifact:
-`artifacts/certification/core-sync-hardlink-certification.json`. It executed 27
-gates with zero failures. Artifact output is intentionally ignored; sanitized
-proof summaries belong under `docs/evidence`.
+Current hard-link/runtime/package evidence is summarized in
+`docs/evidence/winfsp-hardlink-package-2026-08-17.json`. The test package SHA-256
+is `170E6EA93F6F54293BA449E71058A7C4424B7D1C8076DBD768E88D660F67EABC`.
+It is explicitly test-signed and is not a production artifact.
 
 ## Open production blockers
 
 | Blocker | Required closure |
 |---|---|
-| Native Windows hard-link transport | Fork is published and pinned; prove exact kernel/DLL/APFS worker ABI and runtime pairing |
-| Driver build | Reproducible WDK build in clean CI with kernel tests |
 | Driver trust | Microsoft-compatible production signing; no Test Mode or integrity bypass |
 | Application trust | Authenticode-sign project executables and release installer/package flow |
-| Exact-package lifecycle | Clean Windows install, startup, mount, Explorer mutation, reboot, tray Exit, uninstall tied to current package SHA-256 |
+| Production package lifecycle | Repeat clean install, startup, mount, Explorer mutation, reboot, tray Exit, and uninstall with the production-signed package SHA-256 |
+| Reproducible build | Move the proven clean VS2022/WDK build into retained CI with kernel tests and provenance |
 | Fault recovery | Real surprise-unplug and interrupted-write/power-loss recovery on disposable physical APFS media |
-| Remaining APFS policy | Large stream-backed xattr mutation and filesystem-owned xattr policy |
+| Remaining APFS policy | Directory/root stream-backed xattrs, case-colliding names, and sealed/FileVault/filesystem-owned policy beyond fail-closed behavior |
 | Release governance | Protected branch, required CI checks, reviewed release tag, provenance, and retained evidence |
 
-Older VM lifecycle evidence remains historical. It proves package hash
-`D2F1D99DE9DCA8308673FAEE5CA716DBB6E1F19F0E94A5637BF971A72D25E49B`,
-not a current package. Current package identity is recorded in
-`artifacts/package-production-check/package-proof.json` after a clean build.
-No VM action is required or authorized by repository quality gates.
+Physical USB create/read/rename/overwrite/delete, metadata, EA, symlink, ACL,
+and cleanup passed on worker SHA-256 `9F01F88C...125B2`, which exactly matched
+the current build. Regular-file stream EA create/read at 9,001 bytes, replacement
+at 12,017 bytes, and delete also passed. The host was not rebooted. The pinned
+test mapping remains explicitly writable by owner direction; newly discovered
+media still defaults read-only. See
+`docs/evidence/stream-xattr-usb-2026-08-17.json`.
 
 ## Strict check
 

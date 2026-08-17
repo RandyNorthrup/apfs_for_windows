@@ -483,9 +483,6 @@ NTSTATUS collectEaMutation(FSP_FILE_SYSTEM *, PVOID contextValue,
   if (isContentCriticalXattr(decodedBytes)) {
     return STATUS_EA_LIST_INCONSISTENT;
   }
-  if (decodedValue.size() > sak::kApfsXattrMaxEmbeddedSize) {
-    return STATUS_EA_TOO_LARGE;
-  }
   auto *context = static_cast<EaMutationCollectContext *>(contextValue);
   context->mutations.append(
       {.name = decodedName, .value = decodedValue, .remove = remove});

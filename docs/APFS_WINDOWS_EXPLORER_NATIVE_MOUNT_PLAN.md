@@ -1065,23 +1065,23 @@ Exit gate: release checklist passes with artifacts under this repo.
 - `apfs_core_selftest` creates a symbolic link and proves it survives a later COW
   mutation. `apfs_probe --debug-file` now reports fixed inode metadata used by the
   cross-platform preservation assertion.
-- Copied writer metadata updates now atomically create, replace, or delete
-  embedded regular-file, named-directory, and volume-root xattrs while preserving
-  unrelated embedded xattrs. Directory state, including root inode 2, is
+- Copied writer metadata updates atomically create, replace, or delete
+  regular-file, named-directory, and volume-root xattrs while preserving
+  unrelated attributes. Directory state, including root inode 2, is
   batch-recovered in one fs-tree walk and preserved across unrelated COW
   mutations; directory stream-backed xattrs fail
   closed instead of being dropped. WinFsp `GetEa`/`SetEa` exposes direct
   printable ASCII names plus reversible Base32 aliases for exact UTF-8 APFS
   names and zero-byte values. Embedded values remain capped at the APFS limit of
-  3,804 bytes. Protected
-  `com.apple.decmpfs`, `com.apple.ResourceFork`, and `com.apple.fs.symlink`
-  attributes fail closed. Large stream-backed xattr mutation remains outside
-  current scope.
+  3,804 bytes; regular-file larger values now use APFS data streams up to the
+  Windows EA wire limit. Protected content-critical and recovered
+  `FILE_SYSTEM_OWNED` attributes fail closed.
 - Local WinFsp proof passed file, named-directory, and volume-root EA create/read,
   restart persistence, update, and delete for direct names, empty values, and
   exact UTF-8 names. Physical `V:` proof passed the same file, directory, and
-  volume-root operations, then removed all transient xattrs and its proof tree
-  and restored read-only/raw-disabled policy.
+  volume-root operations, then removed all transient xattrs and its proof tree.
+  That earlier proof restored read-only/raw-disabled policy; the later
+  owner-pinned `V:` test mapping intentionally remains writable.
   `apfs_core_selftest` also verifies copied-core directory-EA preservation across
   child-file writes plus set/read/delete and protected-name rejection.
 - `scripts\verify-apple-vm-roundtrip.ps1` is a credential-free tracked harness:
@@ -1190,3 +1190,81 @@ Exit gate: release checklist passes with artifacts under this repo.
   without requesting elevation. That deterministic gate passed; a live
   normal-shell run updated the installed binaries but timed out waiting for the
   elevated proof artifact, so live proof-file handoff is not yet certified.
+
+## 2026-08-17 Dedicated Driver and Package Update
+
+- Public WinFsp fork commit
+  `b4650b187f2d0d95a660bb687177f67efc07588f` removes unsuffixed device aliases
+  from the APFS side-by-side driver. Stock WinFsp and `WinFsp+apfs-b4650b18`
+  were simultaneously running during proof without device-name collision.
+- A fresh Windows VM VS2022/WDK 10.0.26100 build passed for x64 SYS and DLL.
+  Native APFS hard-link proof then passed `FILE_SUPPORTS_HARD_LINKS`, root
+  `CreateHardLinkW/FileLinkInformation`, nested
+  `NtSetInformationFile/FileLinkInformationEx`, stable file ID 16, link counts
+  `1 -> 2 -> 3 -> 2 -> 1`, mutation through an alias, and clean DLL-driven
+  unregister while the stock driver remained running.
+- Copied APFS overwrite now preserves inode identity, all hard-link aliases,
+  metadata, xattrs, and link count in one commit. Copied-core regression covers
+  three aliases. Native macOS round trip preserved inode 22 and link count,
+  deleted one name, remounted, and passed three `fsck_apfs -n` runs.
+- Release packaging now bundles the pinned side-by-side WinFsp DLL, driver,
+  marker, hashes, signing metadata, and lifecycle helper. Production signing is
+  the default hard gate. Test signing requires explicit
+  `-DriverSigningMode Test -AllowTestSignedDriver`.
+- Test package `APFS-for-Windows-0.1.0-test-signed.zip`, SHA-256
+  `170E6EA93F6F54293BA449E71058A7C4424B7D1C8076DBD768E88D660F67EABC`,
+  contains 31 files. Clean Windows VM install, Automatic service, dedicated
+  driver path, exact loaded DLL, saved mount, VM reboot persistence, one stacked
+  `AP` over `FS` tray icon with `Open`/`Exit`, and complete uninstall passed.
+  Driver unregister completed without another reboot and left no product or
+  dedicated-driver residue.
+- Physical USB mounted-file operations passed create/read/rename/overwrite/delete,
+  metadata, file/directory/root EAs including empty and UTF-8 names, symlink,
+  ACL query, and cleanup. A later proof deployed the current app binaries only,
+  matched the installed/build worker SHA-256, and added 9,001/12,017-byte
+  regular-file stream EA operations. It did not change the driver, Test Mode,
+  or boot state. Exact production-package physical proof remains open until a
+  production-signed driver and signed app package exist. The owner-pinned `V:`
+  test mapping remains writable.
+- Upstream `S.A.K.-Utility` was not modified. All APFS changes remain in this
+  repository's copied core. Sanitized evidence is tracked at
+  `docs/evidence/winfsp-hardlink-package-2026-08-17.json`.
+- Remaining production blockers: Microsoft-compatible driver signing,
+  Authenticode application signing, retained clean-CI/kernel-test provenance,
+  production-signed exact-package lifecycle, disposable-media surprise-unplug
+  and interrupted-write recovery, directory/root stream-xattr policy,
+  case-colliding EA policy, sealed/FileVault policy, and release governance.
+
+## 2026-08-17 Current-Build Stream Xattr and Host Update
+
+- Regular-file xattr values above the 3,804-byte embedded ceiling now allocate
+  APFS data-stream objects and extents through the existing COW transaction.
+  Replacement reuses the stream object id, releases old extents, updates the
+  extent-ref/free-queue state, and preserves unrelated file data and metadata.
+- The copied reader now materializes ordinary stream xattrs after extent scan.
+  Content-critical streams remain hidden, values beyond the Windows EA wire
+  limit are skipped with a warning, and recovered `FILE_SYSTEM_OWNED` attributes
+  reject generic mutation.
+- `apfs_core_selftest` passes create/read at 9,001 bytes, replacement at 12,017
+  bytes, delete, recreate, stream-to-embedded conversion, descriptor storage,
+  and file-payload preservation. Release CTest passes 13/13.
+- Current app binaries were deployed without changing the WinFsp driver, Test
+  Mode, or boot state. The installed/build worker SHA-256 matched
+  `9F01F88C8D7FD7FA6169A03D778FBC4F2340724E5167DE88F7A2657FB20125B2`.
+- Non-admin physical `V:` proof passed namespace operations, metadata, ACL,
+  symlink, direct/empty/UTF-8 file-directory-root EAs, and exact 9,001-byte then
+  12,017-byte stream EA replacement/deletion. Cleanup removed all proof content
+  and restored root metadata within Windows precision. The service remained
+  Automatic/running and the host was not rebooted.
+- Mount health now validates the filesystem name before claiming a configured
+  drive letter is APFS, exposing unrelated occupied letters as collisions.
+  Manager `--help` exits immediately instead of entering the tray event loop.
+- The owner-pinned `V:` test mapping remains read/write with raw writes enabled.
+  Newly discovered media remains read-only by default. Earlier statements in
+  this plan that `V:` was restored read-only describe older proof points.
+- Sanitized proof: `docs/evidence/stream-xattr-usb-2026-08-17.json`.
+- Remaining production blockers are production driver signing, application
+  Authenticode signing, retained clean CI/kernel-test provenance,
+  production-signed exact-package lifecycle, physical surprise-unplug and
+  interrupted-write recovery, directory/root stream-xattr policy,
+  case-colliding EA policy, sealed/FileVault policy, and release governance.

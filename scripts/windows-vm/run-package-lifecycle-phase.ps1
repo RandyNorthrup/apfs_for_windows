@@ -9,7 +9,8 @@ param(
     [Parameter(Mandatory = $true)][string]$PackageName,
     [Parameter(Mandatory = $true)][string]$PackageSha256,
     [string]$PackageDirectory = "package",
-    [string]$Mount = "R:"
+    [string]$Mount = "R:",
+    [switch]$AllowTestSignedDriver
 )
 
 $ErrorActionPreference = "Stop"
@@ -78,6 +79,9 @@ function Get-ProductResidue {
         start_menu_present = Test-Path `
             "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\APFS for Windows"
         install_root_present = Test-Path "$env:ProgramFiles\APFS for Windows"
+        winfsp_driver_present = $null -ne `
+            (Get-CimInstance Win32_SystemDriver -Filter "Name='WinFsp+apfs-main'" `
+                -ErrorAction SilentlyContinue)
     }
 }
 
@@ -122,9 +126,12 @@ switch ($Phase) {
             Remove-Item -LiteralPath $packageRoot -Recurse -Force
         }
         Expand-Archive -LiteralPath $zip -DestinationPath $packageRoot -Force
-        & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-            -File (Join-Path $packageRoot "install-apfs-for-windows.ps1") `
-            *> (Resolve-SafeRunPath "install.log")
+        $installArguments = @(
+            "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+            "-File", (Join-Path $packageRoot "install-apfs-for-windows.ps1")
+        )
+        if ($AllowTestSignedDriver) { $installArguments += "-AllowTestSignedDriver" }
+        & powershell.exe @installArguments *> (Resolve-SafeRunPath "install.log")
         if ($LASTEXITCODE -ne 0) {
             throw "Package install failed with exit code $LASTEXITCODE."
         }

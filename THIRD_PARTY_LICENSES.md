@@ -18,9 +18,10 @@ service IPC client paths, and tools.
 - Notice: WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos
 
 WinFsp is required for native Explorer mount support. APFS for Windows links to
-the WinFsp user-mode filesystem API and expects the WinFsp runtime/driver to be
-installed on the machine. Run `scripts\verify-winfsp-prerequisite.ps1` to verify
-the installed runtime and SDK.
+the WinFsp user-mode filesystem API. Release packages bundle a dedicated
+side-by-side build from `https://github.com/RandyNorthrup/winfsp-apfs`, a fork of
+the upstream repository above. Development builds may use an installed stock
+WinFsp SDK/runtime. The WinFsp license and notice apply to both forms.
 
 ## Apple LZFSE
 

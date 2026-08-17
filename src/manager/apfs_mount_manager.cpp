@@ -52,6 +52,15 @@ void printJson(const QJsonObject& object) {
     QTextStream(stdout) << QJsonDocument(object).toJson(QJsonDocument::Indented);
 }
 
+void printUsage() {
+    QTextStream(stdout)
+        << "Usage: apfs_mount_manager [--tray|--status|--self-test|--help]\n"
+        << "  --tray       Start in notification area without opening the window.\n"
+        << "  --status     Print service health as JSON and exit.\n"
+        << "  --self-test  Run manager UI contract checks and exit.\n"
+        << "  --help       Print this help and exit.\n";
+}
+
 QString installedServiceExe() {
 #ifdef Q_OS_WIN
     const QString programFiles = qEnvironmentVariable("ProgramFiles", QStringLiteral("C:\\Program Files"));
@@ -668,6 +677,13 @@ int main(int argc, char* argv[]) {
     QStringList rawArgs;
     for (int i = 0; i < argc; ++i) {
         rawArgs.append(QString::fromLocal8Bit(argv[i]));
+    }
+    if (rawArgs.contains(QStringLiteral("--help"), Qt::CaseInsensitive) ||
+        rawArgs.contains(QStringLiteral("-h"), Qt::CaseInsensitive) ||
+        rawArgs.contains(QStringLiteral("/?"), Qt::CaseInsensitive)) {
+        QCoreApplication app(argc, argv);
+        printUsage();
+        return 0;
     }
     if (rawArgs.contains(QStringLiteral("--status"), Qt::CaseInsensitive)) {
         QCoreApplication app(argc, argv);

@@ -4,6 +4,11 @@
 param(
     [string]$BuildDir = "build\Release",
     [string]$OutputPath = "artifacts\certification\apfs-for-windows-certification.json",
+    [string]$PackageRoot = "artifacts\package",
+    [string]$WinFspArtifactRoot = "",
+    [ValidateSet("Production", "Test")]
+    [string]$DriverSigningMode = "Production",
+    [switch]$AllowTestSignedDriver,
     [switch]$SkipBuild,
     [switch]$RunRepair,
     [switch]$RunUsbMountedFileActions,
@@ -252,12 +257,36 @@ $steps += Invoke-CertificationStep -Name "license_notices" -Script {
     powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-license-notices.ps1
 }
 
+$releasePackageArguments = @(
+    "-NoProfile",
+    "-ExecutionPolicy", "Bypass",
+    "-File", ".\scripts\build-release-package.ps1",
+    "-BuildDir", $BuildDir,
+    "-PackageRoot", $PackageRoot,
+    "-DriverSigningMode", $DriverSigningMode
+)
+if (-not [string]::IsNullOrWhiteSpace($WinFspArtifactRoot)) {
+    $releasePackageArguments += @("-WinFspArtifactRoot", $WinFspArtifactRoot)
+}
+if ($AllowTestSignedDriver) {
+    $releasePackageArguments += "-AllowTestSignedDriver"
+}
 $steps += Invoke-CertificationStep -Name "release_package" -Script {
-    powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-release-package.ps1
+    powershell @releasePackageArguments
 }
 
+$releaseVerificationArguments = @(
+    "-NoProfile",
+    "-ExecutionPolicy", "Bypass",
+    "-File", ".\scripts\verify-release-package.ps1",
+    "-PackageRoot", $PackageRoot,
+    "-DriverSigningMode", $DriverSigningMode
+)
+if ($AllowTestSignedDriver) {
+    $releaseVerificationArguments += "-AllowTestSignedDriver"
+}
 $steps += Invoke-CertificationStep -Name "release_package_verification" -Script {
-    powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-release-package.ps1
+    powershell @releaseVerificationArguments
 }
 
 $steps += Invoke-CertificationStep -Name "service_recovery_policy" -AllowedExitCodes @(0, 1) -Script {

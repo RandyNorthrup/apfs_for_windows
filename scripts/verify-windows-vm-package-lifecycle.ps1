@@ -10,6 +10,7 @@ param(
     [string]$PlinkPath,
     [string]$PscpPath,
     [string]$HostKey,
+    [switch]$AllowTestSignedDriver,
     [int]$OfflineTimeoutSeconds = 90,
     [int]$OnlineTimeoutSeconds = 300,
     [string]$OutputPath = "artifacts\windows-vm\current-lifecycle-proof.json"
@@ -134,6 +135,7 @@ try {
     Invoke-RemoteCommand -Command "cmd.exe /d /c move /y $remoteRoot\windows-origin.apfs $remoteRoot\fixture\windows-origin.apfs" | Out-Null
 
     $phaseBase = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $remoteRoot\run-package-lifecycle-phase.ps1 -RunRoot $remoteRoot -PackageName package.zip -PackageSha256 $packageHash"
+    if ($AllowTestSignedDriver) { $phaseBase += " -AllowTestSignedDriver" }
     $installRaw = Invoke-RemoteCommand -Command "$phaseBase -Phase Install"
     $install = $installRaw.text | ConvertFrom-Json
     if (-not $install.ok) { throw "Windows VM install phase reported failure." }

@@ -492,6 +492,13 @@ struct FileExtentRecord {
     uint64_t crypto_id{0};
 };
 
+struct StreamXattrRecord {
+    QString name;
+    uint64_t object_id{0};
+    uint64_t size_bytes{0};
+    uint16_t flags{0};
+};
+
 struct FileReadTarget {
     InodeRecord inode;
     uint64_t bytes_to_read{0};
@@ -593,10 +600,8 @@ public:
         }
         // A7 (A-h): surface the file's named attributes (ACL, Finder info, user
         // xattrs); the compressed-content attribute is internal, so skip it.
-        for (const auto& xattr : xattrsByInode_.values(target->inode.object_id)) {
-            if (xattr.first != QLatin1StringView(kApfsXattrNameCompressed)) {
-                result.xattrs.append(xattr);
-            }
+        if (!appendVisibleXattrs(target->inode.object_id, &result)) {
+            return result;
         }
         result.volume_name = volumeName_;
         result.ok = result.blockers.isEmpty();
@@ -623,10 +628,8 @@ public:
                 QStringLiteral("APFS inode not found for xattr path: %1").arg(normalized));
             return result;
         }
-        for (const auto& xattr : xattrsByInode_.values(inodeId)) {
-            if (xattr.first != QLatin1StringView(kApfsXattrNameCompressed)) {
-                result.xattrs.append(xattr);
-            }
+        if (!appendVisibleXattrs(inodeId, &result)) {
+            return result;
         }
         result.volume_name = volumeName_;
         result.ok = result.blockers.isEmpty();
@@ -686,10 +689,8 @@ public:
             return result;
         }
 
-        for (const auto& xattr : xattrsByInode_.values(rangeTarget.inode.object_id)) {
-            if (xattr.first != QLatin1StringView(kApfsXattrNameCompressed)) {
-                result.xattrs.append(xattr);
-            }
+        if (!appendVisibleXattrs(rangeTarget.inode.object_id, &result)) {
+            return result;
         }
         result.volume_name = volumeName_;
         result.ok = result.blockers.isEmpty();
@@ -775,10 +776,10 @@ public:
                 .size_bytes = static_cast<uint64_t>(xattr.second.size()),
                 .embedded = true});
         }
-        if (result.resource_fork_object_id != 0) {
+        for (const StreamXattrRecord& xattr : streamXattrsByInode_.values(inodeId)) {
             result.xattrs.append(PartitionApfsFileXattrDebug{
-                .name = QString::fromLatin1(kApfsXattrNameResourceFork),
-                .size_bytes = 0,
+                .name = xattr.name,
+                .size_bytes = xattr.size_bytes,
                 .embedded = false});
         }
 
@@ -1297,6 +1298,45 @@ private:
             }
         }
         return blobRead.data;
+    }
+
+    [[nodiscard]] bool appendVisibleXattrs(uint64_t inodeId,
+                                           PartitionApfsFileReadResult* result) {
+        for (const auto& xattr : xattrsByInode_.values(inodeId)) {
+            if (xattr.first != QLatin1StringView(kApfsXattrNameCompressed)) {
+                result->xattrs.append(xattr);
+            }
+        }
+        for (const StreamXattrRecord& xattr : streamXattrsByInode_.values(inodeId)) {
+            if (xattr.name == QLatin1StringView(kApfsXattrNameCompressed) ||
+                xattr.name == QLatin1StringView(kApfsXattrNameResourceFork)) {
+                continue;
+            }
+            if (xattr.size_bytes > std::numeric_limits<uint16_t>::max()) {
+                result->warnings.append(
+                    QStringLiteral("APFS data-stream xattr '%1' exceeds the Windows EA limit and "
+                                   "was not surfaced")
+                        .arg(xattr.name));
+                continue;
+            }
+            if (xattr.size_bytes == 0) {
+                result->xattrs.append({xattr.name, QByteArray()});
+                continue;
+            }
+            const auto value = assembleResourceForkBlob(xattr.object_id, result);
+            if (!value.has_value()) {
+                return false;
+            }
+            if (static_cast<uint64_t>(value->size()) < xattr.size_bytes) {
+                result->blockers.append(
+                    QStringLiteral("APFS data-stream xattr '%1' is shorter than its descriptor")
+                        .arg(xattr.name));
+                return false;
+            }
+            result->xattrs.append(
+                {xattr.name, value->left(static_cast<qsizetype>(xattr.size_bytes))});
+        }
+        return true;
     }
 
     // Decode a resource-fork-compressed file: assemble its cmpf blob from the ResourceFork
@@ -1947,7 +1987,12 @@ private:
         return *key;
     }
 
-    // Capture a data-stream xattr the compressed-file read path needs: for
+    // Capture every data-stream xattr. The compressed-file read path also indexes
+    // its two content-critical streams for direct decoding; ordinary streams are
+    // materialized into public xattr results after the fs-tree scan has collected
+    // their file extents.
+    //
+    // For
     // com.apple.ResourceFork, the owning object id (the le64 at the start of its
     // j_xattr_dstream) so the cmpf blob can be assembled from that id's extents; for a
     // DSTREAM-backed com.apple.decmpfs (the kernel writes one when the inline payload
@@ -1965,11 +2010,16 @@ private:
             return;
         }
         const uint64_t streamObjId = le64(node, entry.value_offset + kApfsXattrValueXdataOffset);
+        const uint64_t streamBytes =
+            le64(node, entry.value_offset + kApfsXattrValueXdataOffset + 8);
+        streamXattrsByInode_.insert(
+            objectId, {.name = name,
+                       .object_id = streamObjId,
+                       .size_bytes = streamBytes,
+                       .flags = flags});
         if (name == QLatin1StringView(kApfsXattrNameResourceFork)) {
             resourceForkObjIdByInode_.insert(objectId, streamObjId);
         } else if (name == QLatin1StringView(kApfsXattrNameCompressed)) {
-            const uint64_t streamBytes = le64(node,
-                                              entry.value_offset + kApfsXattrValueXdataOffset + 8);
             decmpfsStreamByInode_.insert(objectId, {streamObjId, streamBytes});
         }
     }
@@ -2635,8 +2685,10 @@ private:
     // DSTREAM-backed com.apple.decmpfs (the attribute value lives in its own data
     // stream): {owning object id, attribute byte length} keyed by inode id.
     QHash<uint64_t, QPair<uint64_t, uint64_t>> decmpfsStreamByInode_;
-    // A7 (A-h): every embedded named attribute (ACL, Finder info, user xattrs)
-    // keyed by inode object id, surfaced on a file read result.
+    // Every data-stream attribute descriptor, keyed by inode object id. Ordinary
+    // stream values are assembled lazily after scanning their file extents.
+    QMultiHash<uint64_t, StreamXattrRecord> streamXattrsByInode_;
+    // A7 (A-h): every embedded named attribute (ACL, Finder info, user xattrs).
     QMultiHash<uint64_t, QPair<QString, QByteArray>> xattrsByInode_;
     bool mountedAndScanned_{false};
 };

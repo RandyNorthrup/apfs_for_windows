@@ -4,7 +4,10 @@
 param(
     [string]$Version = "",
     [string]$PackageRoot = "artifacts\package",
-    [string]$OutputPath = "artifacts\package\verify-release-package.json"
+    [string]$OutputPath = "artifacts\package\verify-release-package.json",
+    [ValidateSet("Production", "Test")]
+    [string]$DriverSigningMode = "Production",
+    [switch]$AllowTestSignedDriver
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,9 +26,19 @@ function Resolve-RepoPath {
 function Invoke-PayloadValidation {
     param(
         [Parameter(Mandatory = $true)][string]$ScriptPath,
-        [Parameter(Mandatory = $true)][string]$Name
+        [Parameter(Mandatory = $true)][string]$Name,
+        [switch]$AllowTestSignedDriver
     )
-    $raw = @(powershell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath -ValidatePayloadOnly 2>&1)
+    $arguments = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", $ScriptPath,
+        "-ValidatePayloadOnly"
+    )
+    if ($AllowTestSignedDriver) {
+        $arguments += "-AllowTestSignedDriver"
+    }
+    $raw = @(powershell @arguments 2>&1)
     $exitCode = $LASTEXITCODE
     $json = $null
     $errorText = $null
@@ -70,8 +83,13 @@ function Invoke-RepairLauncherSelfTest {
 
 $resolvedPackageRoot = Resolve-RepoPath $PackageRoot
 $resolvedOutput = Resolve-RepoPath $OutputPath
-$stageRoot = Join-Path $resolvedPackageRoot "APFS-for-Windows-$Version"
-$zipPath = Join-Path $resolvedPackageRoot "APFS-for-Windows-$Version.zip"
+if ($DriverSigningMode -eq "Test" -and -not $AllowTestSignedDriver) {
+    throw "Verifying a test-signed package requires explicit -AllowTestSignedDriver."
+}
+$packageSuffix = if ($DriverSigningMode -eq "Test") { "-test-signed" } else { "" }
+$packageName = "APFS-for-Windows-$Version$packageSuffix"
+$stageRoot = Join-Path $resolvedPackageRoot $packageName
+$zipPath = Join-Path $resolvedPackageRoot "$packageName.zip"
 
 $requiredFiles = @(
     "apfs_mount_service.exe",
@@ -90,6 +108,7 @@ $requiredFiles = @(
     "README.md",
     "LICENSE",
     "lib\project-version.ps1",
+    "lib\winfsp-runtime.ps1",
     "THIRD_PARTY_LICENSES.md",
     "APFS_CORE_PROVENANCE.md",
     "APFS_CORE_IMPORT_MANIFEST.json",
@@ -98,8 +117,15 @@ $requiredFiles = @(
     "SHA256SUMS.txt",
     "SECURITY.md",
     "VERSION",
-    "WINFSP_PROVENANCE.json"
+    "WINFSP_PROVENANCE.json",
+    "winfsp-driver.json",
+    "winfsp.sxs",
+    "winfsp-x64.dll",
+    "winfsp-x64.sys"
 )
+if ($DriverSigningMode -eq "Test") {
+    $requiredFiles += "winfsp-x64.cer"
+}
 
 $fileReports = @()
 foreach ($relative in $requiredFiles) {
@@ -137,14 +163,17 @@ $buildMetadata = if (Test-Path -LiteralPath $buildMetadataPath -PathType Leaf) {
 } else { $null }
 $installPayload = Invoke-PayloadValidation `
     -ScriptPath (Join-Path $stageRoot "install-apfs-for-windows.ps1") `
-    -Name "install_payload"
+    -Name "install_payload" `
+    -AllowTestSignedDriver:$AllowTestSignedDriver
 $repairPayload = Invoke-PayloadValidation `
     -ScriptPath (Join-Path $stageRoot "repair-apfs-for-windows-install.ps1") `
-    -Name "repair_payload"
+    -Name "repair_payload" `
+    -AllowTestSignedDriver:$AllowTestSignedDriver
 $repairLauncher = Invoke-RepairLauncherSelfTest `
     -ScriptPath (Join-Path $stageRoot "start-repair-elevated.ps1")
 $ok = $zipExists -and ($missing.Count -eq 0) -and $releaseManifest -and
     ($manifestMismatches.Count -eq 0) -and $buildMetadata -and
+    ([string]$releaseManifest.driver_signing_mode -ceq $DriverSigningMode.ToLowerInvariant()) -and
     ([string]$buildMetadata.version -eq $Version) -and $installPayload.ok -and
     $repairPayload.ok -and $repairLauncher.ok
 
@@ -154,6 +183,8 @@ $result = [ordered]@{
     ok = [bool]$ok
     no_admin_required = $true
     version = $Version
+    package_name = $packageName
+    driver_signing_mode = $DriverSigningMode.ToLowerInvariant()
     stage_root = $stageRoot
     zip_path = $zipPath
     zip_exists = [bool]$zipExists

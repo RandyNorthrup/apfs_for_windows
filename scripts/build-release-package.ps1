@@ -5,12 +5,17 @@ param(
     [string]$BuildDir = "build\Release",
     [string]$QtBin = "C:\Qt\6.10.3\msvc2022_64\bin",
     [string]$Version = "",
+    [string]$WinFspArtifactRoot = "",
+    [ValidateSet("Production", "Test")]
+    [string]$DriverSigningMode = "Production",
+    [switch]$AllowTestSignedDriver,
     [string]$PackageRoot = "artifacts\package",
     [string]$OutputPath = "artifacts\package\package-proof.json"
 )
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "lib\project-version.ps1")
+. (Join-Path $PSScriptRoot "lib\winfsp-runtime.ps1")
 $Version = Get-ApfsProjectVersion -ExplicitVersion $Version -CallerRoot $PSScriptRoot
 
 function Resolve-RepoPath {
@@ -38,8 +43,41 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $resolvedBuild = Resolve-RepoPath $BuildDir
 $resolvedPackageRoot = Resolve-RepoPath $PackageRoot
 $resolvedOutput = Resolve-RepoPath $OutputPath
-$stageRoot = Join-Path $resolvedPackageRoot "APFS-for-Windows-$Version"
-$zipPath = Join-Path $resolvedPackageRoot "APFS-for-Windows-$Version.zip"
+$winFspDependency = Get-Content `
+    -LiteralPath (Join-Path $repoRoot "dependencies\winfsp-apfs.json") -Raw |
+    ConvertFrom-Json
+$forkCommit = [string]$winFspDependency.commit
+$forkShortCommit = $forkCommit.Substring(0, 8)
+if ([string]::IsNullOrWhiteSpace($WinFspArtifactRoot)) {
+    $artifactClass = if ($DriverSigningMode -eq "Test") { "test-signed" } else { "production" }
+    $WinFspArtifactRoot = Join-Path $repoRoot `
+        "artifacts\winfsp-fork\$artifactClass\$forkShortCommit\x64"
+}
+$resolvedWinFsp = Resolve-RepoPath $WinFspArtifactRoot
+$packageSuffix = if ($DriverSigningMode -eq "Test") { "-test-signed" } else { "" }
+$packageName = "APFS-for-Windows-$Version$packageSuffix"
+$stageRoot = Join-Path $resolvedPackageRoot $packageName
+$zipPath = Join-Path $resolvedPackageRoot "$packageName.zip"
+
+if ($DriverSigningMode -eq "Test" -and -not $AllowTestSignedDriver) {
+    throw "Building a test-signed package requires explicit -AllowTestSignedDriver."
+}
+$winFspDll = Join-Path $resolvedWinFsp "winfsp-x64.dll"
+$winFspSys = Join-Path $resolvedWinFsp "winfsp-x64.sys"
+foreach ($required in @($winFspDll, $winFspSys)) {
+    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+        throw "Required WinFsp fork artifact is missing: $required"
+    }
+}
+$driverSignature = Get-ApfsWinFspSignatureReport -DriverPath $winFspSys
+if ($DriverSigningMode -eq "Test") {
+    if (-not $driverSignature.test_certificate -or -not $driverSignature.thumbprint) {
+        throw "The test package driver does not carry a WDK test signature."
+    }
+} elseif ([string]$driverSignature.status -cne "Valid" -or
+    $driverSignature.test_certificate) {
+    throw "The production package driver is not validly production signed."
+}
 
 New-Item -ItemType Directory -Force -Path $resolvedPackageRoot | Out-Null
 if (Test-Path -LiteralPath $stageRoot) {
@@ -59,6 +97,43 @@ foreach ($binary in $binaries) {
 Copy-RequiredFile `
     -Source (Join-Path $resolvedBuild "apfs-build-metadata.json") `
     -Destination (Join-Path $stageRoot "apfs-build-metadata.json")
+Copy-RequiredFile -Source $winFspDll -Destination (Join-Path $stageRoot "winfsp-x64.dll")
+Copy-RequiredFile -Source $winFspSys -Destination (Join-Path $stageRoot "winfsp-x64.sys")
+$winFspCertificate = Join-Path $resolvedWinFsp "winfsp-x64.cer"
+if (Test-Path -LiteralPath $winFspCertificate -PathType Leaf) {
+    Copy-RequiredFile -Source $winFspCertificate `
+        -Destination (Join-Path $stageRoot "winfsp-x64.cer")
+}
+[IO.File]::WriteAllText(
+    (Join-Path $stageRoot "winfsp.sxs"),
+    "apfs-main`r`n",
+    [Text.UTF8Encoding]::new($false))
+
+$driverFiles = @("winfsp-x64.dll", "winfsp-x64.sys", "winfsp.sxs")
+if (Test-Path -LiteralPath (Join-Path $stageRoot "winfsp-x64.cer") -PathType Leaf) {
+    $driverFiles += "winfsp-x64.cer"
+}
+$driverManifest = [ordered]@{
+    schema_version = 1
+    product = "APFS for Windows"
+    sxs_id = "apfs-main"
+    service_name = "WinFsp+apfs-main"
+    fork_repository = [string]$winFspDependency.repository
+    fork_commit = $forkCommit
+    upstream_base_commit = [string]$winFspDependency.upstream_base_commit
+    driver_signing_mode = $DriverSigningMode.ToLowerInvariant()
+    signature = $driverSignature
+    files = @($driverFiles | ForEach-Object {
+        $path = Join-Path $stageRoot $_
+        [ordered]@{
+            name = $_
+            size_bytes = [int64](Get-Item -LiteralPath $path).Length
+            sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        }
+    })
+}
+$driverManifest | ConvertTo-Json -Depth 6 |
+    Set-Content -LiteralPath (Join-Path $stageRoot "winfsp-driver.json") -Encoding UTF8
 
 $qtDlls = @(
     "Qt6Core.dll",
@@ -85,6 +160,9 @@ foreach ($script in $rootScripts) {
 Copy-RequiredFile `
     -Source (Join-Path $PSScriptRoot "lib\project-version.ps1") `
     -Destination (Join-Path $stageRoot "lib\project-version.ps1")
+Copy-RequiredFile `
+    -Source (Join-Path $PSScriptRoot "lib\winfsp-runtime.ps1") `
+    -Destination (Join-Path $stageRoot "lib\winfsp-runtime.ps1")
 
 Copy-RequiredFile -Source (Join-Path $repoRoot "README.md") -Destination (Join-Path $stageRoot "README.md")
 Copy-RequiredFile -Source (Join-Path $repoRoot "LICENSE") -Destination (Join-Path $stageRoot "LICENSE")
@@ -113,6 +191,8 @@ $releaseManifest = [ordered]@{
     schema_version = 1
     product = "APFS for Windows"
     version = $Version
+    driver_signing_mode = $DriverSigningMode.ToLowerInvariant()
+    production_ready = [bool]($DriverSigningMode -eq "Production")
     files = $payloadManifest
 }
 $releaseManifest | ConvertTo-Json -Depth 6 |
@@ -143,6 +223,11 @@ $result = [ordered]@{
     ok = $true
     no_admin_required = $true
     version = $Version
+    package_name = $packageName
+    driver_signing_mode = $DriverSigningMode.ToLowerInvariant()
+    production_ready = [bool]($DriverSigningMode -eq "Production")
+    winfsp_fork_commit = $forkCommit
+    winfsp_driver_signature = $driverSignature
     build_dir = $resolvedBuild
     stage_root = $stageRoot
     zip_path = $zipPath

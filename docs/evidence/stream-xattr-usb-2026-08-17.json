@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "date": "2026-08-17",
+  "classification": "development-certified-not-production-ready",
+  "source_boundary": {
+    "upstream_sak_modified": false,
+    "copied_core_only": true
+  },
+  "release_build": {
+    "ok": true,
+    "ctest_passed": 13,
+    "ctest_failed": 0,
+    "manager_help_exits": true,
+    "mount_collision_detection": true
+  },
+  "copied_core_stream_xattr": {
+    "ok": true,
+    "storage_scope": "regular-files",
+    "embedded_max_bytes": 3804,
+    "windows_direct_name_max_value_bytes": 65535,
+    "windows_aliased_name_max_value_bytes": 65534,
+    "selftest_operations": [
+      "create-read-9001-bytes",
+      "replace-read-12017-bytes",
+      "delete",
+      "recreate",
+      "convert-stream-to-embedded",
+      "preserve-file-payload"
+    ],
+    "filesystem_owned_mutation": "fail-closed"
+  },
+  "physical_usb": {
+    "ok": true,
+    "proof_scope": "current_build_installed_mount",
+    "mount": "V:",
+    "target": "Harddisk1/Partition1",
+    "no_admin_required": true,
+    "no_elevation_requested": true,
+    "no_service_policy_change": true,
+    "no_reboot_performed": true,
+    "installed_worker_matches_build": true,
+    "worker_sha256": "9F01F88C8D7FD7FA6169A03D778FBC4F2340724E5167DE88F7A2657FB20125B2",
+    "started_utc": "2026-08-17T04:27:17.0202079Z",
+    "completed_utc": "2026-08-17T04:27:41.6303632Z",
+    "operations": [
+      "create",
+      "read",
+      "rename",
+      "overwrite",
+      "delete",
+      "basic-info",
+      "file-directory-root-extended-attributes",
+      "empty-and-utf8-extended-attributes",
+      "symbolic-link",
+      "acl-query",
+      "cleanup"
+    ],
+    "stream_xattr": {
+      "name": "user.apfswin_usb_stream",
+      "first_bytes": 9001,
+      "first_sha256": "835E374AE7C3C8942FDAF4CB0ABDE0D5DA0CD3C8E57BE98654A590A0B37A055D",
+      "updated_bytes": 12017,
+      "updated_sha256": "D3767F4F92BD8767349E80B7D72E59B94AD41081A8C4C18D4A4776123218DC6A",
+      "absent_after_delete": true
+    },
+    "proof_directory_removed": true,
+    "cleanup_errors": [],
+    "root_metadata_restored_within_windows_precision": true,
+    "final_mount_policy": {
+      "read_only": false,
+      "allow_raw_writes": true,
+      "reason": "owner-pinned test mapping"
+    }
+  },
+  "host_runtime": {
+    "service_start_mode": "Automatic",
+    "service_running": true,
+    "single_tray_process": true,
+    "tray_actions": ["Open", "Exit"],
+    "driver_changed": false,
+    "test_mode_changed": false,
+    "host_rebooted": false
+  },
+  "open_production_blockers": [
+    "Microsoft-compatible production driver signing",
+    "Authenticode application signing",
+    "retained clean CI and kernel-test provenance",
+    "production-signed exact-package lifecycle",
+    "surprise-unplug and interrupted-write physical recovery",
+    "directory/root stream-xattr policy",
+    "case-colliding Windows EA policy",
+    "sealed, FileVault, and protected-filesystem mutation policy",
+    "release governance"
+  ]
+}

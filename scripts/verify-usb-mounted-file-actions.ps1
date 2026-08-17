@@ -62,6 +62,16 @@ function Get-FileSha256 {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
 }
 
+function Get-BytesSha256 {
+    param([Parameter(Mandatory = $true)][byte[]]$Value)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        ([BitConverter]::ToString($sha256.ComputeHash($Value))).Replace("-", "")
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
 function Test-TimeNear {
     param(
         [Parameter(Mandatory = $true)][datetime]$Actual,
@@ -315,6 +325,7 @@ $symbolicLinkState = $null
 $readonlyWriteBlocked = $false
 $aclExitCode = $null
 $eaState = $null
+$streamEaState = $null
 $directoryEaState = $null
 $rootEaState = $null
 $rootEaName = "user.apfswin_usb_root"
@@ -497,6 +508,35 @@ try {
             absent_after_delete = [bool](-not (Test-NativeExtendedAttribute `
                 -Path $metadataPath -Name $eaName))
         }
+        $streamEaName = "user.apfswin_usb_stream"
+        $streamEaFirstValue = [byte[]]::new(9001)
+        $streamEaUpdatedValue = [byte[]]::new(12017)
+        for ($index = 0; $index -lt $streamEaFirstValue.Length; $index++) {
+            $streamEaFirstValue[$index] = [byte](($index * 37 + 11) -band 0xff)
+        }
+        for ($index = 0; $index -lt $streamEaUpdatedValue.Length; $index++) {
+            $streamEaUpdatedValue[$index] = [byte](($index * 53 + 29) -band 0xff)
+        }
+        Set-NativeExtendedAttribute -Path $metadataPath -Name $streamEaName `
+            -Value $streamEaFirstValue
+        $streamEaFirstRead = [byte[]](Get-NativeExtendedAttribute `
+            -Path $metadataPath -Name $streamEaName)
+        Set-NativeExtendedAttribute -Path $metadataPath -Name $streamEaName `
+            -Value $streamEaUpdatedValue
+        $streamEaUpdatedRead = [byte[]](Get-NativeExtendedAttribute `
+            -Path $metadataPath -Name $streamEaName)
+        Remove-NativeExtendedAttribute -Path $metadataPath -Name $streamEaName
+        $streamEaState = [ordered]@{
+            name = $streamEaName
+            first_bytes = $streamEaFirstRead.Length
+            first_sha256 = Get-BytesSha256 -Value $streamEaFirstRead
+            expected_first_sha256 = Get-BytesSha256 -Value $streamEaFirstValue
+            updated_bytes = $streamEaUpdatedRead.Length
+            updated_sha256 = Get-BytesSha256 -Value $streamEaUpdatedRead
+            expected_updated_sha256 = Get-BytesSha256 -Value $streamEaUpdatedValue
+            absent_after_delete = [bool](-not (Test-NativeExtendedAttribute `
+                -Path $metadataPath -Name $streamEaName))
+        }
         $fileEdgeEaState = Invoke-EaEdgeProof -Path $metadataPath `
             -EmptyName $edgeEmptyEaName -UnicodeName $edgeUnicodeEaName
         $metadataItem = Get-Item -LiteralPath $metadataPath -Force
@@ -652,6 +692,11 @@ $ok = ($preflightOk -or ($rootReady -and
     ($eaState.first_value -eq "USB Windows EA payload") -and
     ($eaState.updated_value -eq "USB updated EA payload") -and
     $eaState.absent_after_delete -and
+    ($streamEaState.first_bytes -eq 9001) -and
+    ($streamEaState.first_sha256 -eq $streamEaState.expected_first_sha256) -and
+    ($streamEaState.updated_bytes -eq 12017) -and
+    ($streamEaState.updated_sha256 -eq $streamEaState.expected_updated_sha256) -and
+    $streamEaState.absent_after_delete -and
     ($directoryEaState.first_value -eq "USB Windows directory EA payload") -and
     ($directoryEaState.updated_value -eq "USB updated directory EA payload") -and
     $directoryEaState.absent_after_delete -and
@@ -722,6 +767,7 @@ $result = [ordered]@{
     metadata = $metadataState
     acl_exit_code = $aclExitCode
     extended_attribute = $eaState
+    stream_extended_attribute = $streamEaState
     directory_extended_attribute = $directoryEaState
     root_extended_attribute = $rootEaState
     edge_extended_attribute_name = $edgeUnicodeEaName

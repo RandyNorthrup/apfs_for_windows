@@ -729,10 +729,156 @@ int main(int argc, char *argv[]) {
   }
   appendProof(&proofs, QStringLiteral("reject content-critical xattr"));
 
+  const QString streamXattrName = QStringLiteral("user.apfswin_stream");
+  const auto patternedXattr = [](int size, int seed) {
+    QByteArray value(size, '\0');
+    for (int index = 0; index < size; ++index) {
+      value[index] = static_cast<char>((index * 37 + seed) & 0xff);
+    }
+    return value;
+  };
+  const QByteArray largeXattrValue = patternedXattr(9'001, 11);
+  const QString streamXattrImage =
+      tempDir.filePath(QStringLiteral("xattr-stream.apfs"));
+  sak::PartitionApfsInodeMetadataUpdate streamXattrUpdate;
+  streamXattrUpdate.xattr_mutations.append(
+      {.name = streamXattrName, .value = largeXattrValue});
+  const auto streamXattrSet =
+      sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
+          {.source_image_path = edgeXattrRemovedImage,
+           .written_image_path = streamXattrImage,
+           .target_name = QStringLiteral("seed.txt"),
+           .metadata = streamXattrUpdate,
+           .options = options});
+  const auto streamXattrRead =
+      sak::PartitionApfsFileSystemReader::readFileFromImage(
+          streamXattrImage, QStringLiteral("/seed.txt"),
+          static_cast<uint64_t>(seedData.size()));
+  QFile streamDebugFile(streamXattrImage);
+  if (!streamDebugFile.open(QIODevice::ReadOnly)) {
+    return fail(QStringLiteral("verify data-stream xattr"),
+                QStringLiteral("unable to open stream-xattr image"));
+  }
+  const auto streamDebug = sak::PartitionApfsFileSystemReader::debugFile(
+      &streamDebugFile, QStringLiteral("/seed.txt"));
+  const bool streamDescriptorPresent = std::any_of(
+      streamDebug.xattrs.cbegin(), streamDebug.xattrs.cend(),
+      [&](const auto &xattr) {
+        return xattr.name == streamXattrName && !xattr.embedded &&
+               xattr.size_bytes == static_cast<uint64_t>(largeXattrValue.size());
+      });
+  if (!streamXattrSet.ok || !streamXattrRead.ok ||
+      !hasExactXattr(streamXattrRead, streamXattrName, largeXattrValue) ||
+      streamXattrRead.data != seedData || !streamDebug.ok ||
+      !streamDescriptorPresent) {
+    return fail(QStringLiteral("verify data-stream xattr"),
+                QStringLiteral("large xattr or file payload mismatch"),
+                streamXattrSet.blockers + streamXattrRead.blockers +
+                    streamDebug.blockers);
+  }
+  appendProof(&proofs, QStringLiteral("create and read data-stream xattr"),
+              {{QStringLiteral("bytes"), largeXattrValue.size()}});
+
+  const QByteArray replacementXattrValue = patternedXattr(12'017, 29);
+  const QString streamXattrReplacedImage =
+      tempDir.filePath(QStringLiteral("xattr-stream-replaced.apfs"));
+  sak::PartitionApfsInodeMetadataUpdate streamXattrReplace;
+  streamXattrReplace.xattr_mutations.append(
+      {.name = streamXattrName, .value = replacementXattrValue});
+  const auto streamXattrReplaced =
+      sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
+          {.source_image_path = streamXattrImage,
+           .written_image_path = streamXattrReplacedImage,
+           .target_name = QStringLiteral("seed.txt"),
+           .metadata = streamXattrReplace,
+           .options = options});
+  const auto streamXattrAfterReplace =
+      sak::PartitionApfsFileSystemReader::readFileFromImage(
+          streamXattrReplacedImage, QStringLiteral("/seed.txt"),
+          static_cast<uint64_t>(seedData.size()));
+  if (!streamXattrReplaced.ok || !streamXattrAfterReplace.ok ||
+      !hasExactXattr(streamXattrAfterReplace, streamXattrName,
+                     replacementXattrValue) ||
+      streamXattrAfterReplace.data != seedData) {
+    return fail(QStringLiteral("replace data-stream xattr"),
+                QStringLiteral("replacement xattr or file payload mismatch"),
+                streamXattrReplaced.blockers +
+                    streamXattrAfterReplace.blockers);
+  }
+  appendProof(&proofs, QStringLiteral("replace data-stream xattr"),
+              {{QStringLiteral("bytes"), replacementXattrValue.size()}});
+
+  const QString streamXattrRemovedImage =
+      tempDir.filePath(QStringLiteral("xattr-stream-removed.apfs"));
+  sak::PartitionApfsInodeMetadataUpdate streamXattrRemove;
+  streamXattrRemove.xattr_mutations.append(
+      {.name = streamXattrName, .remove = true});
+  const auto streamXattrRemoved =
+      sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
+          {.source_image_path = streamXattrReplacedImage,
+           .written_image_path = streamXattrRemovedImage,
+           .target_name = QStringLiteral("seed.txt"),
+           .metadata = streamXattrRemove,
+           .options = options});
+  const auto streamXattrAfterRemove =
+      sak::PartitionApfsFileSystemReader::readFileFromImage(
+          streamXattrRemovedImage, QStringLiteral("/seed.txt"),
+          static_cast<uint64_t>(seedData.size()));
+  const bool streamStillPresent = std::any_of(
+      streamXattrAfterRemove.xattrs.cbegin(),
+      streamXattrAfterRemove.xattrs.cend(), [&](const auto &xattr) {
+        return xattr.first == streamXattrName;
+      });
+  if (!streamXattrRemoved.ok || !streamXattrAfterRemove.ok ||
+      streamStillPresent || streamXattrAfterRemove.data != seedData) {
+    return fail(QStringLiteral("delete data-stream xattr"),
+                QStringLiteral("stream xattr delete or file preservation failed"),
+                streamXattrRemoved.blockers + streamXattrAfterRemove.blockers);
+  }
+  appendProof(&proofs, QStringLiteral("delete data-stream xattr"));
+
+  const QString streamXattrRecreatedImage =
+      tempDir.filePath(QStringLiteral("xattr-stream-recreated.apfs"));
+  const auto streamXattrRecreated =
+      sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
+          {.source_image_path = streamXattrRemovedImage,
+           .written_image_path = streamXattrRecreatedImage,
+           .target_name = QStringLiteral("seed.txt"),
+           .metadata = streamXattrUpdate,
+           .options = options});
+  const QString streamToEmbeddedImage =
+      tempDir.filePath(QStringLiteral("xattr-stream-to-embedded.apfs"));
+  const QByteArray smallReplacement("stream became embedded");
+  sak::PartitionApfsInodeMetadataUpdate streamToEmbeddedUpdate;
+  streamToEmbeddedUpdate.xattr_mutations.append(
+      {.name = streamXattrName, .value = smallReplacement});
+  const auto streamToEmbedded =
+      sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
+          {.source_image_path = streamXattrRecreatedImage,
+           .written_image_path = streamToEmbeddedImage,
+           .target_name = QStringLiteral("seed.txt"),
+           .metadata = streamToEmbeddedUpdate,
+           .options = options});
+  const auto streamToEmbeddedRead =
+      sak::PartitionApfsFileSystemReader::readFileFromImage(
+          streamToEmbeddedImage, QStringLiteral("/seed.txt"),
+          static_cast<uint64_t>(seedData.size()));
+  if (!streamXattrRecreated.ok || !streamToEmbedded.ok ||
+      !streamToEmbeddedRead.ok ||
+      !hasExactXattr(streamToEmbeddedRead, streamXattrName,
+                     smallReplacement) ||
+      streamToEmbeddedRead.data != seedData) {
+    return fail(QStringLiteral("convert stream xattr to embedded"),
+                QStringLiteral("xattr transition or file payload mismatch"),
+                streamXattrRecreated.blockers + streamToEmbedded.blockers +
+                    streamToEmbeddedRead.blockers);
+  }
+  appendProof(&proofs, QStringLiteral("convert stream xattr to embedded"));
+
   const QString emptyImage =
       tempDir.filePath(QStringLiteral("empty-for-link.apfs"));
   const auto emptyInsert = sak::PartitionApfsWriter::commitImageOnlyFileInsert(
-      {.source_image_path = edgeXattrRemovedImage,
+      {.source_image_path = streamToEmbeddedImage,
        .written_image_path = emptyImage,
        .file_name = QStringLiteral("converted-link"),
        .options = options});

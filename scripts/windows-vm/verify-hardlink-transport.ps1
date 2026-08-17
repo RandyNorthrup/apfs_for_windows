@@ -4,7 +4,8 @@
 param(
     [string]$RuntimeRoot = "C:\Temp\winfsp-hardlinks-runtime",
     [string]$ImageName = "hardlink-runtime.apfs",
-    [ValidatePattern("^[A-Z]:$")][string]$Mount = "H:"
+    [ValidatePattern("^[A-Z]:$")][string]$Mount = "H:",
+    [string]$OutputPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -320,10 +321,16 @@ public static class HardLinkProofNative
     }
     Remove-Item -LiteralPath $directory -Force
 
-    [pscustomobject]@{
+    $sxsId = (Get-Content -LiteralPath (Join-Path $RuntimeRoot "winfsp.sxs") -Raw).Trim()
+    $activeDrivers = @(Get-CimInstance Win32_SystemDriver -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like "WinFsp*" -and $_.State -eq "Running" } |
+        Select-Object Name, State, PathName)
+    $result = [ordered]@{
         check = "winfsp_apfs_hardlink_transport"
         ok = $true
-        driver_service = "winfsp-apfs/main"
+        sxs_id = $sxsId
+        driver_service = "WinFsp+$sxsId"
+        coexisting_active_drivers = @($activeDrivers)
         filesystem = $fileSystemName.ToString()
         volume_flags = ("0x{0:X8}" -f $flags)
         file_supports_hard_links = $supportsHardLinks
@@ -338,7 +345,19 @@ public static class HardLinkProofNative
         after_nested_delete = $afterNestedDelete
         after_root_delete = $afterRootDelete
         payload_sha256 = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
-    } | ConvertTo-Json -Depth 6
+    }
+    $json = $result | ConvertTo-Json -Depth 7
+    if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
+        $resolvedOutput = if ([IO.Path]::IsPathRooted($OutputPath)) {
+            $OutputPath
+        } else {
+            Join-Path $RuntimeRoot $OutputPath
+        }
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $resolvedOutput) |
+            Out-Null
+        $json | Set-Content -LiteralPath $resolvedOutput -Encoding UTF8
+    }
+    $json
 } finally {
     if (-not $worker.HasExited) {
         Stop-Process -Id $worker.Id -Force -ErrorAction SilentlyContinue

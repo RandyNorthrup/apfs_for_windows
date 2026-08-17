@@ -134,7 +134,8 @@ $app = Get-ItemProperty `
 $startMenu = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\APFS for Windows"
 $packageRoot = Resolve-RunPath $PackagePath
 $binaries = @("apfs_mount_service.exe", "apfs_winfs_worker.exe",
-              "apfs_mount_manager.exe", "apfs_probe.exe") | ForEach-Object {
+              "apfs_mount_manager.exe", "apfs_probe.exe", "winfsp-x64.dll",
+              "winfsp-x64.sys", "winfsp.sxs", "winfsp-driver.json") | ForEach-Object {
     $packagePath = Join-Path $packageRoot $_
     $installedPath = Join-Path $InstallRoot $_
     $packageHash = if (Test-Path -LiteralPath $packagePath -PathType Leaf) {
@@ -155,12 +156,44 @@ $binaries = @("apfs_mount_service.exe", "apfs_winfs_worker.exe",
     }
 }
 $binaryHashesMatch = @($binaries | Where-Object { -not $_.match }).Count -eq 0
+$driver = Get-CimInstance Win32_SystemDriver -Filter "Name='WinFsp+apfs-main'" `
+    -ErrorAction SilentlyContinue
+$expectedDriverPath = [IO.Path]::GetFullPath((Join-Path $InstallRoot "winfsp-x64.sys"))
+$actualDriverPath = if ($driver) { ([string]$driver.PathName).Trim().Trim('"') } else { "" }
+if ($actualDriverPath.StartsWith("\??\", [StringComparison]::Ordinal)) {
+    $actualDriverPath = $actualDriverPath.Substring(4)
+}
+$driverPathMatch = $driver -and
+    [IO.Path]::GetFullPath($actualDriverPath).Equals(
+        $expectedDriverPath, [StringComparison]::OrdinalIgnoreCase)
+$installedWorkers = @(Get-CimInstance Win32_Process -Filter "Name='apfs_winfs_worker.exe'" `
+    -ErrorAction SilentlyContinue | Where-Object {
+        $_.ExecutablePath -and
+        [IO.Path]::GetFullPath([string]$_.ExecutablePath).Equals(
+            [IO.Path]::GetFullPath((Join-Path $InstallRoot "apfs_winfs_worker.exe")),
+            [StringComparison]::OrdinalIgnoreCase)
+    })
+$loadedWinFsp = @($installedWorkers | ForEach-Object {
+    try {
+        (Get-Process -Id ([int]$_.ProcessId)).Modules |
+            Where-Object ModuleName -eq "winfsp-x64.dll" |
+            Select-Object -ExpandProperty FileName
+    } catch {
+        $null
+    }
+} | Where-Object { $_ })
+$expectedRuntimeDll = [IO.Path]::GetFullPath((Join-Path $InstallRoot "winfsp-x64.dll"))
+$customRuntimeLoaded = @($loadedWinFsp | Where-Object {
+    [IO.Path]::GetFullPath([string]$_).Equals(
+        $expectedRuntimeDll, [StringComparison]::OrdinalIgnoreCase)
+}).Count -gt 0
 $mountReady = $mountInfo -and $mountInfo.exists -and $mountInfo.read_only -and
     (-not $mountInfo.allow_raw_writes)
 $ok = $mountReady -and $actualHash -eq $ExpectedSha256 -and $writeDenied -and
     $service.State -eq "Running" -and $service.StartMode -eq "Auto" -and
     $managerValid -and $runValue -and $startupTaskOk -and $interactiveTrayOk -and
-    $app -and $binaryHashesMatch
+    $app -and $binaryHashesMatch -and $driver -and $driver.State -eq "Running" -and
+    $driverPathMatch -and $customRuntimeLoaded
 
 $result = [ordered]@{
     component = "apfs_for_windows"
@@ -185,6 +218,19 @@ $result = [ordered]@{
         start_mode = $service.StartMode
         process_id = [int]$service.ProcessId
     }
+    winfsp_driver = if ($driver) {
+        [ordered]@{
+            name = [string]$driver.Name
+            state = [string]$driver.State
+            start_mode = [string]$driver.StartMode
+            path = [string]$driver.PathName
+            path_match = [bool]$driverPathMatch
+        }
+    } else {
+        $null
+    }
+    winfsp_runtime_loaded = [bool]$customRuntimeLoaded
+    loaded_winfsp_modules = @($loadedWinFsp)
     manager_self_test = $manager
     manager_self_test_valid = [bool]$managerValid
     manager_stderr = $managerError

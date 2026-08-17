@@ -41,9 +41,9 @@ find_path(WinFsp_INCLUDE_DIR
 )
 
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-    set(_winfsp_lib_suffix lib lib\\winfsp-x64 lib\\dll)
+    set(_winfsp_lib_suffix lib lib\\winfsp-x64 lib\\dll build/VStudio/build/Release)
 else()
-    set(_winfsp_lib_suffix lib lib\\winfsp-x86 lib\\dll)
+    set(_winfsp_lib_suffix lib lib\\winfsp-x86 lib\\dll build/VStudio/build/Release)
 endif()
 
 find_library(WinFsp_LIBRARY
