@@ -1355,3 +1355,31 @@ Exit gate: release checklist passes with artifacts under this repo.
   kernel read-only mount; APFS, media read-only, volume read-only, invariant
   hash, empty old-generation size/hash, detach, and remote cleanup all passed.
   Evidence: `docs/evidence/apple-vm-raw-interruption-final-2026-08-17.json`.
+
+## 2026-08-17 Exact Current Lifecycle and Governance Update
+
+- Clean source `d5e68ccef376ba115d4fbcf98391c56d8f1b2977` built in production
+  mode and passed CTest 13/13. Its deterministic 31-file test package SHA-256 is
+  `B2944BB636EED3003DC827A169550E3DB813A0C2BF39ACCC5DECA7CF873EDCBD`;
+  Windows PowerShell 5.1 and PowerShell 7 package verification both passed.
+- Exact Windows VM lifecycle passed from `2026-08-17T07:36:46Z` through
+  `2026-08-17T07:46:20Z`: clean install, Automatic/running service, dedicated
+  driver, VM reboot, restored `R:` mount, exact file and installed-binary hashes,
+  one interactive stacked `AP`/`FS` tray process with `Open` and `Exit`, clean
+  uninstall, no reboot-required residue, and remote cleanup. Only the VM
+  rebooted. Independent audit found no product service, driver, manager, worker,
+  install root, or file-backed virtual disk. Sanitized evidence:
+  `docs/evidence/windows-vm-install-lifecycle-d5e68cc-2026-08-17.json`.
+- This lifecycle fixture was read-only by design; it verifies persistence and
+  shell/tray/install behavior, while separate image, macOS, raw-VHD, and physical
+  USB lanes carry read/write/delete evidence. Package and driver remain
+  test-signed, so production lifecycle and physical-package gates remain open.
+- Public `main` protection now enforces administrators, strict
+  `repository-gates`, linear history, and blocked force-push/deletion. Required
+  reviews, reviewed signed release tag, and production provenance remain open.
+  Evidence: `docs/evidence/repository-governance-2026-08-17.json`.
+- Live source-boundary verification passed at `2026-08-17T07:32:49Z`.
+  Concurrent upstream owner work then briefly modified imported
+  `src/core/apfs_keybag.cpp`, making one strict run red, before making it clean.
+  The latest check at `2026-08-17T07:53:07Z` passes with only unrelated
+  HFS/test/catalog work dirty. This repository did not modify S.A.K.

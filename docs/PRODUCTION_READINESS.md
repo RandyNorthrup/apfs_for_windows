@@ -14,7 +14,7 @@ Current classification: **development-certified, not production-ready**.
 | Physical APFS USB operations | Read/write/delete, Unicode, long path, Robocopy, concurrent reads, regular-file/directory/root stream xattrs, cleanup |
 | Default mount policy | Newly discovered media is read-only; the owner-pinned `V:` test mapping is explicitly writable |
 | Persistence model | Automatic service plus per-user tray startup and explicit tray Exit |
-| Repository source boundary | Imported manifest and vendored hashes intact; this repository never writes the upstream S.A.K. checkout |
+| Repository source isolation | Imported manifest and vendored hashes intact; this repository never writes the upstream S.A.K. checkout |
 | Repository hygiene | No duplicate code files, forbidden tracked roots, conflict markers, or tracked secrets |
 | Production compiler mode | Pinned coherent WinFsp input, native hard-link ABI, `/W4 /WX`, CTest 13/13 |
 | Reproducible release build | Production mode enables `/Brepro`, deterministic compilation, and source path mapping; current verifier compares tested binaries, metadata, and complete stored-entry packages across detached source paths and PowerShell 5.1/7 |
@@ -23,9 +23,10 @@ Current classification: **development-certified, not production-ready**.
 | Native Windows hard-link transport | Exact dedicated driver/DLL/worker pairing; root and nested create, link-count lifecycle, alias mutation, stock-driver coexistence |
 | Dedicated runtime source | Pinned commit approved after kernel/ABI review, clean build, and isolated VM transport proof |
 | Dedicated driver build | Clean VS2022/WDK 10.0.26100 x64 SYS and DLL build from pinned public commit |
-| Development package lifecycle | 31-file test-signed candidate; clean install, VM reboot persistence, tray Open/Exit, exact hashes, clean uninstall |
+| Development package lifecycle | Current 31-file test-signed candidate `B2944...CBD`; clean install, VM reboot persistence, tray Open/Exit, exact hashes, clean uninstall |
 | Package structure | Bundled SxS driver/runtime, build metadata, provenance, payload manifest, and SHA-256 list |
 | Synthetic raw interruption | Exact test package completed 16 MiB raw-VHD write and remount; worker kill after 328 changed blocks selected complete old generation with invariant preserved |
+| Repository protection baseline | Public `main`; admin enforcement; strict `repository-gates`; linear history; force-push and deletion disabled |
 
 Current hard-link/runtime/package evidence is summarized in
 `docs/evidence/winfsp-hardlink-package-2026-08-17.json`. The test package SHA-256
@@ -35,10 +36,11 @@ Source approval details are in
 `docs/evidence/winfsp-runtime-source-approval-2026-08-17.json`; approval does not
 waive production driver signing or exact-package release gates.
 
-Live upstream verification currently reports owner edits in
-`src/core/partition_apfs_file_system_reader.cpp`. No upstream file was changed by
-this project. The strict boundary check remains red until that separate checkout
-is clean or its next import is intentionally recorded here.
+Live upstream verification passed at `2026-08-17T07:32:49Z`. Concurrent owner
+work then briefly modified imported `src/core/apfs_keybag.cpp`, making one strict
+run red, before making that path clean. The latest check at
+`2026-08-17T07:53:07Z` passes with only unrelated HFS/test/catalog work dirty.
+No upstream file was changed by this project.
 
 Source commit `0c51b376d1890004ea41aff67555fef6a3aebd04` passed the
 two-clean-worktree reproducibility verifier. Both detached paths passed CTest
@@ -76,7 +78,7 @@ across Windows PowerShell 5.1 and PowerShell 7. See
 | Reproducible kernel/runtime CI | Move the pinned WinFsp VS2022/WDK build into retained CI with kernel tests and provenance |
 | Fault recovery | Real surprise-unplug and interrupted-write/power-loss recovery on disposable physical APFS media |
 | Remaining APFS policy | Sealed/FileVault/per-file-key and filesystem-owned mutation policy beyond current fail-closed behavior |
-| Release governance | Protected branch, required CI checks, reviewed release tag, provenance, and retained evidence |
+| Release governance | Admin-enforced branch protection now exists; add required reviews, reviewed signed release tag, production provenance, and retained release evidence |
 
 Physical USB create/read/rename/overwrite/delete, metadata, EA, symlink, ACL,
 and cleanup passed on worker SHA-256
@@ -108,6 +110,21 @@ The clean VM-lifecycle package used worker SHA-256
 `81F8B65AA60C33C57E98DFDFCE81D8E5D2EC0B6D5FF6B8F9B238BC670D38078F`.
 Only the Windows VM rebooted; the host did not. This closes the clean development
 package lifecycle lane, not production signing or exact physical USB proof.
+
+Current source `d5e68ccef376ba115d4fbcf98391c56d8f1b2977` produced worker
+SHA-256 `F04E290A6F1FB39402A948D5831BC3FCAF4BBBA6E8F762C51322C84589E3BD25`
+and deterministic test-package SHA-256
+`B2944BB636EED3003DC827A169550E3DB813A0C2BF39ACCC5DECA7CF873EDCBD`.
+CTest passed 13/13 and package verification passed under Windows PowerShell 5.1
+and PowerShell 7. Exact Windows VM install, Automatic/running service before and
+after VM reboot, restored `R:`, one interactive tray with `Open`/`Exit`, exact
+installed hashes, uninstall, and independent residue cleanup passed. The host
+did not reboot. See
+`docs/evidence/windows-vm-install-lifecycle-d5e68cc-2026-08-17.json`.
+
+Repository protection evidence is retained in
+`docs/evidence/repository-governance-2026-08-17.json`. This closes baseline
+branch protection, not final production release governance.
 
 The Windows VM raw-interruption harness now installs an exact package and uses
 a disposable fixed VHD through `\\.\PhysicalDriveN`. Its completed-write control
