@@ -39,6 +39,20 @@ function Copy-RequiredFile {
     Copy-Item -LiteralPath $Source -Destination $Destination -Force
 }
 
+function Write-StableJson {
+    param(
+        [Parameter(Mandatory = $true)]$Value,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [int]$Depth = 6
+    )
+
+    $json = $Value | ConvertTo-Json -Depth $Depth -Compress
+    [IO.File]::WriteAllText(
+        $Path,
+        "$json`n",
+        [Text.UTF8Encoding]::new($false))
+}
+
 function New-DeterministicZip {
     param(
         [Parameter(Mandatory = $true)][string]$SourceRoot,
@@ -63,11 +77,16 @@ function New-DeterministicZip {
             $stream, [IO.Compression.ZipArchiveMode]::Create, $true)
         try {
             foreach ($relativePath in $relativePaths) {
+                # Stored entries avoid runtime-specific Deflate output.
                 $entry = $archive.CreateEntry(
-                    $relativePath, [IO.Compression.CompressionLevel]::Optimal)
+                    $relativePath, [IO.Compression.CompressionLevel]::NoCompression)
                 $entry.LastWriteTime = $entryTimestamp
                 $entry.ExternalAttributes = 0
-                $sourcePath = Join-Path $SourceRoot $relativePath.Replace("/", "\")
+                $sourcePath = Join-Path -Path $SourceRoot `
+                    -ChildPath ($relativePath.Replace("/", "\"))
+                if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+                    throw "Deterministic archive source file is missing: $relativePath"
+                }
                 $source = [IO.File]::OpenRead($sourcePath)
                 try {
                     $destinationStream = $entry.Open()
@@ -92,6 +111,29 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $resolvedBuild = Resolve-RepoPath $BuildDir
 $resolvedPackageRoot = Resolve-RepoPath $PackageRoot
 $resolvedOutput = Resolve-RepoPath $OutputPath
+$buildMetadataPath = Join-Path $resolvedBuild "apfs-build-metadata.json"
+if (-not (Test-Path -LiteralPath $buildMetadataPath -PathType Leaf)) {
+    throw "Production build metadata is missing: $buildMetadataPath"
+}
+$buildMetadata = Get-Content -LiteralPath $buildMetadataPath -Raw | ConvertFrom-Json
+$sourceHead = (@(& git -C $repoRoot rev-parse HEAD 2>$null) -join "").Trim()
+if ($LASTEXITCODE -ne 0 -or -not $sourceHead) {
+    throw "Unable to resolve the packaging checkout revision."
+}
+$sourceStatus = @(& git -C $repoRoot status --porcelain --untracked-files=normal 2>$null)
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to verify the packaging checkout state."
+}
+if ($sourceStatus.Count -ne 0) {
+    throw "Release packaging requires a clean checkout."
+}
+if ([int]$buildMetadata.schema_version -ne 3 -or
+    $buildMetadata.production_build -ne $true -or
+    $buildMetadata.reproducible_build -ne $true -or
+    $buildMetadata.source_dirty -ne $false -or
+    [string]$buildMetadata.source_commit -cne $sourceHead) {
+    throw "Release packaging requires clean production build metadata matching checkout HEAD."
+}
 $winFspDependency = Get-Content `
     -LiteralPath (Join-Path $repoRoot "dependencies\winfsp-apfs.json") -Raw |
     ConvertFrom-Json
@@ -162,6 +204,11 @@ $driverFiles = @("winfsp-x64.dll", "winfsp-x64.sys", "winfsp.sxs")
 if (Test-Path -LiteralPath (Join-Path $stageRoot "winfsp-x64.cer") -PathType Leaf) {
     $driverFiles += "winfsp-x64.cer"
 }
+$stableDriverSignature = [ordered]@{
+    subject = [string]$driverSignature.subject
+    thumbprint = [string]$driverSignature.thumbprint
+    test_certificate = [bool]$driverSignature.test_certificate
+}
 $driverManifest = [ordered]@{
     schema_version = 2
     product = "APFS for Windows"
@@ -171,7 +218,7 @@ $driverManifest = [ordered]@{
     runtime_commit = $runtimeCommit
     upstream_base_commit = [string]$winFspDependency.upstream_base_commit
     driver_signing_mode = $DriverSigningMode.ToLowerInvariant()
-    signature = $driverSignature
+    signature = $stableDriverSignature
     files = @($driverFiles | ForEach-Object {
         $path = Join-Path $stageRoot $_
         [ordered]@{
@@ -181,8 +228,8 @@ $driverManifest = [ordered]@{
         }
     })
 }
-$driverManifest | ConvertTo-Json -Depth 6 |
-    Set-Content -LiteralPath (Join-Path $stageRoot "winfsp-driver.json") -Encoding UTF8
+Write-StableJson -Value $driverManifest `
+    -Path (Join-Path $stageRoot "winfsp-driver.json")
 
 $qtDlls = @(
     "Qt6Core.dll",
@@ -228,39 +275,54 @@ Copy-RequiredFile `
     -Source (Join-Path $repoRoot "dependencies\winfsp-apfs.json") `
     -Destination (Join-Path $stageRoot "WINFSP_PROVENANCE.json")
 
-$payloadFiles = @(Get-ChildItem -LiteralPath $stageRoot -Recurse -File | Sort-Object FullName)
-$payloadManifest = @($payloadFiles | ForEach-Object {
+$payloadPaths = @(Get-ChildItem -LiteralPath $stageRoot -Recurse -File | ForEach-Object {
+    $_.FullName.Substring($stageRoot.Length + 1).Replace("\", "/")
+})
+[Array]::Sort($payloadPaths, [StringComparer]::Ordinal)
+$payloadManifest = @($payloadPaths | ForEach-Object {
+    $path = Join-Path $stageRoot $_.Replace("/", "\")
+    $file = Get-Item -LiteralPath $path
     [ordered]@{
-        relative_path = $_.FullName.Substring($stageRoot.Length + 1).Replace("\", "/")
-        size_bytes = [int64]$_.Length
-        sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+        relative_path = $_
+        size_bytes = [int64]$file.Length
+        sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
     }
 })
 $releaseManifest = [ordered]@{
     schema_version = 1
     product = "APFS for Windows"
     version = $Version
+    source_commit = $sourceHead
     driver_signing_mode = $DriverSigningMode.ToLowerInvariant()
     production_ready = [bool]($DriverSigningMode -eq "Production")
     files = $payloadManifest
 }
-$releaseManifest | ConvertTo-Json -Depth 6 |
-    Set-Content -LiteralPath (Join-Path $stageRoot "release-manifest.json") -Encoding UTF8
+Write-StableJson -Value $releaseManifest `
+    -Path (Join-Path $stageRoot "release-manifest.json")
 $checksumLines = @($payloadManifest | ForEach-Object {
     "$($_.sha256) *$($_.relative_path)"
 })
-$checksumLines | Set-Content -LiteralPath (Join-Path $stageRoot "SHA256SUMS.txt") -Encoding ASCII
+[IO.File]::WriteAllText(
+    (Join-Path $stageRoot "SHA256SUMS.txt"),
+    ($checksumLines -join "`n") + "`n",
+    [Text.ASCIIEncoding]::new())
 
 if (Test-Path -LiteralPath $zipPath -PathType Leaf) {
     Remove-Item -LiteralPath $zipPath -Force
 }
 New-DeterministicZip -SourceRoot $stageRoot -Destination $zipPath
 
-$stageFiles = @(Get-ChildItem -LiteralPath $stageRoot -Recurse -File | ForEach-Object {
+$stagePaths = @(Get-ChildItem -LiteralPath $stageRoot -Recurse -File | ForEach-Object {
+    $_.FullName.Substring($stageRoot.Length + 1).Replace("\", "/")
+})
+[Array]::Sort($stagePaths, [StringComparer]::Ordinal)
+$stageFiles = @($stagePaths | ForEach-Object {
+    $path = Join-Path $stageRoot $_.Replace("/", "\")
+    $file = Get-Item -LiteralPath $path
     [ordered]@{
-        relative_path = $_.FullName.Substring($stageRoot.Length + 1)
-        size_bytes = [int64]$_.Length
-        sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+        relative_path = $_
+        size_bytes = [int64]$file.Length
+        sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
     }
 })
 
@@ -274,6 +336,7 @@ $result = [ordered]@{
     package_name = $packageName
     driver_signing_mode = $DriverSigningMode.ToLowerInvariant()
     production_ready = [bool]($DriverSigningMode -eq "Production")
+    source_commit = $sourceHead
     winfsp_runtime_commit = $runtimeCommit
     winfsp_driver_signature = $driverSignature
     build_dir = $resolvedBuild
@@ -281,7 +344,9 @@ $result = [ordered]@{
     zip_path = $zipPath
     zip_sha256 = $zipHash
     deterministic_archive = $true
+    archive_compression_method = "store"
     archive_entry_timestamp_utc = "2000-01-01T00:00:00Z"
+    manifest_serialization = "compact-json-utf8-no-bom-lf"
     file_count = @($stageFiles).Count
     files = @($stageFiles)
     completed_utc = (Get-Date).ToUniversalTime().ToString("o")

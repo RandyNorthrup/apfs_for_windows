@@ -81,6 +81,85 @@ function Invoke-RepairLauncherSelfTest {
     }
 }
 
+function Get-StreamSha256 {
+    param([Parameter(Mandatory = $true)][IO.Stream]$Stream)
+
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($sha256.ComputeHash($Stream))).Replace("-", "")
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
+function Test-DeterministicArchive {
+    param(
+        [Parameter(Mandatory = $true)][string]$ZipPath,
+        [Parameter(Mandatory = $true)][string]$StageRoot
+    )
+
+    Add-Type -AssemblyName System.IO.Compression
+    $expectedTimestamp = [DateTimeOffset]::new(
+        2000, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
+    [string[]]$expectedPaths = @(Get-ChildItem -LiteralPath $StageRoot -Recurse -File |
+        ForEach-Object {
+            $_.FullName.Substring($StageRoot.Length + 1).Replace("\", "/")
+        })
+    [Array]::Sort($expectedPaths, [StringComparer]::Ordinal)
+
+    $stream = [IO.File]::OpenRead($ZipPath)
+    try {
+        $archive = [IO.Compression.ZipArchive]::new(
+            $stream, [IO.Compression.ZipArchiveMode]::Read, $false)
+        try {
+            $entries = @($archive.Entries)
+            $actualPaths = @($entries | ForEach-Object { $_.FullName })
+            $pathsMatch = $actualPaths.Count -eq $expectedPaths.Count
+            if ($pathsMatch) {
+                for ($index = 0; $index -lt $expectedPaths.Count; $index++) {
+                    if ($actualPaths[$index] -cne $expectedPaths[$index]) {
+                        $pathsMatch = $false
+                        break
+                    }
+                }
+            }
+
+            $entryReports = @($entries | ForEach-Object {
+                $entry = $_
+                $stagePath = Join-Path $StageRoot $entry.FullName.Replace("/", "\")
+                $entryStream = $entry.Open()
+                try {
+                    $entryHash = Get-StreamSha256 -Stream $entryStream
+                } finally {
+                    $entryStream.Dispose()
+                }
+                $stageHash = if (Test-Path -LiteralPath $stagePath -PathType Leaf) {
+                    (Get-FileHash -LiteralPath $stagePath -Algorithm SHA256).Hash
+                } else { $null }
+                [ordered]@{
+                    relative_path = $entry.FullName
+                    stored = [bool]($entry.CompressedLength -eq $entry.Length)
+                    timestamp_ok = [bool]($entry.LastWriteTime -eq $expectedTimestamp)
+                    hash_ok = [bool]($stageHash -and $entryHash -ceq $stageHash)
+                }
+            })
+            $entriesOk = @($entryReports | Where-Object {
+                -not $_.stored -or -not $_.timestamp_ok -or -not $_.hash_ok
+            }).Count -eq 0
+            return [ordered]@{
+                ok = [bool]($pathsMatch -and $entriesOk)
+                ordered_paths_match = [bool]$pathsMatch
+                entry_count = $entries.Count
+                entries = $entryReports
+            }
+        } finally {
+            $archive.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 $resolvedPackageRoot = Resolve-RepoPath $PackageRoot
 $resolvedOutput = Resolve-RepoPath $OutputPath
 if ($DriverSigningMode -eq "Test" -and -not $AllowTestSignedDriver) {
@@ -141,6 +220,11 @@ foreach ($relative in $requiredFiles) {
 $missing = @($fileReports | Where-Object { -not $_.exists } | ForEach-Object { $_.relative_path })
 $zipExists = Test-Path -LiteralPath $zipPath -PathType Leaf
 $zipHash = if ($zipExists) { (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash } else { $null }
+$archiveReport = if ($zipExists -and (Test-Path -LiteralPath $stageRoot -PathType Container)) {
+    Test-DeterministicArchive -ZipPath $zipPath -StageRoot $stageRoot
+} else {
+    [ordered]@{ ok = $false; ordered_paths_match = $false; entry_count = 0; entries = @() }
+}
 $releaseManifestPath = Join-Path $stageRoot "release-manifest.json"
 $releaseManifest = if (Test-Path -LiteralPath $releaseManifestPath -PathType Leaf) {
     Get-Content -LiteralPath $releaseManifestPath -Raw | ConvertFrom-Json
@@ -174,6 +258,8 @@ $buildMetadataOk = $buildMetadata -and
     $buildMetadata.winfsp_native_hardlinks -eq $true -and
     [string]$buildMetadata.winfsp_runtime_repository -ceq [string]$winFspDependency.repository -and
     [string]$buildMetadata.winfsp_runtime_commit -ceq [string]$winFspDependency.commit
+$sourceProvenanceOk = $releaseManifest -and $buildMetadata -and
+    [string]$releaseManifest.source_commit -ceq [string]$buildMetadata.source_commit
 $installPayload = Invoke-PayloadValidation `
     -ScriptPath (Join-Path $stageRoot "install-apfs-for-windows.ps1") `
     -Name "install_payload" `
@@ -184,8 +270,9 @@ $repairPayload = Invoke-PayloadValidation `
     -AllowTestSignedDriver:$AllowTestSignedDriver
 $repairLauncher = Invoke-RepairLauncherSelfTest `
     -ScriptPath (Join-Path $stageRoot "start-repair-elevated.ps1")
-$ok = $zipExists -and ($missing.Count -eq 0) -and $releaseManifest -and
+$ok = $zipExists -and $archiveReport.ok -and ($missing.Count -eq 0) -and $releaseManifest -and
     ($manifestMismatches.Count -eq 0) -and $buildMetadataOk -and
+    $sourceProvenanceOk -and
     ([string]$releaseManifest.driver_signing_mode -ceq $DriverSigningMode.ToLowerInvariant()) -and
     $installPayload.ok -and $repairPayload.ok -and $repairLauncher.ok
 
@@ -201,10 +288,12 @@ $result = [ordered]@{
     zip_path = $zipPath
     zip_exists = [bool]$zipExists
     zip_sha256 = $zipHash
+    deterministic_archive = $archiveReport
     missing_required_files = @($missing)
     release_manifest_ok = [bool]($releaseManifest -and $manifestMismatches.Count -eq 0)
     release_manifest_mismatches = @($manifestMismatches)
     build_metadata_ok = [bool]$buildMetadataOk
+    source_provenance_ok = [bool]$sourceProvenanceOk
     build_metadata = $buildMetadata
     install_payload = $installPayload
     repair_payload = $repairPayload

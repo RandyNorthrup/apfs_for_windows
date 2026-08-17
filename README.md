@@ -307,7 +307,9 @@ provenance, build metadata, payload manifest, and SHA-256 list. Package
 verification also rehashes every manifest entry and runs install and repair
 payload-only validation from the staged directory. ZIP entries use ordinal path
 ordering and a fixed timestamp so identical staged payloads produce identical
-archives. `verify-reproducible-build.ps1` checks out one commit at two distinct
+archives. Packaging refuses a dirty checkout or build metadata that does not
+exactly match `HEAD`, and records that source commit in the release manifest.
+`verify-reproducible-build.ps1` checks out one commit at two distinct
 temporary paths, builds and tests both, verifies both packages, compares every
 shipped project executable and metadata file, compares the complete ZIP, and
 removes both worktrees. It does not install, elevate, or reboot.
