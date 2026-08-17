@@ -412,6 +412,24 @@ try {
     $result.error = $_.Exception.Message
     if ($replacementStarted -and (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
         try {
+            $rollbackService = Get-Service -Name $ServiceName -ErrorAction Stop
+            if ($rollbackService.Status -ne
+                [System.ServiceProcess.ServiceControllerStatus]::Stopped) {
+                $rollbackService.Stop()
+                $rollbackService = Wait-ServiceStatus -Name $ServiceName `
+                    -Status ([System.ServiceProcess.ServiceControllerStatus]::Stopped) `
+                    -Seconds $TimeoutSeconds
+            }
+            $workerDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
+            while (@(Get-Process -Name "apfs_winfs_worker" `
+                    -ErrorAction SilentlyContinue).Count -gt 0 -and
+                   (Get-Date) -lt $workerDeadline) {
+                Start-Sleep -Milliseconds 250
+            }
+            if (@(Get-Process -Name "apfs_winfs_worker" `
+                    -ErrorAction SilentlyContinue).Count -gt 0) {
+                throw "APFS worker process did not exit before rollback."
+            }
             Copy-Item -LiteralPath $backupPath -Destination $destinationWorker -Force
             $result.rollback_performed = $true
             $result.installed_sha256_after =

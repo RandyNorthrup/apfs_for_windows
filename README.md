@@ -231,7 +231,8 @@ driver did not change, and rolls back a failed replacement.
 Package-worker mode replaces clean-main identity with explicit ZIP and worker
 SHA-256 pins. It verifies worker and build metadata directly inside the ZIP,
 requires staged copies to match, preserves current driver identity, and requires
-pinned mount to return read-only after replacement:
+pinned mount to return read-only after replacement. Rollback stops service and
+waits for worker exit before restoring previous executable:
 
 ```powershell
 .\scripts\deploy-current-worker-for-certification.ps1 `
