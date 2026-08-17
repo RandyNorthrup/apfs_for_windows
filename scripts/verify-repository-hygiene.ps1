@@ -39,7 +39,6 @@ $requiredFiles = @(
     ".gitignore",
     ".gitmodules",
     ".github\CODEOWNERS",
-    ".github\dependabot.yml",
     ".github\workflows\repository-gates.yml",
     "CMakeLists.txt",
     "CONTRIBUTING.md",
