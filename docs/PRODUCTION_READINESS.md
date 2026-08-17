@@ -17,6 +17,7 @@ Current classification: **development-certified, not production-ready**.
 | Repository source boundary | Upstream S.A.K. APFS paths verified read-only and unchanged since import |
 | Repository hygiene | No duplicate code files, forbidden tracked roots, conflict markers, or tracked secrets |
 | Production compiler mode | Pinned coherent WinFsp input, native hard-link ABI, `/W4 /WX`, CTest 13/13 |
+| Reproducible release build | Production mode enables `/Brepro`, deterministic compilation, and source path mapping; `verify-reproducible-build.ps1` compares tested binaries, metadata, and complete packages across detached source paths |
 | Clean candidate build | Source `7ddcb7a1d0151a7d2221d68f5564c3288f9c97f7`; production mode, clean metadata, CI green, local WinFsp and macOS stream proofs passed |
 | Current-build physical APFS proof | Matching installed/build worker; non-admin namespace, metadata, EA, ACL, symlink, cleanup, and 9,001/12,017-byte regular-file/directory/root stream EA operations |
 | Native Windows hard-link transport | Exact dedicated driver/DLL/worker pairing; root and nested create, link-count lifecycle, alias mutation, stock-driver coexistence |

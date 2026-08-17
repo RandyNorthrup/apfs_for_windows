@@ -92,6 +92,9 @@ if (-not $SkipTests) {
 
 $buildMetadata = Read-JsonOrNull -Path (Join-Path $resolvedBuild "apfs-build-metadata.json")
 $productionBuildOk = $buildMetadata -and $buildMetadata.production_build -eq $true
+$reproducibleBuildOk = $buildMetadata -and
+    $buildMetadata.reproducible_build -eq $true -and
+    [string]$buildMetadata.reproducible_source_path -ceq "C:/src/apfs_for_windows"
 $hardlinkBuildOk = $buildMetadata -and $buildMetadata.winfsp_native_hardlinks -eq $true
 $sourceHead = [string](& git -C $repoRoot rev-parse HEAD 2>$null)
 $sourceStatus = @(& git -C $repoRoot status --porcelain 2>$null)
@@ -173,6 +176,7 @@ $gateStatus = [ordered]@{
     ctest = [bool]$testResult.ok
     release_package = [bool]$package.ok
     production_build_mode = [bool]$productionBuildOk
+    reproducible_build_metadata = [bool]$reproducibleBuildOk
     exact_source_revision = [bool]$sourceRevisionOk
     native_hardlink_build = [bool]$hardlinkBuildOk
     authenticode_signatures = [bool]$signaturesOk

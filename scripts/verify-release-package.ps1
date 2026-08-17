@@ -165,9 +165,11 @@ $winFspDependency = Get-Content `
     -LiteralPath (Join-Path $repoRoot "dependencies\winfsp-apfs.json") -Raw |
     ConvertFrom-Json
 $buildMetadataOk = $buildMetadata -and
-    [int]$buildMetadata.schema_version -eq 2 -and
+    [int]$buildMetadata.schema_version -eq 3 -and
     [string]$buildMetadata.version -eq $Version -and
     $buildMetadata.production_build -eq $true -and
+    $buildMetadata.reproducible_build -eq $true -and
+    [string]$buildMetadata.reproducible_source_path -ceq "C:/src/apfs_for_windows" -and
     $buildMetadata.source_dirty -eq $false -and
     $buildMetadata.winfsp_native_hardlinks -eq $true -and
     [string]$buildMetadata.winfsp_runtime_repository -ceq [string]$winFspDependency.repository -and

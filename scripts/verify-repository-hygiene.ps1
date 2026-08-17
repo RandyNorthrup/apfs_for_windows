@@ -50,6 +50,7 @@ $requiredFiles = @(
     "VERSION",
     "docs\ARCHITECTURE.md",
     "docs\PRODUCTION_READINESS.md",
+    "scripts\verify-reproducible-build.ps1",
     "third_party\sak_apfs_core\IMPORT_MANIFEST.json"
 )
 $missingRequired = @($requiredFiles | Where-Object {

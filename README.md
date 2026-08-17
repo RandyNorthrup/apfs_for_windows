@@ -119,7 +119,8 @@ ctest --test-dir build -C Release --output-on-failure
 
 Production-mode configuration additionally requires a clean checkout of the
 pinned dedicated WinFsp runtime, native hard-link ABI, `/W4 /WX`, and explicit coherent
-WinFsp header/library/runtime paths. Build metadata is emitted beside binaries.
+WinFsp header/library/runtime paths. It also enables deterministic compilation,
+`/Brepro`, and a stable source path map. Build metadata is emitted beside binaries.
 
 Developer install, from elevated PowerShell:
 
@@ -186,6 +187,7 @@ Verify installed service and APFS USB mount state:
 .\scripts\verify-license-notices.ps1
 .\scripts\build-release-package.ps1
 .\scripts\verify-release-package.ps1
+.\scripts\verify-reproducible-build.ps1
 .\scripts\verify-service-recovery-policy.ps1
 .\scripts\verify-start-menu-entries.ps1
 .\scripts\verify-installed-app-registration.ps1
@@ -303,7 +305,12 @@ binaries, bundled side-by-side WinFsp DLL/driver, Qt runtime files,
 install/repair/uninstall scripts, README, license notices, APFS/WinFsp
 provenance, build metadata, payload manifest, and SHA-256 list. Package
 verification also rehashes every manifest entry and runs install and repair
-payload-only validation from the staged directory.
+payload-only validation from the staged directory. ZIP entries use ordinal path
+ordering and a fixed timestamp so identical staged payloads produce identical
+archives. `verify-reproducible-build.ps1` checks out one commit at two distinct
+temporary paths, builds and tests both, verifies both packages, compares every
+shipped project executable and metadata file, compares the complete ZIP, and
+removes both worktrees. It does not install, elevate, or reboot.
 
 The explicit test path uses `-DriverSigningMode Test -AllowTestSignedDriver` on
 both scripts and emits `APFS-for-Windows-0.1.0-test-signed.zip`. The current test

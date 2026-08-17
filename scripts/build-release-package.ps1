@@ -39,6 +39,55 @@ function Copy-RequiredFile {
     Copy-Item -LiteralPath $Source -Destination $Destination -Force
 }
 
+function New-DeterministicZip {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourceRoot,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+
+    Add-Type -AssemblyName System.IO.Compression
+    $entryTimestamp = [DateTimeOffset]::new(
+        2000, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
+    [string[]]$relativePaths = @(Get-ChildItem -LiteralPath $SourceRoot -Recurse -File |
+        ForEach-Object {
+            $_.FullName.Substring($SourceRoot.Length + 1).Replace("\", "/")
+        })
+    [Array]::Sort($relativePaths, [StringComparer]::Ordinal)
+    $stream = [IO.File]::Open(
+        $Destination,
+        [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write,
+        [IO.FileShare]::None)
+    try {
+        $archive = [IO.Compression.ZipArchive]::new(
+            $stream, [IO.Compression.ZipArchiveMode]::Create, $true)
+        try {
+            foreach ($relativePath in $relativePaths) {
+                $entry = $archive.CreateEntry(
+                    $relativePath, [IO.Compression.CompressionLevel]::Optimal)
+                $entry.LastWriteTime = $entryTimestamp
+                $entry.ExternalAttributes = 0
+                $sourcePath = Join-Path $SourceRoot $relativePath.Replace("/", "\")
+                $source = [IO.File]::OpenRead($sourcePath)
+                try {
+                    $destinationStream = $entry.Open()
+                    try {
+                        $source.CopyTo($destinationStream)
+                    } finally {
+                        $destinationStream.Dispose()
+                    }
+                } finally {
+                    $source.Dispose()
+                }
+            }
+        } finally {
+            $archive.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $resolvedBuild = Resolve-RepoPath $BuildDir
 $resolvedPackageRoot = Resolve-RepoPath $PackageRoot
@@ -205,8 +254,7 @@ $checksumLines | Set-Content -LiteralPath (Join-Path $stageRoot "SHA256SUMS.txt"
 if (Test-Path -LiteralPath $zipPath -PathType Leaf) {
     Remove-Item -LiteralPath $zipPath -Force
 }
-$stageItems = @(Get-ChildItem -LiteralPath $stageRoot -Force)
-Compress-Archive -Path ($stageItems | ForEach-Object { $_.FullName }) -DestinationPath $zipPath -Force
+New-DeterministicZip -SourceRoot $stageRoot -Destination $zipPath
 
 $stageFiles = @(Get-ChildItem -LiteralPath $stageRoot -Recurse -File | ForEach-Object {
     [ordered]@{
@@ -232,6 +280,8 @@ $result = [ordered]@{
     stage_root = $stageRoot
     zip_path = $zipPath
     zip_sha256 = $zipHash
+    deterministic_archive = $true
+    archive_entry_timestamp_utc = "2000-01-01T00:00:00Z"
     file_count = @($stageFiles).Count
     files = @($stageFiles)
     completed_utc = (Get-Date).ToUniversalTime().ToString("o")
