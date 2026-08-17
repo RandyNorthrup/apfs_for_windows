@@ -1,7 +1,7 @@
-# APFS Core Local Fork
+# Imported APFS Core
 
 This directory contains the APFS reader/writer core copied into APFS for Windows.
-It is a local fork inside this repository, not a place to edit the source
+It is a project-owned imported source snapshot, not a place to edit the source
 checkout directly.
 
 Source boundary:
