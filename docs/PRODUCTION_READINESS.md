@@ -17,7 +17,7 @@ Current classification: **development-certified, not production-ready**.
 | Repository source boundary | Upstream S.A.K. APFS paths verified read-only and unchanged since import |
 | Repository hygiene | No duplicate code files, forbidden tracked roots, conflict markers, or tracked secrets |
 | Production compiler mode | Pinned coherent WinFsp input, native hard-link ABI, `/W4 /WX`, CTest 13/13 |
-| Reproducible release build | Production mode enables `/Brepro`, deterministic compilation, and source path mapping; `verify-reproducible-build.ps1` compares tested binaries, metadata, and complete packages across detached source paths |
+| Reproducible release build | Production mode enables `/Brepro`, deterministic compilation, and source path mapping; current verifier compares tested binaries, metadata, and complete stored-entry packages across detached source paths and PowerShell 5.1/7 |
 | Clean candidate build | Source `7ddcb7a1d0151a7d2221d68f5564c3288f9c97f7`; production mode, clean metadata, CI green, local WinFsp and macOS stream proofs passed |
 | Current-build physical APFS proof | Matching installed/build worker; non-admin namespace, metadata, EA, ACL, symlink, cleanup, and 9,001/12,017-byte regular-file/directory/root stream EA operations |
 | Native Windows hard-link transport | Exact dedicated driver/DLL/worker pairing; root and nested create, link-count lifecycle, alias mutation, stock-driver coexistence |
@@ -39,7 +39,9 @@ two-clean-worktree reproducibility verifier. Both detached paths passed CTest
 13/13 and package verification; all four shipped executables, build metadata,
 and the full 13,173,640-byte test-signed ZIP were byte-identical. The ZIP
 SHA-256 was `D8E7A7792351A391A21C53710E383FC0C566071D527F2870327EB680B38A9ADE`.
-This closes application and pre-signing package reproducibility only. See
+This legacy proof used one packaging runtime twice. It closes binary and
+same-runtime pre-signing package reproducibility only; current tooling also
+requires PowerShell 5.1/7 package parity. See
 `docs/evidence/reproducible-build-2026-08-17.json`.
 
 Clean source commit `7ddcb7a` produced two retained test candidates. Package
@@ -56,7 +58,8 @@ passed two detached source paths, two CTest 13/13 runs, two package verification
 matching hashes for every shipped project executable and metadata, and matching
 full test-package SHA-256
 `D8E7A7792351A391A21C53710E383FC0C566071D527F2870327EB680B38A9ADE`.
-See `docs/evidence/reproducible-build-2026-08-17.json`.
+This retained proof predates the cross-PowerShell package gate. See
+`docs/evidence/reproducible-build-2026-08-17.json`.
 
 ## Open production blockers
 

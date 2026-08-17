@@ -1290,11 +1290,16 @@ Exit gate: release checklist passes with artifacts under this repo.
   a stable source path map. `scripts/verify-reproducible-build.ps1` builds two
   detached source paths, runs both test suites, verifies both packages, and
   compares all shipped project executables, metadata, and complete ZIP hashes.
-- Exact commit `09c4653308ebe91ba1677588165981f9f7379e30` passed that proof:
+  Current packaging writes compact UTF-8 manifests with fixed LF endings,
+  ordinal payload paths, stable signer identity, and stored ZIP entries. The
+  verifier packages once with Windows PowerShell 5.1 and once with PowerShell 7
+  and validates every ZIP entry hash, order, and timestamp.
+- Exact commit `09c4653308ebe91ba1677588165981f9f7379e30` passed the earlier
+  same-runtime proof:
   both paths passed CTest 13/13 and package verification, and the full
   13,173,640-byte ZIP matched at SHA-256
   `D8E7A7792351A391A21C53710E383FC0C566071D527F2870327EB680B38A9ADE`.
-  Sanitized evidence is retained in
+  This retained proof predates the cross-PowerShell package gate. Sanitized evidence is retained in
   `docs/evidence/reproducible-build-2026-08-17.json`.
   Source `09c4653308ebe91ba1677588165981f9f7379e30` passed that proof with
   two CTest 13/13 runs and matching full test-package SHA-256

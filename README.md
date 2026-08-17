@@ -304,10 +304,12 @@ driver. It stages `artifacts\package\APFS-for-Windows-0.1.0`, creates
 binaries, bundled side-by-side WinFsp DLL/driver, Qt runtime files,
 install/repair/uninstall scripts, README, license notices, APFS/WinFsp
 provenance, build metadata, payload manifest, and SHA-256 list. Package
-verification also rehashes every manifest entry and runs install and repair
-payload-only validation from the staged directory. ZIP entries use ordinal path
-ordering and a fixed timestamp so identical staged payloads produce identical
-archives. Packaging refuses a dirty checkout or build metadata that does not
+verification also rehashes every manifest and ZIP entry and runs install and
+repair payload-only validation from the staged directory. Package manifests use
+compact UTF-8 JSON with fixed LF endings and ordinal paths. ZIP entries use
+stored data, ordinal path ordering, and a fixed timestamp so identical staged
+payloads produce identical archives across supported PowerShell runtimes.
+Packaging refuses a dirty checkout or build metadata that does not
 exactly match `HEAD`, and records that source commit in the release manifest.
 `verify-reproducible-build.ps1` checks out one commit at two distinct
 temporary paths, builds and tests both, verifies both packages, compares every
@@ -315,11 +317,11 @@ shipped project executable and metadata file, compares the complete ZIP, and
 removes both worktrees. Packaging runs once under Windows PowerShell 5.1 and
 once under PowerShell 7 to detect runtime-dependent archive bytes. It does not
 install, elevate, or reboot.
-Exact source commit `09c4653308ebe91ba1677588165981f9f7379e30` passed this
-two-worktree proof with two 13/13 CTest runs and byte-identical binaries,
-metadata, and test-signed package ZIP SHA-256
+Exact source commit `09c4653308ebe91ba1677588165981f9f7379e30` passed the
+earlier same-runtime two-worktree proof with two 13/13 CTest runs and
+byte-identical binaries, metadata, and test-signed package ZIP SHA-256
 `D8E7A7792351A391A21C53710E383FC0C566071D527F2870327EB680B38A9ADE`.
-Sanitized evidence is retained in
+That evidence predates the PowerShell 5.1/7 parity gate. Sanitized evidence is retained in
 `docs\evidence\reproducible-build-2026-08-17.json`.
 Current retained proof is `docs\evidence\reproducible-build-2026-08-17.json`.
 
