@@ -25,8 +25,14 @@ function Invoke-JsonGate {
         [Parameter(Mandatory = $true)][string]$Script,
         [string[]]$Arguments = @()
     )
-    $raw = @(& powershell -NoProfile -ExecutionPolicy Bypass -File $Script @Arguments 2>&1)
-    $exitCode = $LASTEXITCODE
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $raw = @(& powershell -NoProfile -ExecutionPolicy Bypass -File $Script @Arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     $payload = $null
     $parseError = $null
     try {

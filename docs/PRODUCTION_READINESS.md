@@ -58,4 +58,7 @@ Run:
 ```
 
 This check is intentionally red until every package, signature, dependency,
-and destructive-test requirement is tied to the same release candidate.
+and destructive-test requirement is tied to the same release candidate. Expected
+failing child gates are captured in the JSON report instead of aborting the
+readiness aggregator; test-signed development packages do not satisfy production
+package or signing gates.
