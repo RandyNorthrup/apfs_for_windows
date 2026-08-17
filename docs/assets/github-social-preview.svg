@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title description">
+  <title id="title">APFS for Windows</title>
+  <desc id="description">GitHub social preview for native APFS read and write access in Windows Explorer.</desc>
+
+  <rect width="1280" height="640" fill="#f5f7f8"/>
+  <rect width="400" height="640" fill="#101820"/>
+  <rect x="392" width="8" height="640" fill="#50b0d6"/>
+
+  <g transform="translate(86 152)">
+    <rect x="14" y="14" width="228" height="228" rx="28" fill="#142a3a" stroke="#50b0d6" stroke-width="8"/>
+    <path d="M48 128H208" stroke="#50b0d6" stroke-width="6"/>
+    <text x="128" y="110" fill="#ffffff" font-family="Segoe UI, Arial, sans-serif" font-size="78" font-weight="700" text-anchor="middle">AP</text>
+    <text x="128" y="210" fill="#ffffff" font-family="Segoe UI, Arial, sans-serif" font-size="78" font-weight="700" text-anchor="middle">FS</text>
+  </g>
+
+  <text x="478" y="176" fill="#2f6f86" font-family="Segoe UI, Arial, sans-serif" font-size="34" font-weight="700">NATIVE WINDOWS EXPLORER ACCESS</text>
+  <text x="474" y="298" fill="#101820" font-family="Segoe UI, Arial, sans-serif" font-size="84" font-weight="700">APFS for Windows</text>
+  <rect x="478" y="334" width="118" height="8" fill="#50b0d6"/>
+  <text x="478" y="407" fill="#31414a" font-family="Segoe UI, Arial, sans-serif" font-size="34">Automatic mounting. Full read/write access.</text>
+
+  <g transform="translate(478 474)">
+    <rect width="228" height="54" rx="6" fill="#d96c5f"/>
+    <text x="114" y="37" fill="#ffffff" font-family="Segoe UI, Arial, sans-serif" font-size="25" font-weight="700" text-anchor="middle">TEST-SIGNED</text>
+    <text x="258" y="35" fill="#53636c" font-family="Segoe UI, Arial, sans-serif" font-size="24">WinFsp  |  Windows service  |  Tray manager</text>
+  </g>
+</svg>

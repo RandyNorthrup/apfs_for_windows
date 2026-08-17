@@ -1,0 +1,39 @@
+{
+  "schema_version": 2,
+  "product": "APFS for Windows",
+  "decision_date": "2026-08-17",
+  "release_model": "owner_controlled_unsigned_test_mode_distribution",
+  "application_signing": {
+    "required": false,
+    "status": "intentionally_unsigned_by_owner_decision",
+    "smart_app_control_reputation_guaranteed": false
+  },
+  "package_signing": {
+    "required": false,
+    "status": "intentionally_unsigned_by_owner_decision",
+    "integrity_mechanism": "sha256_manifest_and_deterministic_archive"
+  },
+  "kernel_driver_trust": {
+    "required": true,
+    "distribution_mode": "persistent_windows_test_signing",
+    "production_signing_planned": false,
+    "production_signing_required_for_owner_release": false,
+    "test_signed_driver_required": true,
+    "persistent_test_signing_required": true,
+    "owner_test_mode_distribution_permitted": true,
+    "secure_boot_or_integrity_bypass_automation_permitted": false,
+    "integrity_bypass_is_not_permitted": true
+  },
+  "physical_fault_recovery": {
+    "status": "not_physically_tested",
+    "owner_accepts_residual_risk": true,
+    "reason": "No physical surprise-unplug or power-loss simulation is available.",
+    "permitted_claim": "Synthetic process-termination and raw interruption tested; physical unplug and power loss untested."
+  },
+  "source_control": {
+    "only_branch": "main",
+    "release_tags_must_point_to_main": true,
+    "signed_tags_required": false
+  },
+  "public_production_claim_permitted": false
+}

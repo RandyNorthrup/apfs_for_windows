@@ -1,0 +1,70 @@
+name: WinFsp runtime build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/winfsp-runtime-build.yml"
+      - "dependencies/winfsp-apfs.json"
+      - "scripts/collect-winfsp-runtime-build-provenance.ps1"
+      - "scripts/verify-winfsp-runtime-boundary.ps1"
+      - "third_party/winfsp"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: winfsp-runtime-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  winfsp-runtime-build:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: recursive
+      - name: Verify dedicated runtime source boundary
+        shell: powershell
+        run: .\scripts\verify-winfsp-runtime-boundary.ps1
+      - name: Build x64 driver, runtime, and kernel test binary
+        shell: powershell
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} `
+            "Microsoft Visual Studio\Installer\vswhere.exe"
+          $msbuild = (& $vswhere -latest -products * `
+            -requires Microsoft.Component.MSBuild `
+            -find "MSBuild\Current\Bin\MSBuild.exe" | Select-Object -First 1)
+          if (-not $msbuild) {
+            throw "MSBuild was not found."
+          }
+          $projects = @(
+            "third_party\winfsp\build\VStudio\winfsp_sys.vcxproj",
+            "third_party\winfsp\build\VStudio\winfsp_dll.vcxproj",
+            "third_party\winfsp\build\VStudio\testing\winfsp-tests.vcxproj"
+          )
+          foreach ($project in $projects) {
+            & $msbuild $project /t:Build /p:Configuration=Release `
+              /p:Platform=x64 /m /nologo /v:minimal
+            if ($LASTEXITCODE -ne 0) {
+              throw "MSBuild failed for $project with exit code $LASTEXITCODE."
+            }
+          }
+      - name: Collect retained build provenance
+        shell: powershell
+        run: .\scripts\collect-winfsp-runtime-build-provenance.ps1
+      - name: Upload runtime build and provenance
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: winfsp-runtime-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            artifacts/winfsp-runtime-ci/provenance.json
+            third_party/winfsp/build/VStudio/build/Release/winfsp-x64.sys
+            third_party/winfsp/build/VStudio/build/Release/winfsp-x64.dll
+            third_party/winfsp/build/VStudio/build/Release/winfsp-x64.lib
+            third_party/winfsp/build/VStudio/testing/build/Release/winfsp-tests-x64.exe

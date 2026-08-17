@@ -1,0 +1,973 @@
+#Requires -Version 5.1
+
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)][string]$MacHost,
+    [Parameter(Mandatory = $true)][string]$MacUser,
+    [Parameter(Mandatory = $true)][string]$PasswordFile,
+    [string]$BuildDir = "build\Release",
+    [string]$Mount = "Q:",
+    [string]$RemoteBase,
+    [string]$PlinkPath,
+    [string]$PscpPath,
+    [string]$HostKey,
+    [string]$OutputPath = "artifacts\apple-vm\apple-vm-roundtrip-proof.json",
+    [switch]$KeepRemoteArtifacts
+)
+
+$ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "lib\native-ea.ps1")
+. (Join-Path $PSScriptRoot "lib\native-basic-info.ps1")
+
+function Resolve-RepoPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if ([IO.Path]::IsPathRooted($Path)) {
+        return [IO.Path]::GetFullPath($Path)
+    }
+    return [IO.Path]::GetFullPath((Join-Path $repoRoot $Path))
+}
+
+function New-NativeFileSymbolicLink {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Target
+    )
+    if (-not ("ApfsForWindows.SymbolicLinkOps" -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+namespace ApfsForWindows {
+    public static class SymbolicLinkOps {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern bool CreateSymbolicLink(string linkPath, string targetPath, int flags);
+
+        public static void CreateFile(string linkPath, string targetPath) {
+            const int SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE = 0x2;
+            if (!CreateSymbolicLink(linkPath, targetPath,
+                SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+    }
+}
+"@
+    }
+    [ApfsForWindows.SymbolicLinkOps]::CreateFile($Path, $Target)
+}
+
+function Resolve-Executable {
+    param(
+        [string]$RequestedPath,
+        [Parameter(Mandatory = $true)][string]$CommandName,
+        [string[]]$KnownPaths = @()
+    )
+    if ($RequestedPath) {
+        $resolved = Resolve-RepoPath $RequestedPath
+        if (Test-Path -LiteralPath $resolved -PathType Leaf) {
+            return $resolved
+        }
+        throw "$CommandName not found at $resolved"
+    }
+    $command = Get-Command $CommandName -ErrorAction SilentlyContinue
+    if ($command) {
+        return $command.Source
+    }
+    foreach ($knownPath in $KnownPaths) {
+        if (Test-Path -LiteralPath $knownPath -PathType Leaf) {
+            return $knownPath
+        }
+    }
+    throw "$CommandName was not found."
+}
+
+function Get-PuttyAuthArguments {
+    $arguments = @("-batch", "-pwfile", $resolvedPasswordFile)
+    if ($HostKey) {
+        $arguments += @("-hostkey", $HostKey)
+    }
+    return $arguments
+}
+
+function Invoke-PlinkCommand {
+    param(
+        [Parameter(Mandatory = $true)][string]$Command,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    $arguments = @(Get-PuttyAuthArguments) +
+        @("-ssh", "$MacUser@$MacHost", $Command)
+    $raw = @(& $resolvedPlink @arguments 2>&1)
+    $exitCode = $LASTEXITCODE
+    $text = $raw -join "`n"
+    if ($exitCode -ne 0) {
+        throw "$Label failed with exit code ${exitCode}: $text"
+    }
+    return $text
+}
+
+function Invoke-PscpTransfer {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    $arguments = @(Get-PuttyAuthArguments) + @("-q", $Source, $Destination)
+    $raw = @(& $resolvedPscp @arguments 2>&1)
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw "$Label failed with exit code ${exitCode}: $($raw -join "`n")"
+    }
+}
+
+function ConvertFrom-KeyValueOutput {
+    param([Parameter(Mandatory = $true)][string]$Text)
+    $values = [ordered]@{}
+    foreach ($line in ($Text -split "`r?`n")) {
+        if ($line -match '^([^=]+)=(.*)$') {
+            $values[$matches[1]] = $matches[2]
+        }
+    }
+    return [pscustomobject]$values
+}
+
+function ConvertTo-PosixSingleQuoted {
+    param([Parameter(Mandatory = $true)][string]$Text)
+    $singleQuote = [string][char]39
+    $doubleQuote = [string][char]34
+    $replacement = $singleQuote + $doubleQuote + $singleQuote + $doubleQuote + $singleQuote
+    return $singleQuote + $Text.Replace($singleQuote, $replacement) + $singleQuote
+}
+
+function Test-NativeEaEmpty {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    if (-not (Test-NativeExtendedAttribute -Path $Path -Name $Name)) { return $false }
+    $value = Get-NativeExtendedAttribute -Path $Path -Name $Name
+    return $null -ne $value -and ([byte[]]$value).Length -eq 0
+}
+
+function Get-NativeEaText {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    $value = Get-NativeExtendedAttribute -Path $Path -Name $Name
+    if ($null -eq $value) { return $null }
+    return [Text.Encoding]::UTF8.GetString([byte[]]$value)
+}
+
+function Get-EaEdgeState {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$UnicodeName,
+        [Parameter(Mandatory = $true)][string]$OriginalEmptyName,
+        [Parameter(Mandatory = $true)][string]$MacEmptyName,
+        [Parameter(Mandatory = $true)][string]$FinalEmptyName
+    )
+    [ordered]@{
+        unicode_value = Get-NativeEaText -Path $Path -Name $UnicodeName
+        original_empty = Test-NativeEaEmpty -Path $Path -Name $OriginalEmptyName
+        macos_empty = Test-NativeEaEmpty -Path $Path -Name $MacEmptyName
+        final_empty = Test-NativeEaEmpty -Path $Path -Name $FinalEmptyName
+        original_absent = [bool](-not (Test-NativeExtendedAttribute `
+            -Path $Path -Name $OriginalEmptyName))
+        macos_absent = [bool](-not (Test-NativeExtendedAttribute `
+            -Path $Path -Name $MacEmptyName))
+    }
+}
+
+function Test-EaEdgeStateFromMac {
+    param([object]$State)
+    $State.unicode_value -eq "macOS updated Unicode EA payload" -and
+        $State.original_empty -and $State.macos_empty
+}
+
+function Test-EaEdgeStateAfterWindows {
+    param([object]$State)
+    $State.unicode_value -eq "Windows final Unicode EA payload" -and
+        $State.original_absent -and $State.macos_absent -and $State.final_empty
+}
+
+function Write-LfScriptCopy {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+    $text = [IO.File]::ReadAllText($Source).Replace("`r`n", "`n")
+    [IO.File]::WriteAllText($Destination, $text, [Text.UTF8Encoding]::new($false))
+}
+
+function Start-ApfsWorker {
+    param(
+        [Parameter(Mandatory = $true)][string]$Target,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    $stdout = Join-Path $runDirectory "$Name-worker.out.txt"
+    $stderr = Join-Path $runDirectory "$Name-worker.err.txt"
+    Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
+    $process = Start-Process -FilePath $workerExe `
+        -ArgumentList @("--target", $Target, "--mount", $Mount, "--read-write") `
+        -WorkingDirectory $resolvedBuildDir `
+        -RedirectStandardOutput $stdout `
+        -RedirectStandardError $stderr `
+        -WindowStyle Hidden `
+        -PassThru
+    $deadline = (Get-Date).AddSeconds(30)
+    while (-not (Test-Path -LiteralPath $mountRoot) -and (Get-Date) -lt $deadline) {
+        if ($process.HasExited) {
+            $detail = Get-Content -LiteralPath $stderr -Raw -ErrorAction SilentlyContinue
+            throw "$Name worker exited before mount: $detail"
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    if (-not (Test-Path -LiteralPath $mountRoot)) {
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        throw "$Name worker mount did not appear at $Mount"
+    }
+    return $process
+}
+
+function Stop-ApfsWorker {
+    param([Diagnostics.Process]$Process)
+    if ($Process -and -not $Process.HasExited) {
+        Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+        $Process.WaitForExit(5000) | Out-Null
+    }
+    $deadline = (Get-Date).AddSeconds(15)
+    while ((Test-Path -LiteralPath $mountRoot) -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 200
+    }
+    if (Test-Path -LiteralPath $mountRoot) {
+        throw "Worker mount did not clean up at $Mount"
+    }
+}
+
+function Invoke-ProbeDebug {
+    param([Parameter(Mandatory = $true)][string]$ImagePath,
+          [Parameter(Mandatory = $true)][string]$ApfsPath)
+    $raw = @(& $probeExe --target $ImagePath --debug-file $ApfsPath 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "apfs_probe failed for ${ApfsPath}: $($raw -join "`n")"
+    }
+    $probe = ($raw -join "`n") | ConvertFrom-Json
+    if (-not $probe.whole_device_debug_file.ok) {
+        throw "apfs_probe debug failed for $ApfsPath"
+    }
+    return $probe.whole_device_debug_file
+}
+
+function Get-InodeMetadataSummary {
+    param([Parameter(Mandatory = $true)]$DebugRecord)
+    return [ordered]@{
+        created_time_ns = [string]$DebugRecord.inode_created_time_ns
+        modified_time_ns = [string]$DebugRecord.inode_modified_time_ns
+        changed_time_ns = [string]$DebugRecord.inode_changed_time_ns
+        accessed_time_ns = [string]$DebugRecord.inode_accessed_time_ns
+        write_generation_counter = [int64]$DebugRecord.inode_write_generation_counter
+        bsd_flags = [int64]$DebugRecord.inode_bsd_flags
+        owner_id = [int64]$DebugRecord.inode_owner_id
+        group_id = [int64]$DebugRecord.inode_group_id
+        inode_mode = [int64]$DebugRecord.inode_mode
+        inode_size = [string]$DebugRecord.inode_size
+    }
+}
+
+function Test-MetadataEqual {
+    param($Before, $After)
+    foreach ($name in $Before.Keys) {
+        if ([string]$Before[$name] -ne [string]$After[$name]) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Test-TimeNear {
+    param([datetime]$Actual, [datetime]$Expected)
+    [Math]::Abs(($Actual.ToUniversalTime() - $Expected.ToUniversalTime()).TotalSeconds) -le 1
+}
+
+function ConvertTo-UnixNanoseconds {
+    param([Parameter(Mandatory = $true)][datetime]$TimeUtc)
+    [int64](([DateTimeOffset]$TimeUtc).ToUnixTimeMilliseconds() * 1000000)
+}
+
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$resolvedBuildDir = Resolve-RepoPath $BuildDir
+$resolvedPasswordFile = Resolve-RepoPath $PasswordFile
+$resolvedOutput = Resolve-RepoPath $OutputPath
+$outputDirectory = Split-Path -Parent $resolvedOutput
+New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
+$runId = "apple-roundtrip-$((Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ'))-$([Guid]::NewGuid().ToString('N').Substring(0,8))"
+$runDirectory = Join-Path $outputDirectory $runId
+New-Item -ItemType Directory -Force -Path $runDirectory | Out-Null
+
+$result = $null
+$startedUtc = (Get-Date).ToUniversalTime()
+$remoteRun = $null
+$remoteCleaned = $false
+
+try {
+    if (-not (Test-Path -LiteralPath $resolvedPasswordFile -PathType Leaf)) {
+        throw "Password file not found."
+    }
+    if ($Mount -notmatch '^[A-Za-z]:$') {
+        throw "Mount must be one drive letter such as Q:."
+    }
+    $mountRoot = "$Mount\"
+    if (Test-Path -LiteralPath $mountRoot) {
+        throw "$Mount is already occupied."
+    }
+
+    $resolvedPlink = Resolve-Executable -RequestedPath $PlinkPath -CommandName "plink.exe" `
+        -KnownPaths @("C:\Program Files\PuTTY\plink.exe", "C:\Program Files (x86)\PuTTY\plink.exe")
+    $resolvedPscp = Resolve-Executable -RequestedPath $PscpPath -CommandName "pscp.exe" `
+        -KnownPaths @("C:\Program Files\PuTTY\pscp.exe", "C:\Program Files (x86)\PuTTY\pscp.exe")
+    $workerExe = Join-Path $resolvedBuildDir "apfs_winfs_worker.exe"
+    $probeExe = Join-Path $resolvedBuildDir "apfs_probe.exe"
+    $selfTestExe = Join-Path $resolvedBuildDir "apfs_core_selftest.exe"
+    foreach ($binary in @($workerExe, $probeExe, $selfTestExe)) {
+        if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
+            throw "Required build output missing: $binary"
+        }
+    }
+
+    $qtBin = "C:\Qt\6.10.3\msvc2022_64\bin"
+    if (Test-Path -LiteralPath $qtBin -PathType Container) {
+        $env:PATH = "$qtBin$([IO.Path]::PathSeparator)$env:PATH"
+    }
+    $winFsp = Get-ChildItem "C:\Program Files (x86)\WinFsp\SxS" -Recurse `
+        -Filter winfsp-x64.dll -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+    if ($winFsp) {
+        $env:PATH = "$(Split-Path -Parent $winFsp.FullName)$([IO.Path]::PathSeparator)$env:PATH"
+    }
+
+    if (-not $RemoteBase) {
+        $RemoteBase = "/Users/$MacUser/apfs-for-windows-validation"
+    }
+    $remoteRun = "$($RemoteBase.TrimEnd('/'))/$runId"
+    $remoteEndpoint = "$MacUser@$MacHost"
+    Invoke-PlinkCommand -Label "macOS VM preflight" -Command `
+        "uname -srm && test -x /sbin/fsck_apfs && test -x /usr/bin/hdiutil && mkdir -p $(ConvertTo-PosixSingleQuoted $remoteRun)" | Out-Null
+
+    $originImage = Join-Path $runDirectory "windows-origin.apfs"
+    $originRaw = @(& $selfTestExe --make-image $originImage 2>&1)
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $originImage -PathType Leaf)) {
+        throw "APFS origin image generation failed: $($originRaw -join "`n")"
+    }
+
+    $windowsHash = $null
+    $unicodeHash = $null
+    $windowsCreatedLinkHash = $null
+    $rootOriginCreation = [datetime]::SpecifyKind([datetime]"2019-06-07T08:09:10", "Utc")
+    $rootOriginAccess = [datetime]::SpecifyKind([datetime]"2020-07-08T09:10:11", "Utc")
+    $rootOriginWrite = [datetime]::SpecifyKind([datetime]"2021-08-09T10:11:12", "Utc")
+    $rootFinalCreation = [datetime]::SpecifyKind([datetime]"2022-09-10T11:12:13", "Utc")
+    $rootFinalAccess = [datetime]::SpecifyKind([datetime]"2023-10-11T12:13:14", "Utc")
+    $rootFinalWrite = [datetime]::SpecifyKind([datetime]"2024-11-12T13:14:15", "Utc")
+    $emptyEaName = "user.apfswin_empty"
+    $macEmptyEaName = "user.apfswin_macos_empty"
+    $finalEmptyEaName = "user.apfswin_windows_final_empty"
+    $unicodeEaName = "user.apfswin_r$([char]0x00E9)sum$([char]0x00E9)_" +
+        "$([char]0x65E5)$([char]0x672C)$([char]0x8A9E)"
+    $rootOriginWindows = $null
+    $rootOriginAclExitCode = $null
+    $normalIdentity = (& whoami.exe).Trim()
+    $originWorker = $null
+    try {
+        $originWorker = Start-ApfsWorker -Target $originImage -Name "windows-origin"
+        $unicodeDirectory = "Unicode-R$([char]0x00E9)sum$([char]0x00E9)-" +
+            "$([char]0x65E5)$([char]0x672C)$([char]0x8A9E)"
+        $nested = Join-Path $mountRoot "WinProof\Nested"
+        $unicode = Join-Path (Join-Path $mountRoot "WinProof") $unicodeDirectory
+        New-Item -ItemType Directory -Path $nested -Force | Out-Null
+        New-Item -ItemType Directory -Path $unicode -Force | Out-Null
+        $windowsFile = Join-Path $nested "windows.txt"
+        $unicodeFile = Join-Path $unicode "roundtrip.txt"
+        [IO.File]::WriteAllText($windowsFile, "Windows APFS to macOS round-trip proof",
+            [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($unicodeFile, "Unicode path payload from Windows",
+            [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllBytes((Join-Path $mountRoot "WinProof\empty.bin"), [byte[]]@())
+        [IO.File]::SetCreationTimeUtc(
+            $windowsFile,
+            [datetime]::SpecifyKind([datetime]"2021-02-03T04:05:06", "Utc"))
+        [IO.File]::SetLastWriteTimeUtc(
+            $windowsFile,
+            [datetime]::SpecifyKind([datetime]"2023-04-05T06:07:08", "Utc"))
+        [IO.File]::SetAttributes(
+            $windowsFile,
+            [IO.FileAttributes]::Hidden -bor [IO.FileAttributes]::Archive)
+        Set-NativeExtendedAttribute -Path $windowsFile -Name "user.apfswin_windows" `
+            -Value ([Text.Encoding]::UTF8.GetBytes("Windows EA payload"))
+        Set-NativeExtendedAttribute -Path (Join-Path $mountRoot "WinProof") `
+            -Name "user.apfswin_windows_directory" `
+            -Value ([Text.Encoding]::UTF8.GetBytes("Windows directory EA payload"))
+        Set-NativeExtendedAttribute -Path $mountRoot -Name "user.apfswin_windows_root" `
+            -Value ([Text.Encoding]::UTF8.GetBytes("Windows root EA payload"))
+        $windowsOriginDirectory = Join-Path $mountRoot "WinProof"
+        foreach ($edgePath in @($windowsFile, $windowsOriginDirectory, $mountRoot)) {
+            Set-NativeExtendedAttribute -Path $edgePath -Name $emptyEaName `
+                -Value ([byte[]]::new(0))
+            Set-NativeExtendedAttribute -Path $edgePath -Name $unicodeEaName `
+                -Value ([Text.Encoding]::UTF8.GetBytes("Windows Unicode EA payload"))
+        }
+        $windowsCreatedLink = Join-Path $mountRoot "WinProof\windows-created-symlink"
+        New-NativeFileSymbolicLink -Path $windowsCreatedLink `
+            -Target "Nested\windows.txt"
+        $windowsHash = (Get-FileHash -LiteralPath $windowsFile -Algorithm SHA256).Hash
+        $unicodeHash = (Get-FileHash -LiteralPath $unicodeFile -Algorithm SHA256).Hash
+        $windowsCreatedLinkHash =
+            (Get-FileHash -LiteralPath $windowsCreatedLink -Algorithm SHA256).Hash
+        Set-NativeDirectoryBasicInfo -Path $mountRoot `
+            -CreationTimeUtc $rootOriginCreation `
+            -LastAccessTimeUtc $rootOriginAccess `
+            -LastWriteTimeUtc $rootOriginWrite `
+            -Attributes ([IO.FileAttributes]::Directory -bor `
+                [IO.FileAttributes]::Hidden -bor [IO.FileAttributes]::Archive)
+        & icacls.exe $mountRoot /inheritance:r /grant:r `
+            "$normalIdentity`:(OI)(CI)(M)" | Out-Null
+        $rootOriginAclExitCode = $LASTEXITCODE
+        if ($rootOriginAclExitCode -ne 0) {
+            throw "Windows origin root icacls failed with exit code $rootOriginAclExitCode"
+        }
+        $rootItem = Get-Item -LiteralPath $mountRoot -Force
+        $rootOriginWindows = [ordered]@{
+            creation_utc = $rootItem.CreationTimeUtc.ToString("O")
+            access_utc = $rootItem.LastAccessTimeUtc.ToString("O")
+            write_utc = $rootItem.LastWriteTimeUtc.ToString("O")
+            hidden = [bool](($rootItem.Attributes -band [IO.FileAttributes]::Hidden) -ne 0)
+            archive = [bool](($rootItem.Attributes -band [IO.FileAttributes]::Archive) -ne 0)
+            acl_exit_code = $rootOriginAclExitCode
+        }
+    } finally {
+        Stop-ApfsWorker -Process $originWorker
+    }
+    if ($windowsHash -ne "B58EE1D8BF6C0FF48A5D0AB28DCC938E941CE9AC9091E9C103D85C3784C1E4FC" -or
+        $unicodeHash -ne "D15C89BA02965E34B5E292AEB8D7B7D0A12B538FB6DC623DD998327D3F118DBC" -or
+        $windowsCreatedLinkHash -ne $windowsHash) {
+        throw "Windows origin payload hashes are not deterministic."
+    }
+    $rootOriginDebug = Invoke-ProbeDebug -ImagePath $originImage -ApfsPath "/"
+    $rootOriginRaw = Get-InodeMetadataSummary $rootOriginDebug
+    $rootOriginRawValid = [bool](
+        [int64]$rootOriginDebug.inode_object_id -eq 2 -and
+        [int64]$rootOriginDebug.inode_created_time_ns -eq
+            (ConvertTo-UnixNanoseconds $rootOriginCreation) -and
+        [int64]$rootOriginDebug.inode_accessed_time_ns -eq
+            (ConvertTo-UnixNanoseconds $rootOriginAccess) -and
+        [int64]$rootOriginDebug.inode_modified_time_ns -eq
+            (ConvertTo-UnixNanoseconds $rootOriginWrite) -and
+        [int64]$rootOriginDebug.inode_bsd_flags -eq 98304 -and
+        ([int64]$rootOriginDebug.inode_mode -band 0xF000) -eq 0x4000 -and
+        ([int64]$rootOriginDebug.inode_mode -band 0x01FF) -eq 0x01FF -and
+        [int64]$rootOriginDebug.inode_owner_id -eq 544 -and
+        [int64]$rootOriginDebug.inode_group_id -eq 544)
+    if (-not $rootOriginRawValid) {
+        throw "Windows origin root metadata did not persist in copied-core reader."
+    }
+
+    $mutateScript = Join-Path $runDirectory "mutate-apfs-roundtrip.sh"
+    $validateScript = Join-Path $runDirectory "validate-apfs-roundtrip.sh"
+    $hardlinkValidateScript = Join-Path $runDirectory "validate-windows-hardlinks.sh"
+    Write-LfScriptCopy -Source (Join-Path $PSScriptRoot "apple-vm\mutate-apfs-roundtrip.sh") `
+        -Destination $mutateScript
+    Write-LfScriptCopy -Source (Join-Path $PSScriptRoot "apple-vm\validate-apfs-roundtrip.sh") `
+        -Destination $validateScript
+    Write-LfScriptCopy -Source (Join-Path $PSScriptRoot "apple-vm\validate-windows-hardlinks.sh") `
+        -Destination $hardlinkValidateScript
+
+    $hardlinkImage = Join-Path $runDirectory "windows-hardlinks.apfs"
+    $hardlinkImageRaw = @(& $selfTestExe --make-hardlink-image $hardlinkImage 2>&1)
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $hardlinkImage -PathType Leaf)) {
+        throw "APFS hard-link image generation failed: $($hardlinkImageRaw -join "`n")"
+    }
+    $hardlinkOriginHash = (Get-FileHash -LiteralPath $hardlinkImage -Algorithm SHA256).Hash
+    Invoke-PscpTransfer -Source $hardlinkImage `
+        -Destination "${remoteEndpoint}:$remoteRun/windows-hardlinks.apfs" `
+        -Label "upload Windows hard-link image"
+    Invoke-PscpTransfer -Source $hardlinkValidateScript `
+        -Destination "${remoteEndpoint}:$remoteRun/validate-windows-hardlinks.sh" `
+        -Label "upload macOS hard-link validator"
+    $hardlinkRemoteOutput = Invoke-PlinkCommand -Label "macOS Windows-hard-link validation" `
+        -Command "bash $(ConvertTo-PosixSingleQuoted "$remoteRun/validate-windows-hardlinks.sh") $(ConvertTo-PosixSingleQuoted "$remoteRun/windows-hardlinks.apfs") $(ConvertTo-PosixSingleQuoted "$remoteRun/hardlink")"
+    $hardlinkRemote = ConvertFrom-KeyValueOutput $hardlinkRemoteOutput
+    if ($hardlinkRemote.APPLE_HARDLINK_OK -ne "1" -or
+        $hardlinkRemote.LINK_COUNT_BEFORE -ne "3" -or
+        $hardlinkRemote.LINK_COUNT_AFTER_DELETE -ne "2" -or
+        $hardlinkRemote.LINK_COUNT_AFTER_REMOUNT -ne "2" -or
+        $hardlinkRemote.DELETED_NAME_ABSENT -ne "1" -or
+        $hardlinkRemote.FSCK_PASSES -ne "3") {
+        throw "macOS hard-link validation did not report success: $hardlinkRemoteOutput"
+    }
+
+    $hardlinkReturnImage = Join-Path $runDirectory "macos-hardlinks-return.apfs"
+    Invoke-PscpTransfer -Source "${remoteEndpoint}:$remoteRun/windows-hardlinks.apfs" `
+        -Destination $hardlinkReturnImage -Label "download macOS hard-link image"
+    $hardlinkSourceDebug = Invoke-ProbeDebug -ImagePath $hardlinkReturnImage `
+        -ApfsPath "/docs/sub/deep.txt"
+    $hardlinkSecondDebug = Invoke-ProbeDebug -ImagePath $hardlinkReturnImage `
+        -ApfsPath "/docs/deep-link.txt"
+    $hardlinkWorker = $null
+    try {
+        $hardlinkWorker = Start-ApfsWorker -Target $hardlinkReturnImage `
+            -Name "macos-hardlink-return"
+        $hardlinkSourcePath = Join-Path $mountRoot "docs\sub\deep.txt"
+        $hardlinkSecondPath = Join-Path $mountRoot "docs\deep-link.txt"
+        $hardlinkDeletedPath = Join-Path $mountRoot "deep-root-link.txt"
+        $hardlinkSourceHash =
+            (Get-FileHash -LiteralPath $hardlinkSourcePath -Algorithm SHA256).Hash
+        $hardlinkSecondHash =
+            (Get-FileHash -LiteralPath $hardlinkSecondPath -Algorithm SHA256).Hash
+        $hardlinkDeletedAbsent = -not (Test-Path -LiteralPath $hardlinkDeletedPath)
+    } finally {
+        Stop-ApfsWorker -Process $hardlinkWorker
+    }
+    $hardlinkWindowsReturn = [ordered]@{
+        source_object_id = [string]$hardlinkSourceDebug.inode_object_id
+        second_object_id = [string]$hardlinkSecondDebug.inode_object_id
+        source_sha256 = $hardlinkSourceHash
+        second_sha256 = $hardlinkSecondHash
+        deleted_name_absent = [bool]$hardlinkDeletedAbsent
+        image_sha256 = (Get-FileHash -LiteralPath $hardlinkReturnImage -Algorithm SHA256).Hash
+    }
+    $hardlinkRoundTripValid = [bool](
+        [uint64]$hardlinkSourceDebug.inode_object_id -ne 0 -and
+        [uint64]$hardlinkSourceDebug.inode_object_id -eq
+            [uint64]$hardlinkSecondDebug.inode_object_id -and
+        [uint64]$hardlinkSourceDebug.inode_object_id -eq [uint64]$hardlinkRemote.SOURCE_INODE -and
+        $hardlinkSourceHash -eq $hardlinkSecondHash -and
+        $hardlinkSourceHash -eq $hardlinkRemote.SOURCE_SHA256 -and
+        $hardlinkDeletedAbsent)
+    if (-not $hardlinkRoundTripValid) {
+        throw "Windows hard-link return validation failed."
+    }
+
+    Invoke-PscpTransfer -Source $originImage -Destination "${remoteEndpoint}:$remoteRun/windows-origin.apfs" `
+        -Label "upload Windows origin image"
+    Invoke-PscpTransfer -Source $mutateScript -Destination "${remoteEndpoint}:$remoteRun/mutate-apfs-roundtrip.sh" `
+        -Label "upload macOS mutation script"
+    $remoteMutationOutput = Invoke-PlinkCommand -Label "macOS APFS mutation" -Command `
+        "bash $(ConvertTo-PosixSingleQuoted "$remoteRun/mutate-apfs-roundtrip.sh") $(ConvertTo-PosixSingleQuoted "$remoteRun/windows-origin.apfs") $(ConvertTo-PosixSingleQuoted "$remoteRun/macos-first")"
+    $remoteMutation = ConvertFrom-KeyValueOutput $remoteMutationOutput
+    if ($remoteMutation.APPLE_MUTATION_OK -ne "1") {
+        throw "macOS mutation did not report success: $remoteMutationOutput"
+    }
+
+    $macosMutatedImage = Join-Path $runDirectory "macos-mutated.apfs"
+    Invoke-PscpTransfer -Source "${remoteEndpoint}:$remoteRun/windows-origin.apfs" `
+        -Destination $macosMutatedImage -Label "download macOS-mutated image"
+    $metadataBeforeDebug = Invoke-ProbeDebug -ImagePath $macosMutatedImage `
+        -ApfsPath "/MacProof/mac-hardlink.txt"
+    $metadataBefore = Get-InodeMetadataSummary $metadataBeforeDebug
+    $rootMetadataAfterMacDebug = Invoke-ProbeDebug -ImagePath $macosMutatedImage `
+        -ApfsPath "/"
+    $rootMetadataAfterMac = Get-InodeMetadataSummary $rootMetadataAfterMacDebug
+    $rootMacMutationValid = [bool](
+        [int64]$rootMetadataAfterMacDebug.inode_object_id -eq 2 -and
+        [int64]$rootMetadataAfterMacDebug.inode_created_time_ns -eq
+            (ConvertTo-UnixNanoseconds $rootOriginCreation) -and
+        [int64]$rootMetadataAfterMacDebug.inode_modified_time_ns -eq 1646370367000000000 -and
+        [int64]$rootMetadataAfterMacDebug.inode_bsd_flags -eq 65536 -and
+        ([int64]$rootMetadataAfterMacDebug.inode_mode -band 0xF000) -eq 0x4000 -and
+        ([int64]$rootMetadataAfterMacDebug.inode_mode -band 0x01FF) -eq 0x01E9 -and
+        [int64]$rootMetadataAfterMacDebug.inode_owner_id -eq 544 -and
+        [int64]$rootMetadataAfterMacDebug.inode_group_id -eq 544 -and
+        $remoteMutation.WINDOWS_ROOT_MODE -eq "drwxrwxrwx" -and
+        $remoteMutation.MAC_ROOT_MODE -eq "drwxr-x--x")
+    if (-not $rootMacMutationValid) {
+        throw "macOS root metadata mutation did not persist in copied-core reader."
+    }
+
+    $returnImage = Join-Path $runDirectory "windows-return.apfs"
+    Copy-Item -LiteralPath $macosMutatedImage -Destination $returnImage
+    $returnWorker = $null
+    $windowsReturn = $null
+    $rootFinalAclExitCode = $null
+    try {
+        $returnWorker = Start-ApfsWorker -Target $returnImage -Name "windows-return"
+        $macFile = Join-Path $mountRoot "MacProof\Nested\mac.txt"
+        $hardLink = Join-Path $mountRoot "MacProof\mac-hardlink.txt"
+        $xattrFile = Join-Path $mountRoot "MacProof\xattr-roundtrip.txt"
+        $macDirectory = Join-Path $mountRoot "MacProof"
+        $windowsDirectory = Join-Path $mountRoot "WinProof"
+        $symlink = Join-Path $mountRoot "MacProof\windows-symlink"
+        $windowsCreatedLink = Join-Path $mountRoot "WinProof\windows-created-symlink"
+        $renamedByMac = Join-Path $mountRoot "WinProof\Nested\windows-renamed-by-macos.txt"
+        $renamedByWindows = Join-Path $mountRoot "WinProof\Nested\windows-renamed-back-by-windows.txt"
+        $rootItemFromMac = Get-Item -LiteralPath $mountRoot -Force
+        $rootFromMacWindows = [ordered]@{
+            creation_utc = $rootItemFromMac.CreationTimeUtc.ToString("O")
+            access_utc = $rootItemFromMac.LastAccessTimeUtc.ToString("O")
+            write_utc = $rootItemFromMac.LastWriteTimeUtc.ToString("O")
+            hidden = [bool](($rootItemFromMac.Attributes -band [IO.FileAttributes]::Hidden) -ne 0)
+            archive = [bool](($rootItemFromMac.Attributes -band [IO.FileAttributes]::Archive) -ne 0)
+        }
+        $macHash = (Get-FileHash -LiteralPath $macFile -Algorithm SHA256).Hash
+        $hardLinkHashBefore = (Get-FileHash -LiteralPath $hardLink -Algorithm SHA256).Hash
+        $symlinkItemBefore = Get-Item -LiteralPath $symlink -Force
+        $windowsCreatedLinkItemBefore = Get-Item -LiteralPath $windowsCreatedLink -Force
+        $windowsCreatedLinkHashBefore =
+            (Get-FileHash -LiteralPath $windowsCreatedLink -Algorithm SHA256).Hash
+        $windowsEaFromMac = [Text.Encoding]::UTF8.GetString([byte[]](
+            Get-NativeExtendedAttribute -Path $renamedByMac -Name "user.apfswin_windows"))
+        $macEaFromMac = [Text.Encoding]::UTF8.GetString([byte[]](
+            Get-NativeExtendedAttribute -Path $xattrFile -Name "user.apfswin_rw"))
+        $windowsDirectoryEaFromMac = [Text.Encoding]::UTF8.GetString([byte[]](
+            Get-NativeExtendedAttribute -Path $windowsDirectory `
+                -Name "user.apfswin_windows_directory"))
+        $macDirectoryEaFromMac = [Text.Encoding]::UTF8.GetString([byte[]](
+            Get-NativeExtendedAttribute -Path $macDirectory `
+                -Name "user.apfswin_directory_rw"))
+        $windowsRootEaFromMac = [Text.Encoding]::UTF8.GetString([byte[]](
+            Get-NativeExtendedAttribute -Path $mountRoot -Name "user.apfswin_windows_root"))
+        $macRootEaFromMac = [Text.Encoding]::UTF8.GetString([byte[]](
+            Get-NativeExtendedAttribute -Path $mountRoot -Name "user.apfswin_root_rw"))
+        $deleteEaPresentBefore = Test-NativeExtendedAttribute `
+            -Path $xattrFile -Name "user.apfswin_delete"
+        $deleteDirectoryEaPresentBefore = Test-NativeExtendedAttribute `
+            -Path $macDirectory -Name "user.apfswin_directory_delete"
+        $deleteRootEaPresentBefore = Test-NativeExtendedAttribute `
+            -Path $mountRoot -Name "user.apfswin_root_delete"
+        $edgeFromMac = [ordered]@{
+            file = Get-EaEdgeState -Path $renamedByMac -UnicodeName $unicodeEaName `
+                -OriginalEmptyName $emptyEaName -MacEmptyName $macEmptyEaName `
+                -FinalEmptyName $finalEmptyEaName
+            directory = Get-EaEdgeState -Path $windowsDirectory -UnicodeName $unicodeEaName `
+                -OriginalEmptyName $emptyEaName -MacEmptyName $macEmptyEaName `
+                -FinalEmptyName $finalEmptyEaName
+            root = Get-EaEdgeState -Path $mountRoot -UnicodeName $unicodeEaName `
+                -OriginalEmptyName $emptyEaName -MacEmptyName $macEmptyEaName `
+                -FinalEmptyName $finalEmptyEaName
+        }
+        Set-NativeExtendedAttribute -Path $xattrFile -Name "user.apfswin_rw" `
+            -Value ([Text.Encoding]::UTF8.GetBytes("Windows updated xattr payload"))
+        Remove-NativeExtendedAttribute -Path $xattrFile -Name "user.apfswin_delete"
+        Set-NativeExtendedAttribute -Path $macDirectory -Name "user.apfswin_directory_rw" `
+            -Value ([Text.Encoding]::UTF8.GetBytes("Windows updated directory xattr payload"))
+        Remove-NativeExtendedAttribute -Path $macDirectory `
+            -Name "user.apfswin_directory_delete"
+        Set-NativeExtendedAttribute -Path $mountRoot -Name "user.apfswin_root_rw" `
+            -Value ([Text.Encoding]::UTF8.GetBytes("Windows updated root xattr payload"))
+        Remove-NativeExtendedAttribute -Path $mountRoot -Name "user.apfswin_root_delete"
+        Set-NativeExtendedAttribute -Path $windowsDirectory `
+            -Name "user.apfswin_windows_directory" `
+            -Value ([Text.Encoding]::UTF8.GetBytes("Windows final directory EA payload"))
+        Set-NativeExtendedAttribute -Path $mountRoot -Name "user.apfswin_windows_root" `
+            -Value ([Text.Encoding]::UTF8.GetBytes("Windows final root EA payload"))
+        foreach ($edgePath in @($renamedByMac, $windowsDirectory, $mountRoot)) {
+            Set-NativeExtendedAttribute -Path $edgePath -Name $unicodeEaName `
+                -Value ([Text.Encoding]::UTF8.GetBytes("Windows final Unicode EA payload"))
+            Remove-NativeExtendedAttribute -Path $edgePath -Name $emptyEaName
+            Remove-NativeExtendedAttribute -Path $edgePath -Name $macEmptyEaName
+            Set-NativeExtendedAttribute -Path $edgePath -Name $finalEmptyEaName `
+                -Value ([byte[]]::new(0))
+        }
+        $returnDirectory = Join-Path $mountRoot "WindowsReturn\Nested"
+        New-Item -ItemType Directory -Path $returnDirectory -Force | Out-Null
+        $returnFile = Join-Path $returnDirectory "final.txt"
+        [IO.File]::WriteAllText($returnFile,
+            "Windows return mutation after macOS native write",
+            [Text.UTF8Encoding]::new($false))
+        Move-Item -LiteralPath $renamedByMac -Destination $renamedByWindows
+        Set-NativeExtendedAttribute -Path $renamedByWindows -Name "user.apfswin_windows" `
+            -Value ([Text.Encoding]::UTF8.GetBytes("Windows final EA payload"))
+        Remove-Item -LiteralPath $windowsCreatedLink -Force
+        New-NativeFileSymbolicLink -Path $windowsCreatedLink `
+            -Target "Nested\windows-renamed-back-by-windows.txt"
+        Remove-Item -LiteralPath $macFile -Force
+        $hardLinkHashAfter = (Get-FileHash -LiteralPath $hardLink -Algorithm SHA256).Hash
+        $symlinkItemAfter = Get-Item -LiteralPath $symlink -Force
+        $windowsCreatedLinkItemAfter = Get-Item -LiteralPath $windowsCreatedLink -Force
+        $windowsCreatedLinkHashAfter =
+            (Get-FileHash -LiteralPath $windowsCreatedLink -Algorithm SHA256).Hash
+        Set-NativeDirectoryBasicInfo -Path $mountRoot `
+            -CreationTimeUtc $rootFinalCreation `
+            -LastAccessTimeUtc $rootFinalAccess `
+            -LastWriteTimeUtc $rootFinalWrite `
+            -Attributes ([IO.FileAttributes]::Directory -bor [IO.FileAttributes]::Hidden)
+        & icacls.exe $mountRoot /inheritance:r /grant:r `
+            "$normalIdentity`:(OI)(CI)(M)" | Out-Null
+        $rootFinalAclExitCode = $LASTEXITCODE
+        if ($rootFinalAclExitCode -ne 0) {
+            throw "Windows return root icacls failed with exit code $rootFinalAclExitCode"
+        }
+        $rootItemFinal = Get-Item -LiteralPath $mountRoot -Force
+        $rootFinalWindows = [ordered]@{
+            creation_utc = $rootItemFinal.CreationTimeUtc.ToString("O")
+            access_utc = $rootItemFinal.LastAccessTimeUtc.ToString("O")
+            write_utc = $rootItemFinal.LastWriteTimeUtc.ToString("O")
+            hidden = [bool](($rootItemFinal.Attributes -band [IO.FileAttributes]::Hidden) -ne 0)
+            archive = [bool](($rootItemFinal.Attributes -band [IO.FileAttributes]::Archive) -ne 0)
+            acl_exit_code = $rootFinalAclExitCode
+        }
+        $edgeAfterWindows = [ordered]@{
+            file = Get-EaEdgeState -Path $renamedByWindows -UnicodeName $unicodeEaName `
+                -OriginalEmptyName $emptyEaName -MacEmptyName $macEmptyEaName `
+                -FinalEmptyName $finalEmptyEaName
+            directory = Get-EaEdgeState -Path $windowsDirectory -UnicodeName $unicodeEaName `
+                -OriginalEmptyName $emptyEaName -MacEmptyName $macEmptyEaName `
+                -FinalEmptyName $finalEmptyEaName
+            root = Get-EaEdgeState -Path $mountRoot -UnicodeName $unicodeEaName `
+                -OriginalEmptyName $emptyEaName -MacEmptyName $macEmptyEaName `
+                -FinalEmptyName $finalEmptyEaName
+        }
+        $windowsReturn = [ordered]@{
+            mac_sha256 = $macHash
+            hardlink_sha256_before = $hardLinkHashBefore
+            hardlink_sha256_after = $hardLinkHashAfter
+            return_sha256 = (Get-FileHash -LiteralPath $returnFile -Algorithm SHA256).Hash
+            deleted_hardlink_name_absent = [bool](-not (Test-Path -LiteralPath $macFile))
+            surviving_hardlink_present = [bool](Test-Path -LiteralPath $hardLink)
+            renamed_file_present = [bool](Test-Path -LiteralPath $renamedByWindows)
+            symlink_reparse_before = [bool](($symlinkItemBefore.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+            symlink_reparse_after = [bool](($symlinkItemAfter.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+            windows_created_symlink_reparse_before = [bool](($windowsCreatedLinkItemBefore.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+            windows_created_symlink_reparse_after = [bool](($windowsCreatedLinkItemAfter.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+            windows_created_symlink_sha256_before = $windowsCreatedLinkHashBefore
+            windows_created_symlink_sha256_after = $windowsCreatedLinkHashAfter
+            windows_ea_from_macos = $windowsEaFromMac
+            mac_ea_from_macos = $macEaFromMac
+            windows_directory_ea_from_macos = $windowsDirectoryEaFromMac
+            mac_directory_ea_from_macos = $macDirectoryEaFromMac
+            windows_root_ea_from_macos = $windowsRootEaFromMac
+            mac_root_ea_from_macos = $macRootEaFromMac
+            delete_ea_present_before = [bool]$deleteEaPresentBefore
+            delete_ea_absent_after = [bool](-not (Test-NativeExtendedAttribute `
+                -Path $xattrFile -Name "user.apfswin_delete"))
+            updated_ea = [Text.Encoding]::UTF8.GetString([byte[]](
+                Get-NativeExtendedAttribute -Path $xattrFile -Name "user.apfswin_rw"))
+            final_windows_ea = [Text.Encoding]::UTF8.GetString([byte[]](
+                Get-NativeExtendedAttribute -Path $renamedByWindows -Name "user.apfswin_windows"))
+            delete_directory_ea_present_before = [bool]$deleteDirectoryEaPresentBefore
+            delete_directory_ea_absent_after = [bool](-not (Test-NativeExtendedAttribute `
+                -Path $macDirectory -Name "user.apfswin_directory_delete"))
+            updated_directory_ea = [Text.Encoding]::UTF8.GetString([byte[]](
+                Get-NativeExtendedAttribute -Path $macDirectory `
+                    -Name "user.apfswin_directory_rw"))
+            final_windows_directory_ea = [Text.Encoding]::UTF8.GetString([byte[]](
+                Get-NativeExtendedAttribute -Path $windowsDirectory `
+                    -Name "user.apfswin_windows_directory"))
+            delete_root_ea_present_before = [bool]$deleteRootEaPresentBefore
+            delete_root_ea_absent_after = [bool](-not (Test-NativeExtendedAttribute `
+                -Path $mountRoot -Name "user.apfswin_root_delete"))
+            updated_root_ea = [Text.Encoding]::UTF8.GetString([byte[]](
+                Get-NativeExtendedAttribute -Path $mountRoot -Name "user.apfswin_root_rw"))
+            final_windows_root_ea = [Text.Encoding]::UTF8.GetString([byte[]](
+                Get-NativeExtendedAttribute -Path $mountRoot -Name "user.apfswin_windows_root"))
+            edge_from_macos = $edgeFromMac
+            edge_after_windows = $edgeAfterWindows
+            root_from_macos = $rootFromMacWindows
+            final_root = $rootFinalWindows
+        }
+    } finally {
+        Stop-ApfsWorker -Process $returnWorker
+    }
+
+    $metadataAfterDebug = Invoke-ProbeDebug -ImagePath $returnImage `
+        -ApfsPath "/MacProof/mac-hardlink.txt"
+    $metadataAfter = Get-InodeMetadataSummary $metadataAfterDebug
+    $symlinkDebug = Invoke-ProbeDebug -ImagePath $returnImage `
+        -ApfsPath "/MacProof/windows-symlink"
+    $rootMetadataAfterWindowsDebug = Invoke-ProbeDebug -ImagePath $returnImage `
+        -ApfsPath "/"
+    $rootMetadataAfterWindows = Get-InodeMetadataSummary $rootMetadataAfterWindowsDebug
+    $metadataPreserved = Test-MetadataEqual -Before $metadataBefore -After $metadataAfter
+    $symlinkXattr = @($symlinkDebug.xattrs | Where-Object { $_.name -eq "com.apple.fs.symlink" })
+    $symlinkMetadataValid = [bool](
+        [int64]$symlinkDebug.directory_type -eq 10 -and
+        [int64]$symlinkDebug.inode_mode -eq 41453 -and
+        [int64]$symlinkDebug.inode_size -eq 0 -and
+        @($symlinkDebug.extents).Count -eq 0 -and
+        $symlinkXattr.Count -eq 1)
+    $rootOriginWindowsValid = [bool](
+        $rootOriginWindows.hidden -and $rootOriginWindows.archive -and
+        $rootOriginWindows.acl_exit_code -eq 0 -and
+        (Test-TimeNear ([datetime]$rootOriginWindows.creation_utc) $rootOriginCreation) -and
+        (Test-TimeNear ([datetime]$rootOriginWindows.access_utc) $rootOriginAccess) -and
+        (Test-TimeNear ([datetime]$rootOriginWindows.write_utc) $rootOriginWrite))
+    $rootFinalMutationValid = [bool](
+        $windowsReturn.root_from_macos.archive -and
+        -not $windowsReturn.root_from_macos.hidden -and
+        (Test-TimeNear ([datetime]$windowsReturn.root_from_macos.creation_utc) $rootOriginCreation) -and
+        (Test-TimeNear ([datetime]$windowsReturn.root_from_macos.write_utc) `
+            ([datetime]::SpecifyKind([datetime]"2022-03-04T05:06:07", "Utc"))) -and
+        $windowsReturn.final_root.hidden -and
+        -not $windowsReturn.final_root.archive -and
+        $windowsReturn.final_root.acl_exit_code -eq 0 -and
+        (Test-TimeNear ([datetime]$windowsReturn.final_root.creation_utc) $rootFinalCreation) -and
+        (Test-TimeNear ([datetime]$windowsReturn.final_root.access_utc) $rootFinalAccess) -and
+        (Test-TimeNear ([datetime]$windowsReturn.final_root.write_utc) $rootFinalWrite) -and
+        [int64]$rootMetadataAfterWindowsDebug.inode_object_id -eq 2 -and
+        [int64]$rootMetadataAfterWindowsDebug.inode_created_time_ns -eq
+            (ConvertTo-UnixNanoseconds $rootFinalCreation) -and
+        [int64]$rootMetadataAfterWindowsDebug.inode_accessed_time_ns -eq
+            (ConvertTo-UnixNanoseconds $rootFinalAccess) -and
+        [int64]$rootMetadataAfterWindowsDebug.inode_modified_time_ns -eq
+            (ConvertTo-UnixNanoseconds $rootFinalWrite) -and
+        [int64]$rootMetadataAfterWindowsDebug.inode_bsd_flags -eq 32768 -and
+        ([int64]$rootMetadataAfterWindowsDebug.inode_mode -band 0xF000) -eq 0x4000 -and
+        ([int64]$rootMetadataAfterWindowsDebug.inode_mode -band 0x01FF) -eq 0x01FF -and
+        [int64]$rootMetadataAfterWindowsDebug.inode_owner_id -eq 544 -and
+        [int64]$rootMetadataAfterWindowsDebug.inode_group_id -eq 544)
+    $windowsMutationValid = [bool](
+        $windowsReturn.mac_sha256 -eq "76FD91615F8B856AB498A543707EE1BAC16AD6F56E597584538A0356389281DB" -and
+        $windowsReturn.hardlink_sha256_before -eq $windowsReturn.mac_sha256 -and
+        $windowsReturn.hardlink_sha256_after -eq $windowsReturn.mac_sha256 -and
+        $windowsReturn.return_sha256 -eq "A4DDBF29B458AABD9FA5E69BDDF059C7C61A3E1779E6B1E6954CEFEECF580964" -and
+        $windowsReturn.deleted_hardlink_name_absent -and
+        $windowsReturn.surviving_hardlink_present -and
+        $windowsReturn.renamed_file_present -and
+        $windowsReturn.symlink_reparse_before -and
+        $windowsReturn.symlink_reparse_after -and
+        $windowsReturn.windows_created_symlink_reparse_before -and
+        $windowsReturn.windows_created_symlink_reparse_after -and
+        $windowsReturn.windows_created_symlink_sha256_before -eq $windowsHash -and
+        $windowsReturn.windows_created_symlink_sha256_after -eq $windowsHash -and
+        $windowsReturn.windows_ea_from_macos -eq "macOS updated Windows EA payload" -and
+        $windowsReturn.mac_ea_from_macos -eq "macOS xattr payload" -and
+        $windowsReturn.windows_directory_ea_from_macos -eq
+            "macOS updated Windows directory EA payload" -and
+        $windowsReturn.mac_directory_ea_from_macos -eq "macOS directory xattr payload" -and
+        $windowsReturn.windows_root_ea_from_macos -eq "macOS updated Windows root EA payload" -and
+        $windowsReturn.mac_root_ea_from_macos -eq "macOS root xattr payload" -and
+        $windowsReturn.delete_ea_present_before -and
+        $windowsReturn.delete_ea_absent_after -and
+        $windowsReturn.updated_ea -eq "Windows updated xattr payload" -and
+        $windowsReturn.final_windows_ea -eq "Windows final EA payload" -and
+        $windowsReturn.delete_directory_ea_present_before -and
+        $windowsReturn.delete_directory_ea_absent_after -and
+        $windowsReturn.updated_directory_ea -eq "Windows updated directory xattr payload" -and
+        $windowsReturn.final_windows_directory_ea -eq "Windows final directory EA payload" -and
+        $windowsReturn.delete_root_ea_present_before -and
+        $windowsReturn.delete_root_ea_absent_after -and
+        $windowsReturn.updated_root_ea -eq "Windows updated root xattr payload" -and
+        $windowsReturn.final_windows_root_ea -eq "Windows final root EA payload" -and
+        $remoteMutation.WINDOWS_EDGE_EMPTY_OK -eq "1" -and
+        $remoteMutation.WINDOWS_EDGE_UNICODE_OK -eq "1" -and
+        $remoteMutation.MACOS_EDGE_EMPTY_CREATED -eq "1" -and
+        (Test-EaEdgeStateFromMac $windowsReturn.edge_from_macos.file) -and
+        (Test-EaEdgeStateFromMac $windowsReturn.edge_from_macos.directory) -and
+        (Test-EaEdgeStateFromMac $windowsReturn.edge_from_macos.root) -and
+        (Test-EaEdgeStateAfterWindows $windowsReturn.edge_after_windows.file) -and
+        (Test-EaEdgeStateAfterWindows $windowsReturn.edge_after_windows.directory) -and
+        (Test-EaEdgeStateAfterWindows $windowsReturn.edge_after_windows.root) -and
+        $rootOriginWindowsValid -and $rootOriginRawValid -and
+        $rootMacMutationValid -and $rootFinalMutationValid)
+    if (-not $metadataPreserved -or -not $symlinkMetadataValid -or
+        -not $windowsMutationValid) {
+        throw "Windows return mutation or copied-core metadata preservation failed."
+    }
+
+    $returnImageHash = (Get-FileHash -LiteralPath $returnImage -Algorithm SHA256).Hash
+    Invoke-PscpTransfer -Source $returnImage -Destination "${remoteEndpoint}:$remoteRun/windows-return.apfs" `
+        -Label "upload Windows-return image"
+    Invoke-PscpTransfer -Source $validateScript -Destination "${remoteEndpoint}:$remoteRun/validate-apfs-roundtrip.sh" `
+        -Label "upload macOS return validator"
+    $remoteValidationOutput = Invoke-PlinkCommand -Label "macOS final APFS validation" -Command `
+        "bash $(ConvertTo-PosixSingleQuoted "$remoteRun/validate-apfs-roundtrip.sh") $(ConvertTo-PosixSingleQuoted "$remoteRun/windows-return.apfs") $(ConvertTo-PosixSingleQuoted "$remoteRun/macos-final") $(ConvertTo-PosixSingleQuoted $returnImageHash)"
+    $remoteValidation = ConvertFrom-KeyValueOutput $remoteValidationOutput
+    if ($remoteValidation.APPLE_RETURN_OK -ne "1" -or
+        $remoteValidation.IMAGE_SHA256 -ne $returnImageHash -or
+        $remoteValidation.EDGE_UNICODE_FINAL_OK -ne "1" -or
+        $remoteValidation.EDGE_FINAL_EMPTY_OK -ne "1" -or
+        $remoteValidation.EDGE_OLD_EMPTY_DELETIONS_OK -ne "1") {
+        throw "macOS final validation did not report success: $remoteValidationOutput"
+    }
+
+    foreach ($phase in @("macos-first", "macos-final")) {
+        foreach ($name in @("fsck-before.txt", "fsck-after.txt", "mount.txt", "unmount.txt", "detach.txt")) {
+            Invoke-PscpTransfer -Source "${remoteEndpoint}:$remoteRun/$phase/$name" `
+                -Destination (Join-Path $runDirectory "$phase-$name") `
+                -Label "download $phase $name"
+        }
+    }
+    foreach ($name in @(
+        "fsck-before.txt",
+        "fsck-after-delete.txt",
+        "fsck-final.txt",
+        "before-mount.txt",
+        "after-delete-unmount.txt",
+        "verify-mount.txt",
+        "final-unmount.txt")) {
+        Invoke-PscpTransfer -Source "${remoteEndpoint}:$remoteRun/hardlink/$name" `
+            -Destination (Join-Path $runDirectory "hardlink-$name") `
+            -Label "download hard-link $name"
+    }
+
+    $result = [ordered]@{
+        component = "apfs_for_windows"
+        check = "apple_vm_roundtrip"
+        ok = $true
+        no_host_reboot_performed = $true
+        no_vm_reboot_required = $true
+        credential_material_recorded = $false
+        mac_endpoint = $remoteEndpoint
+        remote_run = $remoteRun
+        local_run_directory = $runDirectory
+        windows_origin = [ordered]@{
+            image_sha256 = (Get-FileHash -LiteralPath $originImage -Algorithm SHA256).Hash
+            windows_sha256 = $windowsHash
+            unicode_sha256 = $unicodeHash
+            windows_created_symlink_sha256 = $windowsCreatedLinkHash
+            root_metadata = $rootOriginWindows
+            root_metadata_valid = [bool]$rootOriginWindowsValid
+            root_inode_metadata = $rootOriginRaw
+            root_inode_metadata_valid = [bool]$rootOriginRawValid
+        }
+        windows_created_hardlinks = [ordered]@{
+            ok = [bool]$hardlinkRoundTripValid
+            origin_image_sha256 = $hardlinkOriginHash
+            macos = $hardlinkRemote
+            windows_return = $hardlinkWindowsReturn
+            native_fsck_passes = 3
+        }
+        macos_mutation = $remoteMutation
+        windows_return = $windowsReturn
+        inode_metadata_before = $metadataBefore
+        inode_metadata_after = $metadataAfter
+        inode_metadata_preserved = [bool]$metadataPreserved
+        symlink_metadata_valid = [bool]$symlinkMetadataValid
+        root_inode_metadata_after_macos = $rootMetadataAfterMac
+        root_macos_mutation_valid = [bool]$rootMacMutationValid
+        root_inode_metadata_after_windows = $rootMetadataAfterWindows
+        root_windows_mutation_valid = [bool]$rootFinalMutationValid
+        windows_return_image_sha256 = $returnImageHash
+        macos_final = $remoteValidation
+        native_fsck_before_and_after_each_macos_mount = $true
+        completed_utc = (Get-Date).ToUniversalTime().ToString("o")
+        duration_seconds = [Math]::Round(((Get-Date).ToUniversalTime() - $startedUtc).TotalSeconds, 3)
+    }
+
+    if (-not $KeepRemoteArtifacts) {
+        Invoke-PlinkCommand -Label "remote cleanup" -Command `
+            "rm -rf -- $(ConvertTo-PosixSingleQuoted $remoteRun)" | Out-Null
+        $remoteCleaned = $true
+    }
+    $result.remote_artifacts_cleaned = $remoteCleaned
+} catch {
+    $result = [ordered]@{
+        component = "apfs_for_windows"
+        check = "apple_vm_roundtrip"
+        ok = $false
+        no_host_reboot_performed = $true
+        credential_material_recorded = $false
+        mac_endpoint = if ($MacHost -and $MacUser) { "$MacUser@$MacHost" } else { $null }
+        remote_run = $remoteRun
+        remote_artifacts_cleaned = $remoteCleaned
+        local_run_directory = $runDirectory
+        error = $_.Exception.Message
+        completed_utc = (Get-Date).ToUniversalTime().ToString("o")
+        duration_seconds = [Math]::Round(((Get-Date).ToUniversalTime() - $startedUtc).TotalSeconds, 3)
+    }
+}
+
+$result | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $resolvedOutput -Encoding UTF8
+$result | ConvertTo-Json -Depth 10
+if (-not $result.ok) {
+    exit 1
+}

@@ -1,0 +1,170 @@
+name: Release build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release-build:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - name: Check out sanitized source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Verify repository privacy and governance
+        shell: powershell
+        run: |
+          .\scripts\verify-repository-privacy.ps1
+          .\scripts\verify-repository-hygiene.ps1 -RequireCleanWorktree
+          .\scripts\verify-sak-source-boundary.ps1 -RequireUpstream:$false
+          .\scripts\verify-winfsp-runtime-boundary.ps1
+          .\scripts\verify-license-notices.ps1
+          .\scripts\verify-release-policy.ps1
+          .\scripts\verify-release-governance.ps1
+
+      - name: Validate version and release tag
+        id: version
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "VERSION is not semantic: $version"
+          }
+          $notes = "docs/releases/$version.md"
+          if (-not (Test-Path -LiteralPath $notes -PathType Leaf)) {
+            throw "Release notes are missing: $notes"
+          }
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $expectedTag = "v$version"
+            if ($env:GITHUB_REF_NAME -cne $expectedTag) {
+              throw "Release tag must be $expectedTag, got $env:GITHUB_REF_NAME"
+            }
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "package=APFS-for-Windows-$version-test-signed" >> $env:GITHUB_OUTPUT
+          "notes=$notes" >> $env:GITHUB_OUTPUT
+
+      - name: Install Qt
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check aqtinstall==3.3.0
+          python -m aqt install-qt windows desktop 6.10.3 win64_msvc2022_64 -O C:\Qt
+          if (-not (Test-Path 'C:\Qt\6.10.3\msvc2022_64\bin\Qt6Core.dll')) {
+            throw 'Qt installation is incomplete.'
+          }
+
+      - name: Build dedicated WinFsp runtime
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} `
+            'Microsoft Visual Studio\Installer\vswhere.exe'
+          $msbuild = (& $vswhere -latest -products * `
+            -requires Microsoft.Component.MSBuild `
+            -find 'MSBuild\Current\Bin\MSBuild.exe' | Select-Object -First 1)
+          if (-not $msbuild) { throw 'MSBuild was not found.' }
+          $projects = @(
+            'third_party\winfsp\build\VStudio\winfsp_sys.vcxproj',
+            'third_party\winfsp\build\VStudio\winfsp_dll.vcxproj',
+            'third_party\winfsp\build\VStudio\testing\winfsp-tests.vcxproj'
+          )
+          foreach ($project in $projects) {
+            & $msbuild $project /t:Build /p:Configuration=Release `
+              /p:Platform=x64 /m /nologo /v:minimal
+            if ($LASTEXITCODE -ne 0) { throw "MSBuild failed: $project" }
+          }
+          .\scripts\collect-winfsp-runtime-build-provenance.ps1
+          $dependency = Get-Content dependencies\winfsp-apfs.json -Raw | ConvertFrom-Json
+          $runtimeRoot = "artifacts\winfsp-runtime\test-signed\$(([string]$dependency.commit).Substring(0, 8))\x64"
+          New-Item -ItemType Directory -Force -Path $runtimeRoot | Out-Null
+          $buildRoot = 'third_party\winfsp\build\VStudio\build\Release'
+          Copy-Item "$buildRoot\winfsp-x64.dll" $runtimeRoot -Force
+          Copy-Item "$buildRoot\winfsp-x64.sys" $runtimeRoot -Force
+          $signature = Get-AuthenticodeSignature "$runtimeRoot\winfsp-x64.sys"
+          if (-not $signature.SignerCertificate) {
+            throw 'Dedicated driver has no embedded test certificate.'
+          }
+          Export-Certificate -Cert $signature.SignerCertificate `
+            -FilePath "$runtimeRoot\winfsp-x64.cer" -Force | Out-Null
+
+      - name: Configure and build APFS for Windows
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G 'Visual Studio 17 2022' -A x64 `
+            -DCMAKE_PREFIX_PATH='C:\Qt\6.10.3\msvc2022_64' `
+            -DWinFsp_ROOT="$pwd\third_party\winfsp" `
+            -DAPFS_PRODUCTION_BUILD=ON
+          if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed.' }
+          cmake --build build --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
+          ctest --test-dir build -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw 'CTest failed.' }
+
+      - name: Build and verify release package
+        shell: pwsh
+        run: |
+          $dependency = Get-Content dependencies\winfsp-apfs.json -Raw | ConvertFrom-Json
+          $runtimeRoot = "artifacts\winfsp-runtime\test-signed\$(([string]$dependency.commit).Substring(0, 8))\x64"
+          .\scripts\build-release-package.ps1 `
+            -BuildDir build\Release `
+            -QtBin C:\Qt\6.10.3\msvc2022_64\bin `
+            -WinFspArtifactRoot $runtimeRoot `
+            -DriverSigningMode Test -AllowTestSignedDriver
+          .\scripts\verify-release-package.ps1 `
+            -DriverSigningMode Test -AllowTestSignedDriver `
+            -OutputPath artifacts\package\verify-release-package-ps7.json
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            .\scripts\verify-release-package.ps1 `
+            -DriverSigningMode Test -AllowTestSignedDriver `
+            -OutputPath artifacts\package\verify-release-package-ps5.json
+          if ($LASTEXITCODE -ne 0) { throw 'PowerShell 5.1 package verification failed.' }
+          $stage = "artifacts\package\${{ steps.version.outputs.package }}"
+          .\scripts\verify-repository-privacy.ps1 -ScanRoot $stage `
+            -SkipGitMetadata -OutputPath artifacts\package\package-privacy.json
+          $zip = "artifacts\package\${{ steps.version.outputs.package }}.zip"
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $([IO.Path]::GetFileName($zip))" | Set-Content `
+            artifacts\package\SHA256SUMS.txt -Encoding ASCII
+
+      - name: Upload verified workflow artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.version.outputs.package }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            artifacts/package/${{ steps.version.outputs.package }}.zip
+            artifacts/package/package-proof.json
+            artifacts/package/package-privacy.json
+            artifacts/package/verify-release-package-ps5.json
+            artifacts/package/verify-release-package-ps7.json
+            artifacts/package/SHA256SUMS.txt
+
+      - name: Publish GitHub prerelease
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $title = "APFS for Windows ${{ steps.version.outputs.version }} (Test-Signed)"
+          $notes = '${{ steps.version.outputs.notes }}'
+          $assets = @(
+            "artifacts\package\${{ steps.version.outputs.package }}.zip",
+            'artifacts\package\SHA256SUMS.txt'
+          )
+          gh release create $tag @assets --verify-tag --prerelease `
+            --title $title --notes-file $notes

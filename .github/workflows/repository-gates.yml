@@ -1,0 +1,45 @@
+name: Repository gates
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repository-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repository-gates:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: recursive
+      - name: Verify repository hygiene
+        shell: powershell
+        run: .\scripts\verify-repository-hygiene.ps1 -RequireCleanWorktree
+      - name: Verify repository privacy
+        shell: powershell
+        run: .\scripts\verify-repository-privacy.ps1
+      - name: Verify APFS import manifest offline
+        shell: powershell
+        run: .\scripts\verify-sak-source-boundary.ps1 -RequireUpstream:$false
+      - name: Verify dedicated WinFsp runtime manifest offline
+        shell: powershell
+        run: .\scripts\verify-winfsp-runtime-boundary.ps1
+      - name: Verify license notices
+        shell: powershell
+        run: .\scripts\verify-license-notices.ps1
+      - name: Verify owner release policy
+        shell: powershell
+        run: .\scripts\verify-release-policy.ps1
+      - name: Verify release governance
+        shell: powershell
+        run: .\scripts\verify-release-governance.ps1
