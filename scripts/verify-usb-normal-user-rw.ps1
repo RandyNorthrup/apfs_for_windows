@@ -376,8 +376,24 @@ function Remove-ProofDirectory {
         [Parameter(Mandatory = $true)][string]$MountRoot,
         [Parameter(Mandatory = $true)][string]$Prefix
     )
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
     $safePath = Resolve-SafeProofDirectory -Path $Path -MountRoot $MountRoot -Prefix $Prefix
-    Remove-Item -LiteralPath $safePath -Recurse -Force
+    try {
+        Remove-Item -LiteralPath $safePath -Recurse -Force
+    } catch {
+        if (Test-Path -LiteralPath $safePath) {
+            throw
+        }
+        return
+    }
+    if (Test-Path -LiteralPath $safePath -PathType Container) {
+        $remaining = @(Get-ChildItem -LiteralPath $safePath -Force -ErrorAction Stop)
+        if ($remaining.Count -eq 0) {
+            Remove-Item -LiteralPath $safePath -Force
+        }
+    }
 }
 
 function Wait-PathAbsent {
@@ -475,9 +491,6 @@ function Write-PreflightResultAndExit {
     $mountRoot = Get-MountRoot -Name $Mount
     $mountRootVisible = Test-Path -LiteralPath $mountRoot -PathType Container
     $blockers = @()
-    if ($pending.Count -gt 0) {
-        $blockers += "pending UAC prompt"
-    }
     if ($healthError) {
         $blockers += "service health failed"
     }
@@ -504,6 +517,7 @@ function Write-PreflightResultAndExit {
             elevated = [bool](Test-CurrentProcessAdmin)
         }
         pending_uac = $pending
+        pending_uac_blocks_non_elevating_flow = $false
         pinned_usb = $pinned
         pin_error = $pinError
         service_health_error = $healthError
@@ -604,9 +618,8 @@ if ($PreflightOnly) {
 }
 
 if (Test-CurrentProcessAdmin) {
-    throw "Run this verifier from a non-admin shell. It elevates only setup/restore; file actions stay non-admin."
+    throw "Run this verifier from a non-admin shell. Service IPC performs policy setup/restore; file actions stay non-admin."
 }
-Assert-NoPendingUacPrompt
 
 $resolvedOutput = Resolve-RepoPath $OutputPath
 $artifactDir = Split-Path -Parent $resolvedOutput
@@ -847,7 +860,10 @@ try {
     }
     $fileDeleted = -not (Test-Path -LiteralPath $renamedPath)
     Invoke-FsMutationWithRetry -Name "normal-user delete proof directory" -Timeout $TimeoutSeconds -Operation {
-        Remove-Item -LiteralPath $testDir -Recurse:$ExtendedFileActions -Force
+        Remove-ProofDirectory -Path $testDir -MountRoot $mountRoot -Prefix "sak-user-rw-proof-"
+        if (-not (Wait-PathAbsent -Path $testDir -Timeout $TimeoutSeconds)) {
+            throw "proof directory is still visible after remove"
+        }
     }
     $dirDeleted = -not (Test-Path -LiteralPath $testDir)
     if ($ExtendedFileActions) {
@@ -856,7 +872,13 @@ try {
     }
 } catch {
     $operationError = $_.Exception.Message
-    Remove-Item -LiteralPath $testDir -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $testDir -PathType Container) {
+        try {
+            Remove-ProofDirectory -Path $testDir -MountRoot $mountRoot -Prefix "sak-user-rw-proof-"
+        } catch {
+            $operationError += " Cleanup failed: $($_.Exception.Message)"
+        }
+    }
 } finally {
     Remove-Item -LiteralPath $extendedSourceDir -Recurse -Force -ErrorAction SilentlyContinue
     $serviceExe = Join-Path $InstallRoot "apfs_mount_service.exe"

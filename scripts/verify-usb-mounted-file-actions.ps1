@@ -223,8 +223,24 @@ function Remove-ProofDirectory {
         [Parameter(Mandatory = $true)][string]$MountRoot,
         [Parameter(Mandatory = $true)][string]$Prefix
     )
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
     $safePath = Resolve-SafeProofDirectory -Path $Path -MountRoot $MountRoot -Prefix $Prefix
-    Remove-Item -LiteralPath $safePath -Recurse -Force
+    try {
+        Remove-Item -LiteralPath $safePath -Recurse -Force
+    } catch {
+        if (Test-Path -LiteralPath $safePath) {
+            throw
+        }
+        return
+    }
+    if (Test-Path -LiteralPath $safePath -PathType Container) {
+        $remaining = @(Get-ChildItem -LiteralPath $safePath -Force -ErrorAction Stop)
+        if ($remaining.Count -eq 0) {
+            Remove-Item -LiteralPath $safePath -Force
+        }
+    }
 }
 
 function Wait-PathAbsent {
