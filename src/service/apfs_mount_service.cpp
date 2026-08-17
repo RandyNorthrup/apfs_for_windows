@@ -625,8 +625,13 @@ bool configureServiceRecoveryPolicy(SC_HANDLE service, QString* error = nullptr)
     return true;
 }
 
-bool waitForServiceStopped(SC_HANDLE service, DWORD timeoutMs, QString* error = nullptr) {
+bool stopServiceAndWait(SC_HANDLE service,
+                        DWORD timeoutMs,
+                        bool* stopRequested,
+                        bool* alreadyStopped,
+                        QString* error = nullptr) {
     const ULONGLONG deadline = GetTickCount64() + timeoutMs;
+    bool observedActive = false;
     SERVICE_STATUS_PROCESS status{};
     DWORD bytesNeeded = 0;
     while (true) {
@@ -641,7 +646,34 @@ bool waitForServiceStopped(SC_HANDLE service, DWORD timeoutMs, QString* error = 
             return false;
         }
         if (status.dwCurrentState == SERVICE_STOPPED) {
+            if (alreadyStopped && !observedActive && (!stopRequested || !*stopRequested)) {
+                *alreadyStopped = true;
+            }
             return true;
+        }
+        observedActive = true;
+
+        const bool transitionPending = status.dwCurrentState == SERVICE_START_PENDING ||
+                                       status.dwCurrentState == SERVICE_STOP_PENDING ||
+                                       status.dwCurrentState == SERVICE_CONTINUE_PENDING ||
+                                       status.dwCurrentState == SERVICE_PAUSE_PENDING;
+        if (!transitionPending && (!stopRequested || !*stopRequested)) {
+            SERVICE_STATUS controlStatus{};
+            if (ControlService(service, SERVICE_CONTROL_STOP, &controlStatus)) {
+                if (stopRequested) {
+                    *stopRequested = true;
+                }
+            } else {
+                const DWORD stopError = GetLastError();
+                if (stopError != ERROR_SERVICE_NOT_ACTIVE &&
+                    stopError != ERROR_SERVICE_CANNOT_ACCEPT_CTRL) {
+                    if (error) {
+                        *error = QStringLiteral("ControlService stop failed: %1")
+                                     .arg(winError(stopError));
+                    }
+                    return false;
+                }
+            }
         }
         if (GetTickCount64() >= deadline) {
             if (error) {
@@ -2893,31 +2925,14 @@ int uninstallService() {
     }
     bool stopRequested = false;
     bool alreadyStopped = false;
-    bool stopped = false;
-    SERVICE_STATUS status{};
-    if (ControlService(service, SERVICE_CONTROL_STOP, &status)) {
-        stopRequested = true;
-    } else {
-        const DWORD stopError = GetLastError();
-        if (stopError == ERROR_SERVICE_NOT_ACTIVE) {
-            alreadyStopped = true;
-            stopped = true;
-        } else {
-            CloseServiceHandle(service);
-            CloseServiceHandle(scm);
-            QTextStream(stderr) << "ControlService stop failed: " << winError(stopError) << Qt::endl;
-            return 5;
-        }
-    }
     QString stopError;
+    const bool stopped =
+        stopServiceAndWait(service, 30000, &stopRequested, &alreadyStopped, &stopError);
     if (!stopped) {
-        stopped = waitForServiceStopped(service, 30000, &stopError);
-        if (!stopped) {
-            CloseServiceHandle(service);
-            CloseServiceHandle(scm);
-            QTextStream(stderr) << stopError << Qt::endl;
-            return 6;
-        }
+        CloseServiceHandle(service);
+        CloseServiceHandle(scm);
+        QTextStream(stderr) << stopError << Qt::endl;
+        return 6;
     }
     if (!DeleteService(service)) {
         const DWORD error = GetLastError();

@@ -120,6 +120,15 @@ waits for worker exit before restoring previous executable. Wrong ZIP hash and
 non-admin `-Apply` negative tests fail closed without changing service PID or
 installed worker.
 
+Clean Windows VM then exercised real package-worker `-Apply` without Git
+installed. Replacement from baseline `AB68CFF...B12A` to exact
+`F04E290...BD25` passed; dedicated driver identity stayed unchanged and `R:`
+returned read-only. A four-byte invalid worker forced mount timeout; rollback
+stopped service, restored exact worker, restarted service, and restored
+read-only/raw-disabled mount. Uninstall and remote cleanup passed without VM or
+host reboot. See
+`docs/evidence/exact-package-worker-deployment-vm-2026-08-17.json`.
+
 For full exact-package replacement, guarded repair now forwards `-RepairScript`,
 `-BuildDir`, and `-AllowTestSignedDriver` through its encoded elevated command.
 Exact package payload validation and argument round-trip pass. Host deployment
@@ -155,6 +164,10 @@ Automatic service, dedicated driver/runtime, VM reboot and restored `R:`, one
 interactive stacked tray with `Open`/`Exit`, exact installed hashes, uninstall,
 and independent residue cleanup passed. Host did not reboot. See
 `docs/evidence/current-candidate-7d23245-2026-08-17.json`.
+
+Service uninstall now waits through bounded SCM pending transitions and retries
+stop control when SCM temporarily rejects it after reboot. Service deletion only
+starts after confirmed `STOPPED` state.
 
 Repository protection evidence is retained in
 `docs/evidence/repository-governance-2026-08-17.json`. This closes baseline

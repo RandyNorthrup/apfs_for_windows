@@ -249,6 +249,14 @@ Full test-package repair also replaces WinFsp driver; do not use it on host
 unless test-driver loading is already permitted. Production-signed full-package
 repair remains final release path.
 
+Package-worker `-Apply` and rollback were exercised on clean Windows VM without
+Git installed. Exact `F04E290...BD25` replacement passed from current
+`C2B9...6F6` ZIP, driver identity stayed unchanged, and `R:` returned read-only.
+An invalid worker then forced mount timeout; rollback stopped service, restored
+exact worker, restarted service, and restored read-only mount. VM uninstall and
+remote cleanup passed without reboot. Evidence:
+`docs\evidence\exact-package-worker-deployment-vm-2026-08-17.json`.
+
 Apple VM round-trip verification accepts connection data only as runtime
 parameters. No password, key, or password-file content is copied into source or
 proof JSON. It creates a Windows APFS image, mutates and checks it with the macOS
@@ -369,6 +377,9 @@ or dedicated-driver residue. This closes the development lifecycle gate only;
 production still requires Microsoft-compatible driver signing and
 Authenticode-signed application binaries. Exact package identity is recorded
 outside the archive in `docs\evidence\winfsp-hardlink-package-2026-08-17.json`.
+Service uninstall uses a bounded SCM state loop: it waits through pending
+transitions, retries temporarily rejected stop controls, confirms `STOPPED`,
+then deletes service. This prevents post-reboot uninstall races.
 Clean-source test candidate SHA-256
 `50EECCD5ECDD4A3393FD26C8DF932E3C13858D35476574DF226681EC8B432FA5`
 passed build/package/interoperability proof. A second clean-source package,

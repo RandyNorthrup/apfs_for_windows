@@ -208,9 +208,17 @@ $mountPinComplete = -not [string]::IsNullOrWhiteSpace($ExpectedTarget) -and
 $metadata = if (Test-Path -LiteralPath $buildMetadataPath -PathType Leaf) {
     Get-Content -LiteralPath $buildMetadataPath -Raw | ConvertFrom-Json
 } else { $null }
-$head = [string](& git -C $repoRoot rev-parse HEAD 2>$null)
-$branch = [string](& git -C $repoRoot branch --show-current 2>$null)
-$status = @(& git -C $repoRoot status --porcelain 2>$null)
+$head = $null
+$branch = $null
+$status = @()
+if (-not $packageMode) {
+    $git = Get-Command git -ErrorAction SilentlyContinue
+    if ($git) {
+        $head = [string](& $git.Source -C $repoRoot rev-parse HEAD 2>$null)
+        $branch = [string](& $git.Source -C $repoRoot branch --show-current 2>$null)
+        $status = @(& $git.Source -C $repoRoot status --porcelain 2>$null)
+    }
+}
 $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 $serviceCim = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'" -ErrorAction SilentlyContinue
 $sourceHash = if (Test-Path -LiteralPath $sourceWorker -PathType Leaf) {
