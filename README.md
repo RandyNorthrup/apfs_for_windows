@@ -343,6 +343,15 @@ passed exact Windows VM install/reboot/tray/uninstall lifecycle. Evidence is in
 `docs\evidence\clean-candidate-2026-08-17.json`. Both remain test-signed and are
 not production releases.
 
+Current source `d5e68ccef376ba115d4fbcf98391c56d8f1b2977` passed production-mode
+build and CTest 13/13. Its 31-file test-signed package, SHA-256
+`B2944BB636EED3003DC827A169550E3DB813A0C2BF39ACCC5DECA7CF873EDCBD`,
+verified under Windows PowerShell 5.1 and PowerShell 7, then passed exact
+Windows VM install, VM reboot persistence, one stacked `AP`/`FS` tray process
+with `Open` and `Exit`, installed-hash matching, uninstall, and independent
+residue cleanup. Only the VM rebooted. Sanitized evidence is in
+`docs\evidence\windows-vm-install-lifecycle-d5e68cc-2026-08-17.json`.
+
 License notices:
 
 ```powershell
@@ -369,11 +378,19 @@ import code into this repository first, then modify the local copy only.
 recorded commit/blob/file hashes, exact copied APFS file set, and declared local
 copied-core deltas under `third_party\sak_apfs_core`. Unrelated source-checkout
 work is reported but does not invalidate unchanged imported APFS paths.
+Concurrent upstream owner work briefly modified imported
+`src/core/apfs_keybag.cpp` during this certification window, then made it clean.
+The latest check at `2026-08-17T07:53:07Z` passes: all imported upstream paths
+are clean and only unrelated HFS/test/catalog work remains dirty. This
+repository did not modify the upstream checkout.
 
 Repository and production gates:
 
 Repository hygiene enforces `main` as the only owned local branch. Detached
 GitHub Actions checkouts are accepted, but additional owned branches fail.
+Public `main` protection now applies to administrators, requires strict
+`repository-gates`, requires linear history, and blocks force-pushes and branch
+deletion. Reviewed release tags and retained production provenance remain open.
 
 ```powershell
 .\scripts\verify-repository-hygiene.ps1
@@ -383,7 +400,8 @@ GitHub Actions checkouts are accepted, but additional owned branches fail.
 
 Strict production readiness intentionally fails while production driver/app
 signing, production-signed exact-package lifecycle, physical fault recovery,
-remaining APFS policy, and release-governance evidence remain open.
+remaining APFS policy, and final release governance remain open. Any future
+imported-source drift will fail the source-boundary gate independently.
 
 Verified USB evidence:
 

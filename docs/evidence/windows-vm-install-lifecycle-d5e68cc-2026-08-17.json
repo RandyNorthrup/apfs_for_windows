@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "component": "apfs_for_windows",
+  "check": "windows_vm_install_reboot_uninstall_lifecycle",
+  "ok": true,
+  "classification": "test-signed development package; not a production release",
+  "started_utc": "2026-08-17T07:36:46.9003285Z",
+  "completed_utc": "2026-08-17T07:46:20.7275695Z",
+  "no_host_reboot_performed": true,
+  "windows_vm_rebooted": true,
+  "credential_material_recorded": false,
+  "source": {
+    "commit": "d5e68ccef376ba115d4fbcf98391c56d8f1b2977",
+    "clean": true,
+    "production_build_mode": true,
+    "reproducible_build": true,
+    "ctest": "13/13"
+  },
+  "package": {
+    "name": "APFS-for-Windows-0.1.0-test-signed.zip",
+    "file_count": 31,
+    "sha256": "B2944BB636EED3003DC827A169550E3DB813A0C2BF39ACCC5DECA7CF873EDCBD",
+    "sha256_after": "B2944BB636EED3003DC827A169550E3DB813A0C2BF39ACCC5DECA7CF873EDCBD",
+    "source_unchanged": true,
+    "worker_sha256": "F04E290A6F1FB39402A948D5831BC3FCAF4BBBA6E8F762C51322C84589E3BD25",
+    "driver_signing_mode": "test",
+    "production_ready": false,
+    "windows_powershell_5_1_verification": true,
+    "powershell_7_verification": true
+  },
+  "fixture": {
+    "sha256": "AD49EEEB3E404D04324E027B1935C79C4395CB068C98E6CFB32828DAD030B8C7",
+    "mount": "R:",
+    "read_only": true,
+    "expected_file": "WinProof/Nested/windows.txt",
+    "expected_file_sha256": "B58EE1D8BF6C0FF48A5D0AB28DCC938E941CE9AC9091E9C103D85C3784C1E4FC"
+  },
+  "install": {
+    "ok": true,
+    "service_state": "Running",
+    "service_start_mode": "Auto",
+    "dedicated_driver_running": true,
+    "installed_binary_hashes_match_package": true
+  },
+  "post_reboot": {
+    "ok": true,
+    "service_state": "Running",
+    "service_start_mode": "Auto",
+    "saved_mount_restored": true,
+    "file_sha256_match": true,
+    "installed_binary_hashes_match_package": true,
+    "tray_process_count": 1,
+    "tray_icon_available": true,
+    "tray_actions": [
+      "Open",
+      "Exit"
+    ]
+  },
+  "uninstall": {
+    "ok": true,
+    "service_removed": true,
+    "dedicated_driver_removed": true,
+    "mount_removed": true,
+    "manager_processes_stopped": true,
+    "startup_task_removed": true,
+    "run_fallback_removed": true,
+    "start_menu_removed": true,
+    "apps_and_features_registration_removed": true,
+    "install_root_removed": true,
+    "reboot_required": false
+  },
+  "cleanup": {
+    "current_remote_artifacts_cleaned": true,
+    "preexisting_stale_lifecycle_directory_removed": true,
+    "remaining_lifecycle_directories": 0,
+    "file_backed_virtual_disks": 0,
+    "independent_residue_audit_ok": true
+  },
+  "limitations": [
+    "The package and dedicated driver are test-signed.",
+    "This lifecycle fixture was intentionally mounted read-only; write/delete coverage is provided by separate APFS image, native macOS, raw-VHD, and physical USB lanes.",
+    "Production driver signing, application Authenticode signing, exact production-package lifecycle, and exact production-package physical USB proof remain open."
+  ]
+}

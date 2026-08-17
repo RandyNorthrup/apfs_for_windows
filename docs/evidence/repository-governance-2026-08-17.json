@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "component": "apfs_for_windows",
+  "check": "repository_governance_baseline",
+  "ok": true,
+  "verified_utc": "2026-08-17T07:48:53.3759430Z",
+  "repository_visibility": "public",
+  "default_branch": "main",
+  "branch_protection": {
+    "enforce_admins": true,
+    "strict_status_checks": true,
+    "required_status_checks": [
+      "repository-gates"
+    ],
+    "linear_history": true,
+    "force_pushes_allowed": false,
+    "branch_deletions_allowed": false,
+    "required_approving_reviews": 0
+  },
+  "production_release_governance_complete": false,
+  "remaining": [
+    "Require reviewed pull requests for release changes.",
+    "Create and verify a reviewed signed release tag.",
+    "Retain production package provenance and release evidence tied to the signed artifact."
+  ]
+}
