@@ -4,7 +4,7 @@
 
 APFS for Windows is distributed as an unsigned application package with a WDK
 test-signed filesystem driver. Installation requires persistent Windows Test
-Signing. This is an owner-controlled prerelease model, not production driver
+Signing. This is an owner-controlled public beta model, not production driver
 distribution.
 
 The supplied scripts never enable `nointegritychecks`, kernel debugging, or an

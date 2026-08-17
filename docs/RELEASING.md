@@ -2,7 +2,7 @@
 
 ## Release Model
 
-Releases are public GitHub prereleases containing an unsigned application
+Releases are public GitHub releases containing an unsigned application
 package and WDK test-signed filesystem driver. They require persistent Windows
 Test Signing and must never be labeled production-ready.
 
@@ -19,7 +19,7 @@ Test Signing and must never be labeled production-ready.
 7. builds and verifies the test-signed ZIP;
 8. scans the staged package for private machine data;
 9. uploads the verified package and proof as workflow artifacts;
-10. creates a prerelease when the workflow runs from the matching version tag.
+10. creates the latest public release when the workflow runs from the matching version tag.
 
 ## Version and Tag
 
@@ -32,7 +32,7 @@ apfs-for-windows-v<VERSION>
 For version `0.1.0`, use tag `apfs-for-windows-v0.1.0`. The workflow rejects
 mismatched or product-ambiguous tags.
 
-## Pre-Release Checklist
+## Release Checklist
 
 1. Confirm `main` is clean and the only branch.
 2. Confirm repository privacy gate passes.
@@ -40,7 +40,7 @@ mismatched or product-ambiguous tags.
 4. Update `VERSION` and `docs/releases/<version>.md` when needed.
 5. Run the release workflow manually once and inspect its artifact.
 6. Create and push the matching annotated tag.
-7. Verify GitHub release is marked prerelease.
+7. Verify GitHub release is published and marked Latest.
 8. Download the published ZIP, compare SHA-256, and run package verification.
 
 ## Assets

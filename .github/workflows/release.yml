@@ -153,7 +153,7 @@ jobs:
             artifacts/package/verify-release-package-ps7.json
             artifacts/package/SHA256SUMS.txt
 
-      - name: Publish GitHub prerelease
+      - name: Publish GitHub release
         if: github.ref_type == 'tag'
         shell: pwsh
         env:
@@ -166,5 +166,5 @@ jobs:
             "artifacts\package\${{ steps.version.outputs.package }}.zip",
             'artifacts\package\SHA256SUMS.txt'
           )
-          gh release create $tag @assets --verify-tag --prerelease `
+          gh release create $tag @assets --verify-tag --latest `
             --title $title --notes-file $notes

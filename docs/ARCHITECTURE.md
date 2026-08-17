@@ -59,6 +59,6 @@ is allowed.
    absolute dependency paths, and verify package-local payloads and privacy.
 5. Run exact-package lifecycle and destructive-media certification in isolated
    test systems.
-6. Publish a GitHub prerelease only when owner-readiness has no blockers. Physical
+6. Publish a GitHub release only when owner-readiness has no blockers. Physical
    fault recovery remains an explicit untested risk; no public `production-ready`
    claim is made.

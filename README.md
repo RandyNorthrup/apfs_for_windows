@@ -3,7 +3,7 @@
 Native APFS access in Windows Explorer.
 
 [![Repository gates](https://github.com/RandyNorthrup/apfs_for_windows/actions/workflows/repository-gates.yml/badge.svg?branch=main)](https://github.com/RandyNorthrup/apfs_for_windows/actions/workflows/repository-gates.yml)
-[![Latest release](https://img.shields.io/github/v/release/RandyNorthrup/apfs_for_windows?include_prereleases&sort=semver)](https://github.com/RandyNorthrup/apfs_for_windows/releases)
+[![Latest release](https://img.shields.io/github/v/release/RandyNorthrup/apfs_for_windows?sort=semver)](https://github.com/RandyNorthrup/apfs_for_windows/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%2011%20x64-0078D4?logo=windows11&logoColor=white)](docs/INSTALLATION.md)
 [![Status](https://img.shields.io/badge/status-public%20beta-F59E0B)](docs/PRODUCTION_READINESS.md)
 [![License](https://img.shields.io/github/license/RandyNorthrup/apfs_for_windows)](LICENSE)

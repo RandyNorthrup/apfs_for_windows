@@ -13,7 +13,7 @@ source remains outside this repository and is never modified by this project.
 
 ## Release Boundary
 
-Current release class is an owner-controlled, test-signed prerelease:
+Current release class is an owner-controlled, test-signed public beta:
 
 - application and package binaries are unsigned;
 - the dedicated filesystem driver is WDK test-signed;
@@ -160,7 +160,7 @@ See `docs/TESTING.md` and `docs/RELEASING.md`.
 
 ## Completion Criteria
 
-The owner-controlled prerelease is complete when:
+The owner-controlled public beta is complete when:
 
 - supported devices automount and remain usable in Explorer;
 - user namespace and metadata operations pass current tests;
