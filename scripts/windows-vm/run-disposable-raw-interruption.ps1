@@ -456,7 +456,7 @@ try {
             -Path (Join-Path "$Mount\" "interrupted.bin")
         $flushObserved = Wait-Condition -Timeout $TimeoutSeconds -Condition {
             (Get-Content -LiteralPath $tracePath -Raw -ErrorAction SilentlyContinue) -match
-                "StagedFlush /interrupted\.bin bytes=$PayloadBytes file_backed=1"
+                "StagedFlush /interrupted\.bin bytes=$PayloadBytes file_backed=0"
         }
         if (-not $flushObserved) { throw "Worker never entered staged raw flush." }
         if ($delay -gt 0) { Start-Sleep -Milliseconds $delay }
@@ -523,6 +523,7 @@ try {
             delay_milliseconds = $delay
             ok = [bool]$attemptOk
             disk = $diskIdentity
+            staging_mode = "buffered"
             flush_observed = [bool]$flushObserved
             flush_completed_before_kill = [bool]$flushCompletedBeforeKill
             flush_completed_after_kill = [bool]$flushCompletedAfterKill
