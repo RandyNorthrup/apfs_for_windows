@@ -280,7 +280,7 @@ $payloadPaths = @(Get-ChildItem -LiteralPath $stageRoot -Recurse -File | ForEach
 })
 [Array]::Sort($payloadPaths, [StringComparer]::Ordinal)
 $payloadManifest = @($payloadPaths | ForEach-Object {
-    $path = Join-Path $stageRoot $_.Replace("/", "\")
+    $path = Join-Path -Path $stageRoot -ChildPath ($_.Replace("/", "\"))
     $file = Get-Item -LiteralPath $path
     [ordered]@{
         relative_path = $_
@@ -317,7 +317,7 @@ $stagePaths = @(Get-ChildItem -LiteralPath $stageRoot -Recurse -File | ForEach-O
 })
 [Array]::Sort($stagePaths, [StringComparer]::Ordinal)
 $stageFiles = @($stagePaths | ForEach-Object {
-    $path = Join-Path $stageRoot $_.Replace("/", "\")
+    $path = Join-Path -Path $stageRoot -ChildPath ($_.Replace("/", "\"))
     $file = Get-Item -LiteralPath $path
     [ordered]@{
         relative_path = $_

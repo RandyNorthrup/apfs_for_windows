@@ -126,7 +126,8 @@ function Test-DeterministicArchive {
 
             $entryReports = @($entries | ForEach-Object {
                 $entry = $_
-                $stagePath = Join-Path $StageRoot $entry.FullName.Replace("/", "\")
+                $stagePath = Join-Path -Path $StageRoot `
+                    -ChildPath ($entry.FullName.Replace("/", "\"))
                 $entryStream = $entry.Open()
                 try {
                     $entryHash = Get-StreamSha256 -Stream $entryStream
@@ -232,7 +233,8 @@ $releaseManifest = if (Test-Path -LiteralPath $releaseManifestPath -PathType Lea
 $manifestMismatches = @()
 if ($releaseManifest) {
     foreach ($entry in @($releaseManifest.files)) {
-        $path = Join-Path $stageRoot ([string]$entry.relative_path).Replace("/", "\")
+        $path = Join-Path -Path $stageRoot `
+            -ChildPath (([string]$entry.relative_path).Replace("/", "\"))
         $actualHash = if (Test-Path -LiteralPath $path -PathType Leaf) {
             (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
         } else { $null }
