@@ -7,13 +7,13 @@ Current classification: **development-certified, not production-ready**. See
 
 Current state:
 
-- Local APFS core fork lives under `third_party/sak_apfs_core`, imported from
+- Local APFS core copy lives under `third_party/sak_apfs_core`, imported from
   source commit `5587736df4d27e0eb5ca6e9f60f3c69614023b13` and patched only
   inside this repository.
 - Apple LZFSE/LZVN reference code is vendored under `third_party/lzfse` for
   APFS compression paths.
 - Stock WinFsp runtime/SDK remains supported for development mounts. Release
-  packages carry the dedicated side-by-side runtime/driver from public fork
+  packages carry the dedicated side-by-side runtime/driver from a public repository
   `RandyNorthrup/winfsp-apfs` commit
   `b4650b187f2d0d95a660bb687177f67efc07588f` through one submodule on `main`.
   The dedicated driver coexists with stock WinFsp and transports native Windows
@@ -118,7 +118,7 @@ ctest --test-dir build -C Release --output-on-failure
 ```
 
 Production-mode configuration additionally requires a clean checkout of the
-pinned WinFsp fork, native hard-link ABI, `/W4 /WX`, and explicit coherent
+pinned dedicated WinFsp runtime, native hard-link ABI, `/W4 /WX`, and explicit coherent
 WinFsp header/library/runtime paths. Build metadata is emitted beside binaries.
 
 Developer install, from elevated PowerShell:
@@ -285,7 +285,7 @@ Build a release ZIP without installing:
 .\scripts\verify-release-package.ps1
 ```
 
-Production packaging is the default and requires a production-signed fork
+Production packaging is the default and requires a production-signed dedicated
 driver. It stages `artifacts\package\APFS-for-Windows-0.1.0`, creates
 `artifacts\package\APFS-for-Windows-0.1.0.zip`, and verifies the required
 binaries, bundled side-by-side WinFsp DLL/driver, Qt runtime files,
@@ -328,14 +328,14 @@ Do not edit `C:\Users\Randy\Coding\S.A.K.-Utility` for this project. Copy or
 import code into this repository first, then modify the local copy only.
 `scripts\verify-sak-source-boundary.ps1` verifies the source checkout status,
 recorded commit/blob/file hashes, exact copied APFS file set, and declared local
-fork deltas under `third_party\sak_apfs_core`. Unrelated source-checkout work is
-reported but does not invalidate unchanged imported APFS paths.
+copied-core deltas under `third_party\sak_apfs_core`. Unrelated source-checkout
+work is reported but does not invalidate unchanged imported APFS paths.
 
 Repository and production gates:
 
 ```powershell
 .\scripts\verify-repository-hygiene.ps1
-.\scripts\verify-winfsp-fork-boundary.ps1
+.\scripts\verify-winfsp-runtime-boundary.ps1
 .\scripts\verify-production-readiness.ps1
 ```
 
@@ -513,7 +513,7 @@ Verified USB evidence:
   Windows EA transport.
   Existing Apple hard links remain preserved across Windows mutations. Copied
   APFS core now creates arbitrary-depth hard links and preserves sibling IDs.
-  Public `winfsp-apfs` fork transports native Windows hard-link requests and
+  Dedicated `winfsp-apfs` runtime transports native Windows hard-link requests and
   reports link counts. Exact test-driver/DLL/worker runtime proof and package
   install/reboot/uninstall now pass; production driver signing remains open.
 

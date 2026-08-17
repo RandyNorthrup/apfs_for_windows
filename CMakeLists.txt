@@ -13,8 +13,8 @@ endif()
 project(apfs_for_windows VERSION ${APFS_PROJECT_VERSION} LANGUAGES C CXX)
 
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/winfsp-apfs.json" APFS_WINFSP_MANIFEST_JSON)
-string(JSON APFS_WINFSP_FORK_REPOSITORY GET "${APFS_WINFSP_MANIFEST_JSON}" repository)
-string(JSON APFS_WINFSP_FORK_COMMIT GET "${APFS_WINFSP_MANIFEST_JSON}" commit)
+string(JSON APFS_WINFSP_RUNTIME_REPOSITORY GET "${APFS_WINFSP_MANIFEST_JSON}" repository)
+string(JSON APFS_WINFSP_RUNTIME_COMMIT GET "${APFS_WINFSP_MANIFEST_JSON}" commit)
 find_package(Git REQUIRED)
 execute_process(
     COMMAND "${GIT_EXECUTABLE}" -C "${CMAKE_CURRENT_SOURCE_DIR}" rev-parse HEAD
@@ -64,9 +64,9 @@ if(APFS_PRODUCTION_BUILD)
         OUTPUT_STRIP_TRAILING_WHITESPACE
         ERROR_QUIET)
     if(NOT APFS_WINFSP_GIT_RESULT EQUAL 0 OR
-            NOT APFS_WINFSP_CHECKOUT_COMMIT STREQUAL APFS_WINFSP_FORK_COMMIT)
+            NOT APFS_WINFSP_CHECKOUT_COMMIT STREQUAL APFS_WINFSP_RUNTIME_COMMIT)
         message(FATAL_ERROR
-            "Production WinFsp_ROOT must be the pinned winfsp-apfs commit ${APFS_WINFSP_FORK_COMMIT}.")
+            "Production WinFsp_ROOT must be the pinned winfsp-apfs commit ${APFS_WINFSP_RUNTIME_COMMIT}.")
     endif()
     execute_process(
         COMMAND git -C "${WinFsp_ROOT}" status --porcelain
@@ -190,7 +190,7 @@ if(WinFsp_FOUND)
     endif()
 endif()
 if(APFS_REQUIRE_NATIVE_HARDLINKS AND NOT APFS_WINFSP_HAS_NATIVE_HARDLINKS)
-    message(FATAL_ERROR "Native hard links require the reviewed WinFsp protocol/kernel fork.")
+    message(FATAL_ERROR "Native hard links require the reviewed dedicated WinFsp runtime.")
 endif()
 if(APFS_WINFSP_HAS_NATIVE_HARDLINKS)
     target_compile_definitions(apfs_winfs_worker PRIVATE APFS_WINFSP_NATIVE_HARDLINKS=1)
@@ -245,7 +245,7 @@ file(TO_CMAKE_PATH "${WinFsp_LIBRARY}" APFS_WINFSP_LIBRARY_JSON)
 file(TO_CMAKE_PATH "${WinFsp_RUNTIME_DLL}" APFS_WINFSP_RUNTIME_JSON)
 file(GENERATE
     OUTPUT "${CMAKE_BINARY_DIR}/$<CONFIG>/apfs-build-metadata.json"
-    CONTENT "{\n  \"schema_version\": 1,\n  \"version\": \"${PROJECT_VERSION}\",\n  \"configuration\": \"$<CONFIG>\",\n  \"source_commit\": \"${APFS_SOURCE_COMMIT}\",\n  \"source_dirty\": ${APFS_SOURCE_DIRTY_JSON},\n  \"production_build\": ${APFS_PRODUCTION_BUILD_JSON},\n  \"winfsp_found\": ${APFS_WINFSP_FOUND_JSON},\n  \"winfsp_native_hardlinks\": ${APFS_WINFSP_HARDLINKS_JSON},\n  \"winfsp_fork_repository\": \"${APFS_WINFSP_FORK_REPOSITORY}\",\n  \"winfsp_fork_commit\": \"${APFS_WINFSP_FORK_COMMIT}\",\n  \"winfsp_include_dir\": \"${APFS_WINFSP_INCLUDE_JSON}\",\n  \"winfsp_library\": \"${APFS_WINFSP_LIBRARY_JSON}\",\n  \"winfsp_runtime_dll\": \"${APFS_WINFSP_RUNTIME_JSON}\"\n}\n")
+    CONTENT "{\n  \"schema_version\": 2,\n  \"version\": \"${PROJECT_VERSION}\",\n  \"configuration\": \"$<CONFIG>\",\n  \"source_commit\": \"${APFS_SOURCE_COMMIT}\",\n  \"source_dirty\": ${APFS_SOURCE_DIRTY_JSON},\n  \"production_build\": ${APFS_PRODUCTION_BUILD_JSON},\n  \"winfsp_found\": ${APFS_WINFSP_FOUND_JSON},\n  \"winfsp_native_hardlinks\": ${APFS_WINFSP_HARDLINKS_JSON},\n  \"winfsp_runtime_repository\": \"${APFS_WINFSP_RUNTIME_REPOSITORY}\",\n  \"winfsp_runtime_commit\": \"${APFS_WINFSP_RUNTIME_COMMIT}\",\n  \"winfsp_include_dir\": \"${APFS_WINFSP_INCLUDE_JSON}\",\n  \"winfsp_library\": \"${APFS_WINFSP_LIBRARY_JSON}\",\n  \"winfsp_runtime_dll\": \"${APFS_WINFSP_RUNTIME_JSON}\"\n}\n")
 
 enable_testing()
 add_test(NAME apfs_probe_help COMMAND apfs_probe --help)

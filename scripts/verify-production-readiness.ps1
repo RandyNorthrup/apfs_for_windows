@@ -74,7 +74,7 @@ $hygieneArguments = if ($RequireCleanGit) { @("-RequireCleanWorktree") } else { 
 $hygiene = Invoke-JsonGate -Script (Join-Path $PSScriptRoot "verify-repository-hygiene.ps1") `
     -Arguments $hygieneArguments
 $sourceBoundary = Invoke-JsonGate -Script (Join-Path $PSScriptRoot "verify-sak-source-boundary.ps1")
-$winFspBoundary = Invoke-JsonGate -Script (Join-Path $PSScriptRoot "verify-winfsp-fork-boundary.ps1")
+$winFspBoundary = Invoke-JsonGate -Script (Join-Path $PSScriptRoot "verify-winfsp-runtime-boundary.ps1")
 $licenses = Invoke-JsonGate -Script (Join-Path $PSScriptRoot "verify-license-notices.ps1")
 $package = Invoke-JsonGate -Script (Join-Path $PSScriptRoot "verify-release-package.ps1") `
     -Arguments @("-Version", $version, "-PackageRoot", $resolvedPackageRoot)
@@ -167,7 +167,7 @@ $releaseGovernanceOk = $releaseGovernance -and $releaseGovernance.ok -eq $true -
 $gateStatus = [ordered]@{
     repository_hygiene = [bool]$hygiene.ok
     source_boundary = [bool]$sourceBoundary.ok
-    winfsp_fork_boundary = [bool]$winFspBoundary.ok
+    winfsp_runtime_boundary = [bool]$winFspBoundary.ok
     winfsp_dependency_approved = [bool]$winFspApproved
     license_notices = [bool]$licenses.ok
     ctest = [bool]$testResult.ok
@@ -201,7 +201,7 @@ $result = [ordered]@{
     gates = $gateStatus
     hygiene = $hygiene
     source_boundary = $sourceBoundary
-    winfsp_fork_boundary = $winFspBoundary
+    winfsp_runtime_boundary = $winFspBoundary
     licenses = $licenses
     tests = $testResult
     package = $package

@@ -46,12 +46,12 @@ $resolvedOutput = Resolve-RepoPath $OutputPath
 $winFspDependency = Get-Content `
     -LiteralPath (Join-Path $repoRoot "dependencies\winfsp-apfs.json") -Raw |
     ConvertFrom-Json
-$forkCommit = [string]$winFspDependency.commit
-$forkShortCommit = $forkCommit.Substring(0, 8)
+$runtimeCommit = [string]$winFspDependency.commit
+$runtimeShortCommit = $runtimeCommit.Substring(0, 8)
 if ([string]::IsNullOrWhiteSpace($WinFspArtifactRoot)) {
     $artifactClass = if ($DriverSigningMode -eq "Test") { "test-signed" } else { "production" }
     $WinFspArtifactRoot = Join-Path $repoRoot `
-        "artifacts\winfsp-fork\$artifactClass\$forkShortCommit\x64"
+        "artifacts\winfsp-runtime\$artifactClass\$runtimeShortCommit\x64"
 }
 $resolvedWinFsp = Resolve-RepoPath $WinFspArtifactRoot
 $packageSuffix = if ($DriverSigningMode -eq "Test") { "-test-signed" } else { "" }
@@ -66,7 +66,7 @@ $winFspDll = Join-Path $resolvedWinFsp "winfsp-x64.dll"
 $winFspSys = Join-Path $resolvedWinFsp "winfsp-x64.sys"
 foreach ($required in @($winFspDll, $winFspSys)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
-        throw "Required WinFsp fork artifact is missing: $required"
+        throw "Required dedicated WinFsp runtime artifact is missing: $required"
     }
 }
 $driverSignature = Get-ApfsWinFspSignatureReport -DriverPath $winFspSys
@@ -114,12 +114,12 @@ if (Test-Path -LiteralPath (Join-Path $stageRoot "winfsp-x64.cer") -PathType Lea
     $driverFiles += "winfsp-x64.cer"
 }
 $driverManifest = [ordered]@{
-    schema_version = 1
+    schema_version = 2
     product = "APFS for Windows"
     sxs_id = "apfs-main"
     service_name = "WinFsp+apfs-main"
-    fork_repository = [string]$winFspDependency.repository
-    fork_commit = $forkCommit
+    runtime_repository = [string]$winFspDependency.repository
+    runtime_commit = $runtimeCommit
     upstream_base_commit = [string]$winFspDependency.upstream_base_commit
     driver_signing_mode = $DriverSigningMode.ToLowerInvariant()
     signature = $driverSignature
@@ -226,7 +226,7 @@ $result = [ordered]@{
     package_name = $packageName
     driver_signing_mode = $DriverSigningMode.ToLowerInvariant()
     production_ready = [bool]($DriverSigningMode -eq "Production")
-    winfsp_fork_commit = $forkCommit
+    winfsp_runtime_commit = $runtimeCommit
     winfsp_driver_signature = $driverSignature
     build_dir = $resolvedBuild
     stage_root = $stageRoot

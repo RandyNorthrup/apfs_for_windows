@@ -567,8 +567,9 @@ $registryProof = Install-UninstallRegistryEntry -InstallPath $InstallRoot -Versi
 $uninstallKey = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\APFS for Windows"
 New-ItemProperty -Path $uninstallKey -Name WinFspDriverService `
     -Value $driverRegistration.service_name -PropertyType String -Force | Out-Null
-New-ItemProperty -Path $uninstallKey -Name WinFspForkCommit `
-    -Value $installedWinFspPayload.fork_commit -PropertyType String -Force | Out-Null
+Remove-ItemProperty -Path $uninstallKey -Name WinFspForkCommit -ErrorAction SilentlyContinue
+New-ItemProperty -Path $uninstallKey -Name WinFspRuntimeCommit `
+    -Value $installedWinFspPayload.runtime_commit -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $uninstallKey -Name DriverSigningMode `
     -Value $installedWinFspPayload.driver_signing_mode -PropertyType String -Force | Out-Null
 $managerStartupProof = Install-ManagerStartupEntry -InstallPath $InstallRoot

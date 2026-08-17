@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "date": "2026-08-17",
+  "component": "dedicated_winfsp_runtime",
+  "repository": "https://github.com/RandyNorthrup/winfsp-apfs.git",
+  "branch": "main",
+  "reviewed_commit": "b4650b187f2d0d95a660bb687177f67efc07588f",
+  "upstream_base_commit": "fde790d8ea41283606d1c56b557608a17e455f59",
+  "source_approved": true,
+  "production_driver_signed": false,
+  "review": {
+    "diff_check_ok": true,
+    "changed_files": 13,
+    "buffer_bounds_reviewed": true,
+    "link_flag_validation_reviewed": true,
+    "namespace_locking_reviewed": true,
+    "replacement_access_token_path_reviewed": true,
+    "interface_size_static_assert_preserved": true,
+    "side_by_side_alias_isolation_reviewed": true
+  },
+  "build": {
+    "ok": true,
+    "toolchain": "Visual Studio 2022 and WDK 10.0.26100",
+    "configuration": "Release x64",
+    "winfsp_dll_sha256": "607E2E4A889385DFAD5EBCACC03BB8566F1FF89BFA07BC9D95B5633C3FCB30C2",
+    "winfsp_sys_sha256": "FC84B1024457A02A581A71C1DE82179A21CA1845233FBEB9448F53FC08A0E8A1",
+    "winfsp_lib_sha256": "4157016EF18AF73D121691A0C82109B85300504CA9F8E4E12DAF80CD5673352E"
+  },
+  "runtime_proof": {
+    "isolated_windows_11_vm": true,
+    "stock_driver_coexistence": true,
+    "file_link_information": true,
+    "file_link_information_ex": true,
+    "root_and_cross_directory_links": true,
+    "link_count_lifecycle": [1, 2, 3, 2, 1],
+    "alias_write_visibility": true,
+    "reboot_persistence": true,
+    "clean_uninstall": true,
+    "hardlink_transport_proof_sha256": "99D28C7EB5540263E65B284BA386CF8DA17ECC5B188886D50E1686B4B0744B8E",
+    "package_lifecycle_proof_sha256": "7A5ED9E76B225EAC632BD1A0983DB25239A8F8A8D40AA29943C55B13A3A38901"
+  },
+  "remaining_release_gates": [
+    "Microsoft-compatible production driver signing",
+    "retained clean CI and kernel-test provenance",
+    "production-signed exact-package lifecycle and physical USB proof"
+  ]
+}

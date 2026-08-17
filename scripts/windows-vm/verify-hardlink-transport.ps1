@@ -291,7 +291,7 @@ public static class HardLinkProofNative
     )
     Assert-LinkSet $afterNested 3 "cross-directory"
 
-    $payload = "Windows fork hard-link mutation proof 2026-08-17"
+    $payload = "Windows dedicated-runtime hard-link mutation proof 2026-08-17"
     [IO.File]::WriteAllText(
         $nestedLink, $payload, (New-Object Text.UTF8Encoding($false)))
     $readback = @(

@@ -19,7 +19,7 @@ service IPC client paths, and tools.
 
 WinFsp is required for native Explorer mount support. APFS for Windows links to
 the WinFsp user-mode filesystem API. Release packages bundle a dedicated
-side-by-side build from `https://github.com/RandyNorthrup/winfsp-apfs`, a fork of
+side-by-side build from `https://github.com/RandyNorthrup/winfsp-apfs`, derived from
 the upstream repository above. Development builds may use an installed stock
 WinFsp SDK/runtime. The WinFsp license and notice apply to both forms.
 

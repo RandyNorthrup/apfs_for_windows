@@ -5,7 +5,7 @@ param(
     [string]$ManifestPath = "dependencies\winfsp-apfs.json",
     [string]$CheckoutRoot = "third_party\winfsp",
     [bool]$RequireCheckout = $true,
-    [string]$OutputPath = "artifacts\source-boundary\winfsp-fork-boundary.json"
+    [string]$OutputPath = "artifacts\source-boundary\winfsp-runtime-boundary.json"
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,7 +47,7 @@ if ($checkoutExists) {
             ForEach-Object { [string]$_ })
         if ($LASTEXITCODE -ne 0) { throw "Unable to read checkout status." }
         $checkoutRemote = [string](& git -C $resolvedCheckout remote get-url origin 2>$null)
-        if ($LASTEXITCODE -ne 0) { throw "Unable to read submodule origin remote." }
+        if ($LASTEXITCODE -ne 0) { throw "Unable to read runtime checkout origin remote." }
     } catch {
         $checkoutError = $_.Exception.Message
     }
@@ -60,7 +60,7 @@ $ok = $manifestOk -and ($checkoutOk -or -not $RequireCheckout)
 
 $result = [ordered]@{
     component = "apfs_for_windows"
-    check = "winfsp_fork_boundary"
+    check = "winfsp_runtime_boundary"
     ok = [bool]$ok
     no_admin_required = $true
     require_checkout = [bool]$RequireCheckout

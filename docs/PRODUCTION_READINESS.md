@@ -18,8 +18,9 @@ Current classification: **development-certified, not production-ready**.
 | Repository hygiene | No duplicate code files, forbidden tracked roots, conflict markers, or tracked secrets |
 | Production compiler mode | Pinned coherent WinFsp input, native hard-link ABI, `/W4 /WX`, CTest 13/13 |
 | Current-build physical APFS proof | Matching installed/build worker; non-admin namespace, metadata, EA, ACL, symlink, cleanup, and 9,001/12,017-byte stream EA operations |
-| Native Windows hard-link transport | Exact fork driver/DLL/worker pairing; root and nested create, link-count lifecycle, alias mutation, stock-driver coexistence |
-| Fork driver build | Clean VS2022/WDK 10.0.26100 x64 SYS and DLL build from pinned public commit |
+| Native Windows hard-link transport | Exact dedicated driver/DLL/worker pairing; root and nested create, link-count lifecycle, alias mutation, stock-driver coexistence |
+| Dedicated runtime source | Pinned commit approved after kernel/ABI review, clean build, and isolated VM transport proof |
+| Dedicated driver build | Clean VS2022/WDK 10.0.26100 x64 SYS and DLL build from pinned public commit |
 | Development package lifecycle | 31-file test-signed candidate; clean install, VM reboot persistence, tray Open/Exit, exact hashes, clean uninstall |
 | Package structure | Bundled SxS driver/runtime, build metadata, provenance, payload manifest, and SHA-256 list |
 
@@ -27,6 +28,9 @@ Current hard-link/runtime/package evidence is summarized in
 `docs/evidence/winfsp-hardlink-package-2026-08-17.json`. The test package SHA-256
 is `8A179018DFB17415A176697B8C91FE6BC809A966EF906CF7335DDEAF4573BFB7`.
 It is explicitly test-signed and is not a production artifact.
+Source approval details are in
+`docs/evidence/winfsp-runtime-source-approval-2026-08-17.json`; approval does not
+waive production driver signing or exact-package release gates.
 
 ## Open production blockers
 

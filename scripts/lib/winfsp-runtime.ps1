@@ -2,8 +2,8 @@
 
 $script:ApfsWinFspSxsId = "apfs-main"
 $script:ApfsWinFspServiceName = "WinFsp+apfs-main"
-$script:ApfsWinFspForkRepository = "https://github.com/RandyNorthrup/winfsp-apfs.git"
-$script:ApfsWinFspForkCommit = "b4650b187f2d0d95a660bb687177f67efc07588f"
+$script:ApfsWinFspRuntimeRepository = "https://github.com/RandyNorthrup/winfsp-apfs.git"
+$script:ApfsWinFspRuntimeCommit = "b4650b187f2d0d95a660bb687177f67efc07588f"
 
 function Get-ApfsWinFspSignatureReport {
     param([Parameter(Mandatory = $true)][string]$DriverPath)
@@ -32,11 +32,11 @@ function Test-ApfsWinFspRuntimePayload {
         throw "WinFsp driver manifest is missing: $manifestPath"
     }
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-    if ([int]$manifest.schema_version -ne 1 -or
+    if ([int]$manifest.schema_version -ne 2 -or
         [string]$manifest.sxs_id -cne $script:ApfsWinFspSxsId -or
         [string]$manifest.service_name -cne $script:ApfsWinFspServiceName -or
-        [string]$manifest.fork_repository -cne $script:ApfsWinFspForkRepository -or
-        [string]$manifest.fork_commit -cne $script:ApfsWinFspForkCommit) {
+        [string]$manifest.runtime_repository -cne $script:ApfsWinFspRuntimeRepository -or
+        [string]$manifest.runtime_commit -cne $script:ApfsWinFspRuntimeCommit) {
         throw "WinFsp driver manifest identity is invalid."
     }
 
@@ -91,7 +91,7 @@ function Test-ApfsWinFspRuntimePayload {
         runtime_root = $resolvedRoot
         sxs_id = $script:ApfsWinFspSxsId
         service_name = $script:ApfsWinFspServiceName
-        fork_commit = [string]$manifest.fork_commit
+        runtime_commit = [string]$manifest.runtime_commit
         driver_signing_mode = $signingMode
         signature = $signature
         files = @($fileReports)

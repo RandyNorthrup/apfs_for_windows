@@ -11,6 +11,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$repoRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "lib\project-version.ps1")
 $Version = Get-ApfsProjectVersion -ExplicitVersion $Version -CallerRoot $PSScriptRoot
 
@@ -19,7 +20,6 @@ function Resolve-RepoPath {
     if ([IO.Path]::IsPathRooted($Path)) {
         return $Path
     }
-    $repoRoot = Split-Path -Parent $PSScriptRoot
     return Join-Path $repoRoot $Path
 }
 
@@ -161,6 +161,17 @@ $buildMetadataPath = Join-Path $stageRoot "apfs-build-metadata.json"
 $buildMetadata = if (Test-Path -LiteralPath $buildMetadataPath -PathType Leaf) {
     Get-Content -LiteralPath $buildMetadataPath -Raw | ConvertFrom-Json
 } else { $null }
+$winFspDependency = Get-Content `
+    -LiteralPath (Join-Path $repoRoot "dependencies\winfsp-apfs.json") -Raw |
+    ConvertFrom-Json
+$buildMetadataOk = $buildMetadata -and
+    [int]$buildMetadata.schema_version -eq 2 -and
+    [string]$buildMetadata.version -eq $Version -and
+    $buildMetadata.production_build -eq $true -and
+    $buildMetadata.source_dirty -eq $false -and
+    $buildMetadata.winfsp_native_hardlinks -eq $true -and
+    [string]$buildMetadata.winfsp_runtime_repository -ceq [string]$winFspDependency.repository -and
+    [string]$buildMetadata.winfsp_runtime_commit -ceq [string]$winFspDependency.commit
 $installPayload = Invoke-PayloadValidation `
     -ScriptPath (Join-Path $stageRoot "install-apfs-for-windows.ps1") `
     -Name "install_payload" `
@@ -172,10 +183,9 @@ $repairPayload = Invoke-PayloadValidation `
 $repairLauncher = Invoke-RepairLauncherSelfTest `
     -ScriptPath (Join-Path $stageRoot "start-repair-elevated.ps1")
 $ok = $zipExists -and ($missing.Count -eq 0) -and $releaseManifest -and
-    ($manifestMismatches.Count -eq 0) -and $buildMetadata -and
+    ($manifestMismatches.Count -eq 0) -and $buildMetadataOk -and
     ([string]$releaseManifest.driver_signing_mode -ceq $DriverSigningMode.ToLowerInvariant()) -and
-    ([string]$buildMetadata.version -eq $Version) -and $installPayload.ok -and
-    $repairPayload.ok -and $repairLauncher.ok
+    $installPayload.ok -and $repairPayload.ok -and $repairLauncher.ok
 
 $result = [ordered]@{
     component = "apfs_for_windows"
@@ -192,6 +202,7 @@ $result = [ordered]@{
     missing_required_files = @($missing)
     release_manifest_ok = [bool]($releaseManifest -and $manifestMismatches.Count -eq 0)
     release_manifest_mismatches = @($manifestMismatches)
+    build_metadata_ok = [bool]$buildMetadataOk
     build_metadata = $buildMetadata
     install_payload = $installPayload
     repair_payload = $repairPayload

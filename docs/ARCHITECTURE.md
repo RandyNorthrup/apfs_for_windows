@@ -9,9 +9,9 @@
 | `src/manager` | Project | Accessible tray and mount-management UI |
 | `src/tools` | Project | APFS probe and diagnostics |
 | `src/tests` | Project | Copied-core image/raw self-tests |
-| `third_party/sak_apfs_core` | Local fork | Imported Randy-authored APFS reader/writer |
+| `third_party/sak_apfs_core` | Local copy | Imported Randy-authored APFS reader/writer |
 | `third_party/lzfse` | Third party | Apple LZFSE/LZVN codec implementation |
-| `third_party/winfsp` | Pinned submodule | Native Windows filesystem transport fork |
+| `third_party/winfsp` | Pinned submodule | Dedicated native Windows filesystem transport |
 | `scripts` | Project | Install, package, verification, and certification automation |
 | `docs/evidence` | Sanitized evidence | Durable proof summaries without credentials or raw media |
 
@@ -42,7 +42,7 @@ manager UI runtime. APFS codec notices remain in `THIRD_PARTY_LICENSES.md`.
 
 `third_party/sak_apfs_core/IMPORT_MANIFEST.json` is the canonical APFS import
 inventory. It records source commit, source Git blob, source SHA-256, vendored
-SHA-256, and local-fork status for every imported file. No second APFS core copy
+SHA-256, and local-copy status for every imported file. No second APFS core copy
 is allowed.
 
 ## Release flow

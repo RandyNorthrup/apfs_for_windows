@@ -27,7 +27,7 @@ only edit the local copy in `apfs_for_windows`.
 - Repository layout and ownership are documented in `docs/ARCHITECTURE.md`.
 - Strict release status lives in `docs/PRODUCTION_READINESS.md`; current state is
   development-certified, not production-ready.
-- Copied APFS core is one 20-file local fork with exact provenance in
+- Copied APFS core is one 20-file local import with exact provenance in
   `third_party/sak_apfs_core/IMPORT_MANIFEST.json`.
 - Native hard-link transport is published at
   `https://github.com/RandyNorthrup/winfsp-apfs`, branch `main`, commit
@@ -87,13 +87,13 @@ Use these directly first:
   directory cursors, flush/cleanup semantics, rename by handle, oplock/cache policy,
   security descriptors, timestamps, attributes, and error mapping.
 - Current source checkout has dirty, uncommitted changes in File Management,
-  File Explorer, raw I/O, and related files. Treat those as live user work; fork
+  File Explorer, raw I/O, and related files. Treat those as live user work; copy
   from a deliberate commit after user chooses a baseline.
 - Current source/docs disagree on APFS generated-container ceiling: source/tests
   use 24 TiB in `kMaximumApfsGeneratedContainerBytes`; several docs say 32 TiB.
   Resolve this before any public mount claim.
 
-## Fork Target Choice
+## Runtime Foundation
 
 Use WinFsp first.
 
@@ -109,7 +109,7 @@ Why:
   recoverable; kernel crash risk is lower.
 
 Dokan stays fallback if WinFsp blocks on licensing, installer, or callback model.
-Do not fork WinBtrfs-style kernel driver for v1; keep that as a later performance
+Do not base v1 on a WinBtrfs-style kernel driver; keep that as a later performance
 or deep-shell-integration track after user-mode semantics are certified.
 
 Ownership note: copied APFS source is Randy-authored project code imported into
@@ -163,7 +163,7 @@ raw APFS partition
 
 ### M0 - Repo Bootstrap
 
-- Fork/seed `C:\Users\Randy\Coding\apfs_for_windows`.
+- Create/seed `C:\Users\Randy\Coding\apfs_for_windows`.
 - Add CMake project with `apfs_core`, `apfs_winfs_worker`, `apfs_mount_manager`,
   `apfs_mount_service`, installer scripts, and tests.
 - Vendor/import APFS source as a subtree or submodule from a pinned commit.
@@ -888,7 +888,7 @@ Exit gate: release checklist passes with artifacts under this repo.
   read-only with raw writes disabled. Real physical unplug/replug and raw-media
   power-loss recovery remain unproven.
 - Stock WinFsp 2.1 lacked a create-hard-link transaction. The pinned
-  `winfsp-apfs` fork now adds `FileLinkInformation`/`FileLinkInformationEx`
+  dedicated `winfsp-apfs` runtime now adds `FileLinkInformation`/`FileLinkInformationEx`
   transport, link-count reporting, and `FILE_SUPPORTS_HARD_LINKS`; APFS worker
   callback and copied-core hard-link tests compile and pass. Production still
   requires WDK kernel tests, exact driver/DLL/worker runtime evidence, and
@@ -1193,7 +1193,7 @@ Exit gate: release checklist passes with artifacts under this repo.
 
 ## 2026-08-17 Dedicated Driver and Package Update
 
-- Public WinFsp fork commit
+- Dedicated WinFsp runtime commit
   `b4650b187f2d0d95a660bb687177f67efc07588f` removes unsuffixed device aliases
   from the APFS side-by-side driver. Stock WinFsp and `WinFsp+apfs-b4650b18`
   were simultaneously running during proof without device-name collision.
