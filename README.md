@@ -534,7 +534,7 @@ Verified USB evidence:
   worker after 328 raw blocks changed but before checkpoint completion; remount
   selected the complete old generation and preserved the invariant file. This
   synthetic lane does not replace physical surprise-unplug proof. Sanitized
-  evidence: `docs/evidence/windows-vm-raw-interruption-2026-08-17.json`.
+  evidence: `docs/evidence/windows-vm-raw-interruption-final-2026-08-17.json`.
 - `scripts\verify-apple-vm-interrupted-image.ps1` sends the selected interrupted
   image to macOS for two `fsck_apfs -n` passes and a kernel read-only mount. The
   current image passed exact transfer, invariant, and complete old-generation
