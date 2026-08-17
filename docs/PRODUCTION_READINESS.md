@@ -25,7 +25,7 @@ Current classification: **development-certified, not production-ready**.
 | Dedicated driver build | Clean VS2022/WDK 10.0.26100 x64 SYS and DLL build from pinned public commit |
 | Development package lifecycle | 31-file test-signed candidate; clean install, VM reboot persistence, tray Open/Exit, exact hashes, clean uninstall |
 | Package structure | Bundled SxS driver/runtime, build metadata, provenance, payload manifest, and SHA-256 list |
-| Synthetic raw interruption | Exact test package completed 16 MiB raw-VHD write and remount; worker kill after 518 changed blocks selected complete old generation with invariant preserved |
+| Synthetic raw interruption | Exact test package completed 16 MiB raw-VHD write and remount; worker kill after 328 changed blocks selected complete old generation with invariant preserved |
 
 Current hard-link/runtime/package evidence is summarized in
 `docs/evidence/winfsp-hardlink-package-2026-08-17.json`. The test package SHA-256
@@ -40,14 +40,12 @@ Live upstream verification currently reports owner edits in
 this project. The strict boundary check remains red until that separate checkout
 is clean or its next import is intentionally recorded here.
 
-Source commit `09c4653308ebe91ba1677588165981f9f7379e30` passed the
+Source commit `0c51b376d1890004ea41aff67555fef6a3aebd04` passed the
 two-clean-worktree reproducibility verifier. Both detached paths passed CTest
-13/13 and package verification; all four shipped executables, build metadata,
-and the full 13,173,640-byte test-signed ZIP were byte-identical. The ZIP
-SHA-256 was `D8E7A7792351A391A21C53710E383FC0C566071D527F2870327EB680B38A9ADE`.
-This legacy proof used one packaging runtime twice. It closes binary and
-same-runtime pre-signing package reproducibility only; current tooling also
-requires PowerShell 5.1/7 package parity. See
+13/13; Windows PowerShell 5.1 and PowerShell 7 package verification passed; all
+four shipped executables, build metadata, and the full 31,709,496-byte
+test-signed ZIP were byte-identical. ZIP SHA-256 was
+`FB484D4FD07C235248E92EB51A083309027F4C8EC9217143367B710FF182AC86`. See
 `docs/evidence/reproducible-build-2026-08-17.json`.
 
 Clean source commit `7ddcb7a` produced two retained test candidates. Package
@@ -59,12 +57,12 @@ Open/Exit, exact installed hashes, clean uninstall, and remote cleanup. Both are
 test-signed and not production artifacts. See
 `docs/evidence/clean-candidate-2026-08-17.json`.
 
-Reproducibility proof for source `09c4653308ebe91ba1677588165981f9f7379e30`
+Reproducibility proof for source `0c51b376d1890004ea41aff67555fef6a3aebd04`
 passed two detached source paths, two CTest 13/13 runs, two package verifications,
 matching hashes for every shipped project executable and metadata, and matching
 full test-package SHA-256
-`D8E7A7792351A391A21C53710E383FC0C566071D527F2870327EB680B38A9ADE`.
-This retained proof predates the cross-PowerShell package gate. See
+`FB484D4FD07C235248E92EB51A083309027F4C8EC9217143367B710FF182AC86`
+across Windows PowerShell 5.1 and PowerShell 7. See
 `docs/evidence/reproducible-build-2026-08-17.json`.
 
 ## Open production blockers
@@ -116,7 +114,7 @@ a disposable fixed VHD through `\\.\PhysicalDriveN`. Its completed-write control
 requires an exact 16 MiB payload after probe and read-only remount before any
 worker-termination timing is accepted. Passing this synthetic lane reduces raw
 commit risk but does not close the physical surprise-unplug/power-loss blocker.
-Package source `d0e195b6e79381038f1bea2595bee48e38327469`, worker SHA-256
+Package source `ee161b74e0ab9971c5955a3e256dce7e13414612`, worker SHA-256
 `F04E290A6F1FB39402A948D5831BC3FCAF4BBBA6E8F762C51322C84589E3BD25`,
 and the sanitized result are retained in
 `docs/evidence/windows-vm-raw-interruption-2026-08-17.json`.

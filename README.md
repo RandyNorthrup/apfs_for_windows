@@ -318,12 +318,13 @@ shipped project executable and metadata file, compares the complete ZIP, and
 removes both worktrees. Packaging runs once under Windows PowerShell 5.1 and
 once under PowerShell 7 to detect runtime-dependent archive bytes. It does not
 install, elevate, or reboot.
-Exact source commit `09c4653308ebe91ba1677588165981f9f7379e30` passed the
-earlier same-runtime two-worktree proof with two 13/13 CTest runs and
-byte-identical binaries, metadata, and test-signed package ZIP SHA-256
-`D8E7A7792351A391A21C53710E383FC0C566071D527F2870327EB680B38A9ADE`.
-That evidence predates the PowerShell 5.1/7 parity gate. Sanitized evidence is
-retained in `docs\evidence\reproducible-build-2026-08-17.json`.
+Exact source commit `0c51b376d1890004ea41aff67555fef6a3aebd04` passed the
+cross-runtime two-worktree proof with two 13/13 CTest runs, package verification
+under Windows PowerShell 5.1 and PowerShell 7, and byte-identical binaries,
+metadata, and 31,709,496-byte test-signed ZIP. ZIP SHA-256 was
+`FB484D4FD07C235248E92EB51A083309027F4C8EC9217143367B710FF182AC86`.
+Sanitized evidence is retained in
+`docs\evidence\reproducible-build-2026-08-17.json`.
 
 The explicit test path uses `-DriverSigningMode Test -AllowTestSignedDriver` on
 both scripts and emits `APFS-for-Windows-0.1.0-test-signed.zip`. The current test
@@ -530,7 +531,7 @@ Verified USB evidence:
   the worker during a later raw commit and accepts only the complete old or new
   APFS generation. It uninstalls the package and removes the remote run after a
   pass. Current proof passed an exact 16 MiB completed copy, then terminated the
-  worker after 518 raw blocks changed but before checkpoint completion; remount
+  worker after 328 raw blocks changed but before checkpoint completion; remount
   selected the complete old generation and preserved the invariant file. This
   synthetic lane does not replace physical surprise-unplug proof. Sanitized
   evidence: `docs/evidence/windows-vm-raw-interruption-2026-08-17.json`.

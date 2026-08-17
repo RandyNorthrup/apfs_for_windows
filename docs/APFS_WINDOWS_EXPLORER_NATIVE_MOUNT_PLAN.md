@@ -1295,13 +1295,12 @@ Exit gate: release checklist passes with artifacts under this repo.
   signer identity, and stored ZIP entries. The
   verifier packages once with Windows PowerShell 5.1 and once with PowerShell 7
   and validates every ZIP entry hash, order, and timestamp.
-- Exact commit `09c4653308ebe91ba1677588165981f9f7379e30` passed the earlier
-  same-runtime proof:
-  both paths passed CTest 13/13 and package verification, and the full
-  13,173,640-byte ZIP matched at SHA-256
-  `D8E7A7792351A391A21C53710E383FC0C566071D527F2870327EB680B38A9ADE`.
-  This retained proof predates the cross-PowerShell package gate. Sanitized
-  evidence is retained in
+- Exact commit `0c51b376d1890004ea41aff67555fef6a3aebd04` passed the
+  cross-runtime proof: both paths passed CTest 13/13, PowerShell 5.1 and 7
+  package verification passed, and all four executables, metadata, and the full
+  31,709,496-byte ZIP matched. ZIP SHA-256 was
+  `FB484D4FD07C235248E92EB51A083309027F4C8EC9217143367B710FF182AC86`.
+  Sanitized evidence is retained in
   `docs/evidence/reproducible-build-2026-08-17.json`.
 - A second clean build from the same source commit produced worker SHA-256
   `81F8B65AA60C33C57E98DFDFCE81D8E5D2EC0B6D5FF6B8F9B238BC670D38078F`
@@ -1343,10 +1342,10 @@ Exit gate: release checklist passes with artifacts under this repo.
   state.
 - This lane is synthetic raw-device evidence. Real disposable physical-media
   surprise-unplug and power-loss recovery remain production blockers.
-- Exact test package source `d0e195b6e79381038f1bea2595bee48e38327469`
+- Exact test package source `ee161b74e0ab9971c5955a3e256dce7e13414612`
   passed. The completed control retained the exact 16 MiB payload after raw VHD
   detach, probe, and read-only remount with 4,128 changed blocks. The selected
-  interruption killed the worker after 518 blocks changed and before any
+  interruption killed the worker after 328 blocks changed and before any
   successful flush marker; probe/remount selected the complete old empty-file
   generation and preserved the unrelated invariant file. Install, uninstall,
   remote cleanup, and no-reboot checks passed. Sanitized evidence:
