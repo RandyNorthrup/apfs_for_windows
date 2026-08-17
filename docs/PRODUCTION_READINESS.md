@@ -76,6 +76,11 @@ Program Files replacement needs administrator approval; no ACL, signing, or
 boot-policy bypass was attempted. Exact clean-candidate USB proof therefore
 remains open.
 
+Use `scripts/deploy-current-worker-for-certification.ps1` without arguments for
+non-admin preflight. Run the same command with `-Apply` from Administrator
+PowerShell for the bounded worker-only replacement; it verifies source/install
+hashes, service recovery, and unchanged driver identity before USB proof.
+
 The clean VM-lifecycle package used worker SHA-256
 `81F8B65AA60C33C57E98DFDFCE81D8E5D2EC0B6D5FF6B8F9B238BC670D38078F`.
 Only the Windows VM rebooted; the host did not. This closes the clean development

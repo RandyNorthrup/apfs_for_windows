@@ -190,6 +190,7 @@ Verify installed service and APFS USB mount state:
 .\scripts\verify-start-menu-entries.ps1
 .\scripts\verify-installed-app-registration.ps1
 .\scripts\verify-installed-service-mode-policy.ps1 -PreflightOnly
+.\scripts\deploy-current-worker-for-certification.ps1
 .\scripts\start-repair-elevated.ps1
 .\scripts\run-apfs-for-windows-certification.ps1 -UsbExpectedSerial '<serial>' -RunUsbWriteProof
 .\scripts\verify-usb-mounted-file-actions.ps1 -CleanupStaleProofEntries
@@ -205,6 +206,12 @@ Verify installed service and APFS USB mount state:
 .\scripts\verify-usb-raw-rw.ps1 -ExpectedSerial '<serial>'
 .\scripts\verify-usb-normal-user-rw.ps1 -ExpectedSerial '<serial>' -NoDiagnostics
 ```
+
+`deploy-current-worker-for-certification.ps1` validates exact clean-main build
+metadata without elevation by default. Run it from Administrator PowerShell with
+`-Apply` only for a worker-only physical-USB certification deployment. It hashes
+the source and installed worker, preserves Automatic service mode, verifies the
+driver did not change, and rolls back a failed replacement.
 
 Apple VM round-trip verification accepts connection data only as runtime
 parameters. No password, key, or password-file content is copied into source or

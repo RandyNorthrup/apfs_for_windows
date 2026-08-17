@@ -1297,6 +1297,10 @@ Exit gate: release checklist passes with artifacts under this repo.
   driver, boot policy, and existing writable `V:` mount were left unchanged;
   no access-control bypass was attempted. Clean-candidate proof is tracked at
   `docs/evidence/clean-candidate-2026-08-17.json`.
+- `scripts/deploy-current-worker-for-certification.ps1` centralizes that bounded
+  worker-only action. Default mode is non-admin validation; Administrator
+  PowerShell plus `-Apply` performs exact hash replacement, preserves Automatic
+  service mode, verifies the driver hash is unchanged, and rolls back failures.
 - Remaining production blockers are production driver signing, application
   Authenticode signing, retained clean CI/kernel-test provenance,
   production-signed exact-package lifecycle and physical USB validation,
