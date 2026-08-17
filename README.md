@@ -305,7 +305,8 @@ binaries, bundled side-by-side WinFsp DLL/driver, Qt runtime files,
 install/repair/uninstall scripts, README, license notices, APFS/WinFsp
 provenance, build metadata, payload manifest, and SHA-256 list. Package
 verification also rehashes every manifest and ZIP entry and runs install and
-repair payload-only validation from the staged directory. Package manifests use
+repair payload-only validation from the staged directory. Tracked text is
+normalized to UTF-8 without a BOM and LF during staging. Package manifests use
 compact UTF-8 JSON with fixed LF endings and ordinal paths. ZIP entries use
 stored data, ordinal path ordering, and a fixed timestamp so identical staged
 payloads produce identical archives across supported PowerShell runtimes.

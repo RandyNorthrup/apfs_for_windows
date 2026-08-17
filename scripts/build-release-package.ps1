@@ -39,6 +39,23 @@ function Copy-RequiredFile {
     Copy-Item -LiteralPath $Source -Destination $Destination -Force
 }
 
+function Copy-RequiredTextFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+    if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
+        throw "Required text file not found: $Source"
+    }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Destination) | Out-Null
+    $text = [IO.File]::ReadAllText($Source, [Text.UTF8Encoding]::new($false))
+    $text = $text.Replace("`r`n", "`n").Replace("`r", "`n")
+    [IO.File]::WriteAllText(
+        $Destination,
+        $text,
+        [Text.UTF8Encoding]::new($false))
+}
+
 function Write-StableJson {
     param(
         [Parameter(Mandatory = $true)]$Value,
@@ -359,27 +376,33 @@ $rootScripts = @(
     "uninstall-apfs-for-windows.ps1"
 )
 foreach ($script in $rootScripts) {
-    Copy-RequiredFile -Source (Join-Path $PSScriptRoot $script) -Destination (Join-Path $stageRoot $script)
+    Copy-RequiredTextFile -Source (Join-Path $PSScriptRoot $script) `
+        -Destination (Join-Path $stageRoot $script)
 }
-Copy-RequiredFile `
+Copy-RequiredTextFile `
     -Source (Join-Path $PSScriptRoot "lib\project-version.ps1") `
     -Destination (Join-Path $stageRoot "lib\project-version.ps1")
-Copy-RequiredFile `
+Copy-RequiredTextFile `
     -Source (Join-Path $PSScriptRoot "lib\winfsp-runtime.ps1") `
     -Destination (Join-Path $stageRoot "lib\winfsp-runtime.ps1")
 
-Copy-RequiredFile -Source (Join-Path $repoRoot "README.md") -Destination (Join-Path $stageRoot "README.md")
-Copy-RequiredFile -Source (Join-Path $repoRoot "LICENSE") -Destination (Join-Path $stageRoot "LICENSE")
-Copy-RequiredFile -Source (Join-Path $repoRoot "THIRD_PARTY_LICENSES.md") -Destination (Join-Path $stageRoot "THIRD_PARTY_LICENSES.md")
-Copy-RequiredFile -Source (Join-Path $repoRoot "VERSION") -Destination (Join-Path $stageRoot "VERSION")
-Copy-RequiredFile -Source (Join-Path $repoRoot "SECURITY.md") -Destination (Join-Path $stageRoot "SECURITY.md")
-Copy-RequiredFile `
+Copy-RequiredTextFile -Source (Join-Path $repoRoot "README.md") `
+    -Destination (Join-Path $stageRoot "README.md")
+Copy-RequiredTextFile -Source (Join-Path $repoRoot "LICENSE") `
+    -Destination (Join-Path $stageRoot "LICENSE")
+Copy-RequiredTextFile -Source (Join-Path $repoRoot "THIRD_PARTY_LICENSES.md") `
+    -Destination (Join-Path $stageRoot "THIRD_PARTY_LICENSES.md")
+Copy-RequiredTextFile -Source (Join-Path $repoRoot "VERSION") `
+    -Destination (Join-Path $stageRoot "VERSION")
+Copy-RequiredTextFile -Source (Join-Path $repoRoot "SECURITY.md") `
+    -Destination (Join-Path $stageRoot "SECURITY.md")
+Copy-RequiredTextFile `
     -Source (Join-Path $repoRoot "third_party\sak_apfs_core\README.md") `
     -Destination (Join-Path $stageRoot "APFS_CORE_PROVENANCE.md")
-Copy-RequiredFile `
+Copy-RequiredTextFile `
     -Source (Join-Path $repoRoot "third_party\sak_apfs_core\IMPORT_MANIFEST.json") `
     -Destination (Join-Path $stageRoot "APFS_CORE_IMPORT_MANIFEST.json")
-Copy-RequiredFile `
+Copy-RequiredTextFile `
     -Source (Join-Path $repoRoot "dependencies\winfsp-apfs.json") `
     -Destination (Join-Path $stageRoot "WINFSP_PROVENANCE.json")
 

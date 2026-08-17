@@ -1290,8 +1290,9 @@ Exit gate: release checklist passes with artifacts under this repo.
   a stable source path map. `scripts/verify-reproducible-build.ps1` builds two
   detached source paths, runs both test suites, verifies both packages, and
   compares all shipped project executables, metadata, and complete ZIP hashes.
-  Current packaging writes compact UTF-8 manifests with fixed LF endings,
-  ordinal payload paths, stable signer identity, and stored ZIP entries. The
+  Current packaging normalizes tracked text to UTF-8/no-BOM/LF and writes
+  compact UTF-8 manifests with fixed LF endings, ordinal payload paths, stable
+  signer identity, and stored ZIP entries. The
   verifier packages once with Windows PowerShell 5.1 and once with PowerShell 7
   and validates every ZIP entry hash, order, and timestamp.
 - Exact commit `09c4653308ebe91ba1677588165981f9f7379e30` passed the earlier
