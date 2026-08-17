@@ -1268,6 +1268,7 @@ Exit gate: release checklist passes with artifacts under this repo.
 - Sanitized proof: `docs/evidence/stream-xattr-usb-2026-08-17.json`.
 - Remaining production blockers are production driver signing, application
   Authenticode signing, retained clean CI/kernel-test provenance,
-  production-signed exact-package lifecycle and physical USB proof, physical
-  surprise-unplug and interrupted-write recovery, directory/root stream-xattr policy,
-  case-colliding EA policy, sealed/FileVault policy, and release governance.
+  production-signed exact-package lifecycle and physical USB validation,
+  surprise-unplug and interrupted-write recovery, directory/root stream-xattr
+  policy, case-colliding EA policy, sealed/FileVault policy, and release
+  governance.
