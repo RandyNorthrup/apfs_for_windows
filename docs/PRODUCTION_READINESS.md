@@ -25,6 +25,7 @@ Current classification: **development-certified, not production-ready**.
 | Dedicated driver build | Clean VS2022/WDK 10.0.26100 x64 SYS and DLL build from pinned public commit |
 | Development package lifecycle | 31-file test-signed candidate; clean install, VM reboot persistence, tray Open/Exit, exact hashes, clean uninstall |
 | Package structure | Bundled SxS driver/runtime, build metadata, provenance, payload manifest, and SHA-256 list |
+| Synthetic raw interruption | Exact test package completed 16 MiB raw-VHD write and remount; worker kill after 518 changed blocks selected complete old generation with invariant preserved |
 
 Current hard-link/runtime/package evidence is summarized in
 `docs/evidence/winfsp-hardlink-package-2026-08-17.json`. The test package SHA-256
@@ -115,6 +116,10 @@ a disposable fixed VHD through `\\.\PhysicalDriveN`. Its completed-write control
 requires an exact 16 MiB payload after probe and read-only remount before any
 worker-termination timing is accepted. Passing this synthetic lane reduces raw
 commit risk but does not close the physical surprise-unplug/power-loss blocker.
+Package source `d0e195b6e79381038f1bea2595bee48e38327469`, worker SHA-256
+`F04E290A6F1FB39402A948D5831BC3FCAF4BBBA6E8F762C51322C84589E3BD25`,
+and the sanitized result are retained in
+`docs/evidence/windows-vm-raw-interruption-2026-08-17.json`.
 
 ## Strict check
 

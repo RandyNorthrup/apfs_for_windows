@@ -1343,3 +1343,11 @@ Exit gate: release checklist passes with artifacts under this repo.
   state.
 - This lane is synthetic raw-device evidence. Real disposable physical-media
   surprise-unplug and power-loss recovery remain production blockers.
+- Exact test package source `d0e195b6e79381038f1bea2595bee48e38327469`
+  passed. The completed control retained the exact 16 MiB payload after raw VHD
+  detach, probe, and read-only remount with 4,128 changed blocks. The selected
+  interruption killed the worker after 518 blocks changed and before any
+  successful flush marker; probe/remount selected the complete old empty-file
+  generation and preserved the unrelated invariant file. Install, uninstall,
+  remote cleanup, and no-reboot checks passed. Sanitized evidence:
+  `docs/evidence/windows-vm-raw-interruption-2026-08-17.json`.

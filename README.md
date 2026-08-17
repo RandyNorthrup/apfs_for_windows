@@ -529,7 +529,11 @@ Verified USB evidence:
   16 MiB copy to retain the exact payload after probe/remount, then terminates
   the worker during a later raw commit and accepts only the complete old or new
   APFS generation. It uninstalls the package and removes the remote run after a
-  pass. This synthetic lane does not replace physical surprise-unplug proof.
+  pass. Current proof passed an exact 16 MiB completed copy, then terminated the
+  worker after 518 raw blocks changed but before checkpoint completion; remount
+  selected the complete old generation and preserved the invariant file. This
+  synthetic lane does not replace physical surprise-unplug proof. Sanitized
+  evidence: `docs/evidence/windows-vm-raw-interruption-2026-08-17.json`.
 - `scripts\verify-installed-service-mode-policy.ps1` is ready for the post-repair
   installed-service proof. It runs without admin or USB mutation, mounts a
   generated APFS image through the installed service, proves read-only write
