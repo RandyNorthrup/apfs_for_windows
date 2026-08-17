@@ -523,6 +523,13 @@ Verified USB evidence:
   select only expected old bytes before replacement and expected new bytes after
   replacement. A pre-replace scratch image is detected, then removed by remount
   recovery. Test fault options reject raw targets and read-only mounts.
+- `scripts\verify-windows-vm-disposable-raw-interruption.ps1` uses the named
+  Windows VM for an elevated, no-host-reboot raw-device test. It installs the
+  exact package, attaches a disposable fixed VHD, first requires a completed
+  16 MiB copy to retain the exact payload after probe/remount, then terminates
+  the worker during a later raw commit and accepts only the complete old or new
+  APFS generation. It uninstalls the package and removes the remote run after a
+  pass. This synthetic lane does not replace physical surprise-unplug proof.
 - `scripts\verify-installed-service-mode-policy.ps1` is ready for the post-repair
   installed-service proof. It runs without admin or USB mutation, mounts a
   generated APFS image through the installed service, proves read-only write

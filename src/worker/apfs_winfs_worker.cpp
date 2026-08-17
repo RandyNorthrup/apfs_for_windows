@@ -2378,6 +2378,12 @@ private:
     if (!context) {
       return STATUS_INVALID_PARAMETER;
     }
+    if (context->stagedWriteDirty) {
+      const NTSTATUS flushStatus = flushFile(context, nullptr);
+      if (!NT_SUCCESS(flushStatus)) {
+        return flushStatus;
+      }
+    }
     sak::PartitionApfsInodeMetadataUpdate update;
     if (fileAttributes != INVALID_FILE_ATTRIBUTES) {
       uint32_t bsdFlags = context->entry.bsdFlags;
@@ -2462,6 +2468,12 @@ private:
     update.group_id = groupId;
     update.update_changed_time = true;
     update.changed_time_ns = unixNsFromFileTime(currentFileTime());
+    if (context->stagedWriteDirty) {
+      const NTSTATUS flushStatus = flushFile(context, nullptr);
+      if (!NT_SUCCESS(flushStatus)) {
+        return flushStatus;
+      }
+    }
     return commitInodeMetadata(context->entry.path, context->entry.directory,
                                update, &context->entry);
   }
@@ -2559,6 +2571,12 @@ private:
       return parseStatus;
     }
     if (!collected.mutations.isEmpty()) {
+      if (context->stagedWriteDirty) {
+        const NTSTATUS flushStatus = flushFile(context, nullptr);
+        if (!NT_SUCCESS(flushStatus)) {
+          return flushStatus;
+        }
+      }
       QMutexLocker eaMutationLocker(&eaMutationMutex_);
       QVector<QString> existingNames;
       {

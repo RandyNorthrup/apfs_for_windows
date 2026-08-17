@@ -1324,3 +1324,22 @@ Exit gate: release checklist passes with artifacts under this repo.
   surprise-unplug and interrupted-write recovery, sealed/FileVault/per-file-key
   and filesystem-owned mutation policy beyond fail-closed behavior, and release
   governance.
+
+## 2026-08-17 Disposable Raw-Interruption VM Lane
+
+- `scripts\verify-windows-vm-disposable-raw-interruption.ps1` drives the named
+  Windows VM over SSH without rebooting the host or VM. It installs the exact
+  package, creates and attaches a fixed disposable VHD, exposes it as a raw
+  `\\.\PhysicalDriveN` target, and cleanly uninstalls afterward.
+- The remote lane first requires a completed 16 MiB patterned copy to match by
+  length and SHA-256 while mounted and after probe/read-only remount. Fault
+  attempts then terminate the worker after `StagedFlush` and accept only the
+  complete old or complete new file generation while an unrelated invariant
+  file remains exact.
+- VM trace review exposed an Explorer-copy ordering bug: all data writes were
+  staged, then `SetBasicInfo` committed metadata and reloaded the old zero-byte
+  inode into the open handle. Basic-info, security, and EA mutations now flush
+  dirty staged data before their independent metadata commit can reload inode
+  state.
+- This lane is synthetic raw-device evidence. Real disposable physical-media
+  surprise-unplug and power-loss recovery remain production blockers.

@@ -14,7 +14,7 @@ Current classification: **development-certified, not production-ready**.
 | Physical APFS USB operations | Read/write/delete, Unicode, long path, Robocopy, concurrent reads, regular-file/directory/root stream xattrs, cleanup |
 | Default mount policy | Newly discovered media is read-only; the owner-pinned `V:` test mapping is explicitly writable |
 | Persistence model | Automatic service plus per-user tray startup and explicit tray Exit |
-| Repository source boundary | Upstream S.A.K. APFS paths verified read-only and unchanged since import |
+| Repository source boundary | Imported manifest and vendored hashes intact; this repository never writes the upstream S.A.K. checkout |
 | Repository hygiene | No duplicate code files, forbidden tracked roots, conflict markers, or tracked secrets |
 | Production compiler mode | Pinned coherent WinFsp input, native hard-link ABI, `/W4 /WX`, CTest 13/13 |
 | Reproducible release build | Production mode enables `/Brepro`, deterministic compilation, and source path mapping; current verifier compares tested binaries, metadata, and complete stored-entry packages across detached source paths and PowerShell 5.1/7 |
@@ -33,6 +33,11 @@ It is explicitly test-signed and is not a production artifact.
 Source approval details are in
 `docs/evidence/winfsp-runtime-source-approval-2026-08-17.json`; approval does not
 waive production driver signing or exact-package release gates.
+
+Live upstream verification currently reports owner edits in
+`src/core/partition_apfs_file_system_reader.cpp`. No upstream file was changed by
+this project. The strict boundary check remains red until that separate checkout
+is clean or its next import is intentionally recorded here.
 
 Source commit `09c4653308ebe91ba1677588165981f9f7379e30` passed the
 two-clean-worktree reproducibility verifier. Both detached paths passed CTest
@@ -104,6 +109,12 @@ The clean VM-lifecycle package used worker SHA-256
 `81F8B65AA60C33C57E98DFDFCE81D8E5D2EC0B6D5FF6B8F9B238BC670D38078F`.
 Only the Windows VM rebooted; the host did not. This closes the clean development
 package lifecycle lane, not production signing or exact physical USB proof.
+
+The Windows VM raw-interruption harness now installs an exact package and uses
+a disposable fixed VHD through `\\.\PhysicalDriveN`. Its completed-write control
+requires an exact 16 MiB payload after probe and read-only remount before any
+worker-termination timing is accepted. Passing this synthetic lane reduces raw
+commit risk but does not close the physical surprise-unplug/power-loss blocker.
 
 ## Strict check
 

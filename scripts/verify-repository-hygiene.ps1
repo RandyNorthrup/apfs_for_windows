@@ -51,6 +51,8 @@ $requiredFiles = @(
     "docs\ARCHITECTURE.md",
     "docs\PRODUCTION_READINESS.md",
     "scripts\verify-reproducible-build.ps1",
+    "scripts\verify-windows-vm-disposable-raw-interruption.ps1",
+    "scripts\windows-vm\run-disposable-raw-interruption.ps1",
     "third_party\sak_apfs_core\IMPORT_MANIFEST.json"
 )
 $missingRequired = @($requiredFiles | Where-Object {
