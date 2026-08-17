@@ -143,12 +143,34 @@ function Detach-Vhd {
     param([string]$Path)
     if ($Path -and (Test-Path -LiteralPath $Path -PathType Leaf)) {
         try {
+            Dismount-DiskImage -ImagePath $Path -ErrorAction Stop | Out-Null
+            return
+        } catch {
+        }
+        try {
             Invoke-DiskPart -Commands @(
                 "select vdisk file=`"$Path`"",
                 "detach vdisk") | Out-Null
         } catch {
         }
     }
+}
+
+function Attach-VhdDisk {
+    param([string]$Path, [int]$Timeout)
+    Mount-DiskImage -ImagePath $Path -NoDriveLetter -ErrorAction Stop | Out-Null
+    $script:attachedVhdDisk = $null
+    $ready = Wait-Condition -Timeout $Timeout -Condition {
+        $script:attachedVhdDisk = Get-DiskImage -ImagePath $Path -ErrorAction Stop |
+            Get-Disk -ErrorAction Stop
+        $null -ne $script:attachedVhdDisk
+    }
+    $disk = $script:attachedVhdDisk
+    $script:attachedVhdDisk = $null
+    if (-not $ready -or -not $disk) {
+        throw "Attached VHD disk was not discovered by image identity."
+    }
+    return $disk
 }
 
 function Get-DisposableDiskIdentity {
@@ -307,21 +329,7 @@ try {
     Copy-Prefix -Source $mutationBase -Destination $controlVhd -Length $baseLength `
         -PreserveDestinationLength
 
-    $beforeControlDisks = @(Get-Disk | ForEach-Object Number)
-    Invoke-DiskPart -Commands @(
-        "select vdisk file=`"$controlVhd`"", "attach vdisk") | Out-Null
-    $script:controlDisk = $null
-    $controlDiskReady = Wait-Condition -Timeout $TimeoutSeconds -Condition {
-        $script:controlDisk = Get-Disk |
-            Where-Object { $beforeControlDisks -notcontains $_.Number } |
-            Sort-Object Number | Select-Object -First 1
-        $null -ne $script:controlDisk
-    }
-    $controlDisk = $script:controlDisk
-    $script:controlDisk = $null
-    if (-not $controlDiskReady -or -not $controlDisk) {
-        throw "Attached control VHD disk was not discovered."
-    }
+    $controlDisk = Attach-VhdDisk -Path $controlVhd -Timeout $TimeoutSeconds
     Set-Disk -Number $controlDisk.Number -IsReadOnly $false -ErrorAction Stop
     Set-Disk -Number $controlDisk.Number -IsOffline $true -ErrorAction Stop
     $controlDiskIdentity = Get-DisposableDiskIdentity -Disk $controlDisk `
@@ -431,18 +439,7 @@ try {
         Copy-Prefix -Source $mutationBase -Destination $vhdPath -Length $baseLength `
             -PreserveDestinationLength
 
-        $beforeDisks = @(Get-Disk | ForEach-Object Number)
-        Invoke-DiskPart -Commands @("select vdisk file=`"$vhdPath`"", "attach vdisk") | Out-Null
-        $script:attachedDisk = $null
-        $diskReady = Wait-Condition -Timeout $TimeoutSeconds -Condition {
-            $script:attachedDisk = Get-Disk |
-                Where-Object { $beforeDisks -notcontains $_.Number } |
-                Sort-Object Number | Select-Object -First 1
-            $null -ne $script:attachedDisk
-        }
-        $newDisk = $script:attachedDisk
-        $script:attachedDisk = $null
-        if (-not $diskReady -or -not $newDisk) { throw "Attached VHD disk was not discovered." }
+        $newDisk = Attach-VhdDisk -Path $vhdPath -Timeout $TimeoutSeconds
         Set-Disk -Number $newDisk.Number -IsReadOnly $false -ErrorAction Stop
         Set-Disk -Number $newDisk.Number -IsOffline $true -ErrorAction Stop
         $diskIdentity = Get-DisposableDiskIdentity -Disk $newDisk `
