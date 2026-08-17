@@ -230,13 +230,16 @@ driver did not change, and rolls back a failed replacement.
 
 Package-worker mode replaces clean-main identity with explicit ZIP and worker
 SHA-256 pins. It verifies worker and build metadata directly inside the ZIP,
-requires staged copies to match, and preserves current driver identity:
+requires staged copies to match, preserves current driver identity, and requires
+pinned mount to return read-only after replacement:
 
 ```powershell
 .\scripts\deploy-current-worker-for-certification.ps1 `
   -BuildDir $stage -PackageZip "$stage.zip" `
   -ExpectedPackageSha256 '<package-sha256>' `
-  -ExpectedWorkerSha256 '<worker-sha256>'
+  -ExpectedWorkerSha256 '<worker-sha256>' `
+  -ExpectedTarget '\\?\GLOBALROOT\Device\Harddisk1\Partition1' `
+  -ExpectedMount 'V:'
 # Repeat from Administrator PowerShell with -Apply after preflight passes.
 ```
 

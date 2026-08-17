@@ -114,8 +114,10 @@ Exact-package worker mode additionally requires package ZIP and worker SHA-256
 pins. Current non-admin preflight passed: ZIP `C2B9...6F6`, ZIP worker,
 staged worker, and expected worker `F04E290...BD25` all match; production build,
 clean source metadata, native hard-link transport, Automatic service, and
-existing driver inventory also pass. Wrong ZIP hash and non-admin `-Apply`
-negative tests fail closed without changing service PID or installed worker.
+existing driver inventory also pass. Pinned `V:` read-only baseline passes and
+is required again after replacement or rollback. Wrong ZIP hash and non-admin
+`-Apply` negative tests fail closed without changing service PID or installed
+worker.
 
 For full exact-package replacement, guarded repair now forwards `-RepairScript`,
 `-BuildDir`, and `-AllowTestSignedDriver` through its encoded elevated command.

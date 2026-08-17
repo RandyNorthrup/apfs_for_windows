@@ -884,10 +884,12 @@ Exit gate: release checklist passes with artifacts under this repo.
 - Rollback-capable worker deployment now accepts explicit package ZIP and worker
   SHA-256 pins. It verifies worker/build metadata inside the ZIP, staged copies,
   production metadata, native hard-link transport, Automatic service, and
-  unchanged driver inventory. Current exact-package preflight passes; wrong-hash
-  and non-admin apply tests fail closed without mutation. Use this no-driver-swap
-  path for host physical certification because full test-package repair would
-  also replace WinFsp driver.
+  unchanged driver inventory. Pinned mount must begin and return read-only; a
+  failed remount triggers worker rollback and old-worker mount verification.
+  Current exact-package preflight passes; wrong-hash and non-admin apply tests
+  fail closed without mutation. Use this no-driver-swap path for host physical
+  certification because full test-package repair would also replace WinFsp
+  driver.
 - Current local state is safe to pause: no USB verifier remains, service is
   Automatic/running, `V:` is read-only with raw writes disabled, mount root is
   empty, and no reboot occurred. Installed worker `E94F3E1...BFCA8` does not

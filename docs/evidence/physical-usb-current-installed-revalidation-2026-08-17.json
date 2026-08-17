@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "recorded_utc": "2026-08-17T08:13:35.5184068Z",
+  "recorded_utc": "2026-08-17T08:23:56.1131017Z",
   "classification": "current_installed_mount_revalidated_not_exact_package",
   "ok": true,
   "host_rebooted": false,
@@ -82,6 +82,8 @@
     "launcher_test_signing_flag_roundtrip_ok": true,
     "worker_only_package_preflight_ok": true,
     "package_zip_worker_stage_hashes_match": true,
+    "pinned_read_only_mount_preflight_ok": true,
+    "post_replace_mount_check_and_rollback_enabled": true,
     "wrong_package_hash_fails_closed": true,
     "nonadmin_apply_fails_closed": true,
     "negative_tests_preserved_service_and_worker": true,
