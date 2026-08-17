@@ -23,7 +23,7 @@ Current classification: **development-certified, not production-ready**.
 | Native Windows hard-link transport | Exact dedicated driver/DLL/worker pairing; root and nested create, link-count lifecycle, alias mutation, stock-driver coexistence |
 | Dedicated runtime source | Pinned commit approved after kernel/ABI review, clean build, and isolated VM transport proof |
 | Dedicated driver build | Clean VS2022/WDK 10.0.26100 x64 SYS and DLL build from pinned public commit |
-| Development package lifecycle | Current 31-file test-signed candidate `B2944...CBD`; clean install, VM reboot persistence, tray Open/Exit, exact hashes, clean uninstall |
+| Development package lifecycle | Current 31-file test-signed candidate `C2B9...6F6`; clean install, VM reboot persistence, tray Open/Exit, exact hashes, clean uninstall |
 | Package structure | Bundled SxS driver/runtime, build metadata, provenance, payload manifest, and SHA-256 list |
 | Synthetic raw interruption | Exact test package completed 16 MiB raw-VHD write and remount; worker kill after 328 changed blocks selected complete old generation with invariant preserved |
 | Repository protection baseline | Public `main`; admin enforcement; strict `repository-gates`; linear history; force-push and deletion disabled |
@@ -80,16 +80,20 @@ across Windows PowerShell 5.1 and PowerShell 7. See
 | Remaining APFS policy | Sealed/FileVault/per-file-key and filesystem-owned mutation policy beyond current fail-closed behavior |
 | Release governance | Admin-enforced branch protection now exists; add required reviews, reviewed signed release tag, production provenance, and retained release evidence |
 
-Physical USB create/read/rename/overwrite/delete, metadata, EA, symlink, ACL,
-and cleanup passed on worker SHA-256
-`E94F3E1E642F0C6908F2D730CD6BEA05C1BB476D1591D9D3CF0C07062D6BFCA8`,
-which exactly matched the current build. Regular-file, directory, and volume-root
-stream EA create/read at 9,001 bytes, replacement at 12,017 bytes, and delete
-passed. Local case-collision aliases remained distinct, ambiguous direct writes
-failed closed, and remount persistence passed. macOS replaced both root and
-directory streams and passed three `fsck_apfs -n` runs. The host was not
-rebooted. The pinned test mapping remains explicitly writable by owner direction;
-newly discovered media still defaults read-only. See
+Physical USB create/read/rename/overwrite/delete, Unicode/394-character paths,
+Robocopy, concurrent reads, metadata, EA, symlink, ACL, and durable cleanup were
+revalidated on installed worker SHA-256
+`E94F3E1E642F0C6908F2D730CD6BEA05C1BB476D1591D9D3CF0C07062D6BFCA8`.
+Regular-file, directory, and volume-root stream EA create/read at 9,001 bytes,
+replacement at 12,017 bytes, and delete passed. Host was not rebooted. Final
+independent audit found service Automatic/running, `V:` read-only, raw writes
+disabled, and mount root empty. Installed worker does not match exact test
+package worker `F04E290A...BD25`; proof is current-installed-runtime only, not
+exact-package physical certification. See
+`docs/evidence/physical-usb-current-installed-revalidation-2026-08-17.json`.
+
+Earlier matching-build stream, case-collision, remount, macOS replacement, and
+three-pass `fsck_apfs -n` evidence remains in
 `docs/evidence/directory-root-stream-xattrs-2026-08-17.json`.
 
 Clean source commit `7ddcb7a1d0151a7d2221d68f5564c3288f9c97f7` produced worker
@@ -106,12 +110,28 @@ non-admin preflight. Run the same command with `-Apply` from Administrator
 PowerShell for the bounded worker-only replacement; it verifies source/install
 hashes, service recovery, and unchanged driver identity before USB proof.
 
+Exact-package worker mode additionally requires package ZIP and worker SHA-256
+pins. Current non-admin preflight passed: ZIP `C2B9...6F6`, ZIP worker,
+staged worker, and expected worker `F04E290...BD25` all match; production build,
+clean source metadata, native hard-link transport, Automatic service, and
+existing driver inventory also pass. Wrong ZIP hash and non-admin `-Apply`
+negative tests fail closed without changing service PID or installed worker.
+
+For full exact-package replacement, guarded repair now forwards `-RepairScript`,
+`-BuildDir`, and `-AllowTestSignedDriver` through its encoded elevated command.
+Exact package payload validation and argument round-trip pass. Host deployment
+was correctly not started while unrelated UAC prompts were already pending.
+Because that path also replaces WinFsp driver, current host physical proof will
+use rollback-capable worker-only package mode; full package requires a
+production-signed driver or an isolated test-driver-enabled VM. One interactive
+administrator approval remains required for worker replacement.
+
 The clean VM-lifecycle package used worker SHA-256
 `81F8B65AA60C33C57E98DFDFCE81D8E5D2EC0B6D5FF6B8F9B238BC670D38078F`.
 Only the Windows VM rebooted; the host did not. This closes the clean development
 package lifecycle lane, not production signing or exact physical USB proof.
 
-Current source `d5e68ccef376ba115d4fbcf98391c56d8f1b2977` produced worker
+Historical source `d5e68ccef376ba115d4fbcf98391c56d8f1b2977` produced worker
 SHA-256 `F04E290A6F1FB39402A948D5831BC3FCAF4BBBA6E8F762C51322C84589E3BD25`
 and deterministic test-package SHA-256
 `B2944BB636EED3003DC827A169550E3DB813A0C2BF39ACCC5DECA7CF873EDCBD`.
@@ -121,6 +141,17 @@ after VM reboot, restored `R:`, one interactive tray with `Open`/`Exit`, exact
 installed hashes, uninstall, and independent residue cleanup passed. The host
 did not reboot. See
 `docs/evidence/windows-vm-install-lifecycle-d5e68cc-2026-08-17.json`.
+
+Current candidate source `7d23245ee487ab0db833c114d521558442d8208a`
+produced the same worker SHA-256 and deterministic 31-file test ZIP SHA-256
+`C2B9A2950AE62EA114BBB3E2F880048D777B87682B673F6CFF7C60B9ABF536F6`.
+Production build and CTest 13/13 passed. Two detached source paths produced
+byte-identical project binaries, metadata, and complete ZIP; both CTest and
+package-verification runs passed with zero cleanup errors. Exact ZIP install,
+Automatic service, dedicated driver/runtime, VM reboot and restored `R:`, one
+interactive stacked tray with `Open`/`Exit`, exact installed hashes, uninstall,
+and independent residue cleanup passed. Host did not reboot. See
+`docs/evidence/current-candidate-7d23245-2026-08-17.json`.
 
 Repository protection evidence is retained in
 `docs/evidence/repository-governance-2026-08-17.json`. This closes baseline

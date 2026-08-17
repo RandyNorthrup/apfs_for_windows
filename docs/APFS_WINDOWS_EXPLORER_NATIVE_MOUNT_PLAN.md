@@ -420,8 +420,11 @@ Exit gate: release checklist passes with artifacts under this repo.
   It writes `artifacts\repair\start-repair-elevated-proof.json`, refuses to spawn
   another UAC prompt while `consent.exe` is already pending, and waits for the
   elevated repair proof artifact when launched. Its encoded command preserves
-  leading `\\?\` raw-target paths through `Start-Process`; deterministic
-  `-SelfTest` coverage is part of release-package verification.
+  leading `\\?\` raw-target paths through `Start-Process`. It also forwards an
+  exact `-RepairScript`, `-BuildDir`, and explicit `-AllowTestSignedDriver`, so a
+  validated extracted package survives elevation without falling back to a
+  developer build. Deterministic `-SelfTest` coverage is part of release-package
+  verification.
 - `scripts\verify-service-recovery-policy.ps1` is the non-admin installed-service
   persistence verifier. It checks Automatic start, at least three SCM restart
   actions, reset period `86400`, and non-crash failure recovery.
@@ -624,14 +627,16 @@ Exit gate: release checklist passes with artifacts under this repo.
   `scripts\verify-service-control-ipc.ps1`; it proves the control handler,
   socket transport, raw-write denial, and manager UI command surface in one
   non-admin/no-USB-mutation artifact.
-- `scripts\verify-installed-service-mode-policy.ps1 -PreflightOnly` currently
-  passes after repair: installed binaries match the build, service is running,
-  and generated-image service policy proof can run from a non-admin shell.
+- `scripts\verify-installed-service-mode-policy.ps1 -PreflightOnly` passed after
+  its recorded repair: installed binaries matched that build, service was
+  running, and generated-image service policy proof ran from a non-admin shell.
+  Current installed/exact-package hashes differ pending administrator deployment.
 - `scripts\start-repair-elevated.ps1` remains the preferred no-reboot repair
   entrypoint from a normal shell. A recorded repair updated the installed binaries
   and restarted the service, but the normal-shell wrapper timed out waiting for its
-  proof-file handoff. Current worker-only deployment completed its proof handoff;
-  no UAC prompt is pending and service is Automatic/running.
+  proof-file handoff. Later worker-only deployment completed its proof handoff.
+  Current exact-package run is safely blocked before elevation by existing UAC
+  prompts; service remains Automatic/running.
 - `scripts\verify-usb-mounted-file-actions.ps1 -CleanupStaleProofEntries` is the
   no-admin file action path for the selected mounted USB volume (`V:` in the
   current media layout). It is
@@ -838,8 +843,8 @@ Exit gate: release checklist passes with artifacts under this repo.
   `artifacts\state\current-apfs-state.json`. It reports
   `ready_for_usb_normal_user_rw_test=true` for its recorded run: no UAC prompt
   was pending, installed binaries matched that build, stale proof entries were
-  gone, and service was Automatic/running. Current owner-pinned `V:` policy is
-  intentionally read/write with raw writes enabled for authorized testing.
+  gone, and service was Automatic/running. That checkpoint's owner-pinned `V:`
+  policy was writable. Current policy is read-only with raw writes disabled.
 - Non-mutating USB file-action preflight is saved at
   `artifacts\usb-rw\usb-normal-user-rw-preflight.json`. It exits quickly with
   no elevation and no USB writes, reports readiness blockers, and leaves `V:`
@@ -871,19 +876,25 @@ Exit gate: release checklist passes with artifacts under this repo.
   zero-byte values on files, named directories, and volume root; raw probes
   confirm transport aliases are never stored in APFS. Microsoft protocol:
   `https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/0eb94f48-6aac-41df-a878-79f4dcfd8989`.
-- The encoded repair command has deterministic staged-package coverage, but one
-  live normal-shell run updated the service and then timed out waiting for
-  `install-repair-proof.json`. Live wrapper proof-file completion remains open.
-- Current local state is safe to pause: no UAC prompt is pending, no USB verifier
-  process remains, service is Automatic/running, installed worker matches the
-  current tested build, and owner-pinned `V:` remains intentionally read/write
-  with raw writes enabled. Newly discovered media remains read-only by default.
-- Normal Explorer-style file actions remain a non-admin requirement, but service
-  policy restore/install is admin-gated on this machine: a non-admin
-  `--add-mount ... --read-only` restore attempt failed with
-  `Unable to write C:/ProgramData/APFS for Windows/mounts.json`.
-- Current build adds service-owned config IPC for safe post-install policy
-  changes, and the installed service/worker/probe now match the current build.
+- Encoded repair command now has deterministic staged-package coverage for raw
+  target, mount, exact repair script, exact build directory, and explicit
+  test-signing opt-in. Exact-package host deployment did not start because two
+  unrelated UAC prompts were already pending. Full repair remains reserved for
+  isolated test-driver-enabled VMs or a production-signed host package.
+- Rollback-capable worker deployment now accepts explicit package ZIP and worker
+  SHA-256 pins. It verifies worker/build metadata inside the ZIP, staged copies,
+  production metadata, native hard-link transport, Automatic service, and
+  unchanged driver inventory. Current exact-package preflight passes; wrong-hash
+  and non-admin apply tests fail closed without mutation. Use this no-driver-swap
+  path for host physical certification because full test-package repair would
+  also replace WinFsp driver.
+- Current local state is safe to pause: no USB verifier remains, service is
+  Automatic/running, `V:` is read-only with raw writes disabled, mount root is
+  empty, and no reboot occurred. Installed worker `E94F3E1...BFCA8` does not
+  match exact package worker `F04E290...BD25`.
+- Normal Explorer-style file actions and service policy transitions pass as a
+  non-admin through service-owned config IPC. Install, driver registration, and
+  Program Files replacement correctly remain administrator-gated.
 - Software PnP disable could not simulate surprise removal because Windows reports
   the pinned USB device is pending a system reboot and does not support that
   command on this OS product. Host restart remains prohibited. The failed attempt
@@ -900,9 +911,9 @@ Exit gate: release checklist passes with artifacts under this repo.
   as one auditable command, reaps lingering installed worker processes before
   copying binaries, and proves the result in
   `artifacts\repair\install-repair-proof.json`.
-- Installed binaries match the current build for service, worker, manager, and
-  probe. Installed-service image policy proof and normal-user USB RW proof have
-  current passing artifacts.
+- Installed-runtime normal-user namespace, metadata, ACL, symlink, EA, stream,
+  and cleanup proofs pass, but installed binaries predate exact package
+  `C2B9...6F6`. Exact-package physical proof remains open.
 - The handle table is bounded by a deferred-retirement quarantine. Local
   handle-lifetime proof plus 10- and 100-iteration Robocopy stress runs pass with
   matching hashes, edits, replacements, recursive cleanup, and no leaked mount.
@@ -1381,5 +1392,39 @@ Exit gate: release checklist passes with artifacts under this repo.
 - Live source-boundary verification passed at `2026-08-17T07:32:49Z`.
   Concurrent upstream owner work then briefly modified imported
   `src/core/apfs_keybag.cpp`, making one strict run red, before making it clean.
-  The latest check at `2026-08-17T07:53:07Z` passes with only unrelated
-  HFS/test/catalog work dirty. This repository did not modify S.A.K.
+  Latest check at `2026-08-17T08:16:57Z` passes against upstream HEAD
+  `914caa0d3200af675a9a5d90f4c25c2795c743b9`: all imported upstream paths are
+  unchanged since recorded import provenance and clean; only unrelated
+  ext-reader/test/catalog work is dirty. This repository did not modify S.A.K.
+- Installed-runtime physical USB revalidation passed from
+  `2026-08-17T08:05:07Z` through `2026-08-17T08:07:27Z`: non-admin namespace,
+  Unicode/long path, Robocopy, concurrent read, metadata, ACL, symlink,
+  file/directory/root EA and stream operations, and durable cleanup all passed.
+  Final independent audit found `V:` read-only, raw writes disabled, empty root,
+  service Automatic/running, and no host reboot. Proof scope is explicitly
+  installed worker `E94F3E1...BFCA8`, not exact package worker
+  `F04E290...BD25`. Evidence:
+  `docs/evidence/physical-usb-current-installed-revalidation-2026-08-17.json`.
+
+## 2026-08-17 Current Candidate Refresh
+
+- Clean `main` source `7d23245ee487ab0db833c114d521558442d8208a`
+  passed production-mode build, CTest 13/13, and push-triggered repository gates.
+  Two detached source paths produced byte-identical project binaries, metadata,
+  and complete 31-file test ZIP with zero cleanup errors. ZIP SHA-256 is
+  `C2B9A2950AE62EA114BBB3E2F880048D777B87682B673F6CFF7C60B9ABF536F6`;
+  worker SHA-256 remains
+  `F04E290A6F1FB39402A948D5831BC3FCAF4BBBA6E8F762C51322C84589E3BD25`.
+- Exact current ZIP lifecycle passed in Windows 11 VM: install, Automatic service,
+  dedicated driver/runtime, saved `R:` restoration after VM reboot, exact file
+  and installed-binary hashes, one stacked `AP`/`FS` tray with `Open` and `Exit`,
+  uninstall, and no product residue. Host did not reboot. Evidence:
+  `docs/evidence/current-candidate-7d23245-2026-08-17.json`.
+- Guarded repair now preserves exact extracted-package `-RepairScript`,
+  `-BuildDir`, and explicit `-AllowTestSignedDriver` through elevation. Worker-only
+  deployment can pin ZIP and worker SHA-256 without changing the installed driver.
+  Correct-package preflight passes; wrong-hash and non-admin apply paths fail
+  closed without changing service PID or installed worker.
+- Exact current-worker physical USB read/write/delete proof remains open until
+  existing host UAC dialogs are canceled and one bounded worker-only replacement
+  receives administrator approval. No additional UAC prompt should be launched.

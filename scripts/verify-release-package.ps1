@@ -60,8 +60,10 @@ function Invoke-PayloadValidation {
 function Invoke-RepairLauncherSelfTest {
     param([Parameter(Mandatory = $true)][string]$ScriptPath)
     $testTarget = "\\?\GLOBALROOT\Device\Harddisk1\Partition1"
+    $testBuildDir = Split-Path -Parent $ScriptPath
     $raw = @(powershell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath -SelfTest `
-        -UsbTarget $testTarget -UsbMount V: 2>&1)
+        -UsbTarget $testTarget -UsbMount V: -BuildDir $testBuildDir `
+        -AllowTestSignedDriver 2>&1)
     $exitCode = $LASTEXITCODE
     $json = $null
     $errorText = $null
@@ -73,7 +75,9 @@ function Invoke-RepairLauncherSelfTest {
     [ordered]@{
         name = "repair_elevated_encoded_command"
         ok = [bool]($exitCode -eq 0 -and $json -and $json.ok -and
-            $json.target_roundtrip -and $json.mount_roundtrip)
+            $json.target_roundtrip -and $json.mount_roundtrip -and
+            $json.build_dir_roundtrip -and
+            $json.allow_test_signed_driver_roundtrip)
         exit_code = $exitCode
         result = $json
         parse_error = $errorText

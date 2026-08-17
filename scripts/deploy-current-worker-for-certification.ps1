@@ -6,6 +6,11 @@ param(
     [string]$InstallRoot = "$env:ProgramFiles\APFS for Windows",
     [string]$ServiceName = "ApfsForWindowsMountService",
     [string]$OutputPath = "artifacts\deployment\current-worker-certification.json",
+    [string]$PackageZip = "",
+    [string]$ExpectedPackageSha256 = "",
+    [string]$ExpectedWorkerSha256 = "",
+    [string]$ExpectedTarget = "",
+    [string]$ExpectedMount = "",
     [ValidateRange(10, 120)]
     [int]$TimeoutSeconds = 45,
     [switch]$Apply
@@ -76,6 +81,81 @@ function Get-DriverIdentityJson {
     }) | ConvertTo-Json -Depth 4 -Compress
 }
 
+function Get-ZipEntrySha256 {
+    param(
+        [Parameter(Mandatory = $true)][string]$ZipPath,
+        [Parameter(Mandatory = $true)][string]$EntryName
+    )
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [IO.Compression.ZipFile]::OpenRead($ZipPath)
+    try {
+        $entries = @($archive.Entries | Where-Object {
+            $_.FullName.Equals($EntryName, [StringComparison]::OrdinalIgnoreCase)
+        })
+        if ($entries.Count -ne 1) {
+            throw "Package must contain exactly one '$EntryName' entry."
+        }
+        $stream = $entries[0].Open()
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace("-", "")
+        } finally {
+            $sha.Dispose()
+            $stream.Dispose()
+        }
+    } finally {
+        $archive.Dispose()
+    }
+}
+
+function Get-ExpectedMountHealth {
+    param(
+        [Parameter(Mandatory = $true)][string]$ServiceExe,
+        [Parameter(Mandatory = $true)][string]$Target,
+        [Parameter(Mandatory = $true)][string]$Mount
+    )
+
+    $raw = @(& $ServiceExe --health 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Service health failed with exit code $LASTEXITCODE."
+    }
+    $health = ($raw -join "`n") | ConvertFrom-Json
+    $entry = @($health.mounts | Where-Object {
+        [string]$_.target -ieq $Target -and [string]$_.mount -ieq $Mount
+    } | Select-Object -First 1)
+    if ($entry.Count -ne 1) {
+        return $null
+    }
+    $entry[0]
+}
+
+function Wait-ExpectedReadOnlyMount {
+    param(
+        [Parameter(Mandatory = $true)][string]$ServiceExe,
+        [Parameter(Mandatory = $true)][string]$Target,
+        [Parameter(Mandatory = $true)][string]$Mount,
+        [Parameter(Mandatory = $true)][int]$Seconds
+    )
+
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    do {
+        try {
+            $entry = Get-ExpectedMountHealth -ServiceExe $ServiceExe `
+                -Target $Target -Mount $Mount
+            if ($entry -and $entry.exists -eq $true -and
+                $entry.root_exists -eq $true -and $entry.read_only -eq $true -and
+                $entry.allow_raw_writes -eq $false) {
+                return $entry
+            }
+        } catch {
+            $entry = $null
+        }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+    throw "Expected APFS mount did not return read-only: $Target -> $Mount"
+}
+
 function Write-Result {
     param(
         [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Result,
@@ -91,7 +171,40 @@ function Write-Result {
 $resolvedBuild = Resolve-RepoPath $BuildDir
 $sourceWorker = Join-Path $resolvedBuild "apfs_winfs_worker.exe"
 $buildMetadataPath = Join-Path $resolvedBuild "apfs-build-metadata.json"
+$packageMode = -not [string]::IsNullOrWhiteSpace($PackageZip) -or
+    -not [string]::IsNullOrWhiteSpace($ExpectedPackageSha256) -or
+    -not [string]::IsNullOrWhiteSpace($ExpectedWorkerSha256)
+$packageInputsComplete = -not [string]::IsNullOrWhiteSpace($PackageZip) -and
+    $ExpectedPackageSha256 -match '^[0-9A-Fa-f]{64}$' -and
+    $ExpectedWorkerSha256 -match '^[0-9A-Fa-f]{64}$'
+$resolvedPackageZip = if (-not [string]::IsNullOrWhiteSpace($PackageZip)) {
+    Resolve-RepoPath $PackageZip
+} else { $null }
+$expectedPackageHash = $ExpectedPackageSha256.Trim().ToUpperInvariant()
+$expectedWorkerHash = $ExpectedWorkerSha256.Trim().ToUpperInvariant()
+$packageHash = if ($resolvedPackageZip -and
+    (Test-Path -LiteralPath $resolvedPackageZip -PathType Leaf)) {
+    (Get-FileHash -LiteralPath $resolvedPackageZip -Algorithm SHA256).Hash
+} else { $null }
+$zipWorkerHash = $null
+$zipMetadataHash = $null
+$packageInspectionError = $null
+if ($packageHash) {
+    try {
+        $zipWorkerHash = Get-ZipEntrySha256 -ZipPath $resolvedPackageZip `
+            -EntryName "apfs_winfs_worker.exe"
+        $zipMetadataHash = Get-ZipEntrySha256 -ZipPath $resolvedPackageZip `
+            -EntryName "apfs-build-metadata.json"
+    } catch {
+        $packageInspectionError = $_.Exception.Message
+    }
+}
 $destinationWorker = Join-Path $InstallRoot "apfs_winfs_worker.exe"
+$installedServiceExe = Join-Path $InstallRoot "apfs_mount_service.exe"
+$mountPinRequested = -not [string]::IsNullOrWhiteSpace($ExpectedTarget) -or
+    -not [string]::IsNullOrWhiteSpace($ExpectedMount)
+$mountPinComplete = -not [string]::IsNullOrWhiteSpace($ExpectedTarget) -and
+    -not [string]::IsNullOrWhiteSpace($ExpectedMount)
 $metadata = if (Test-Path -LiteralPath $buildMetadataPath -PathType Leaf) {
     Get-Content -LiteralPath $buildMetadataPath -Raw | ConvertFrom-Json
 } else { $null }
@@ -103,26 +216,61 @@ $serviceCim = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'" -Error
 $sourceHash = if (Test-Path -LiteralPath $sourceWorker -PathType Leaf) {
     (Get-FileHash -LiteralPath $sourceWorker -Algorithm SHA256).Hash
 } else { $null }
+$stageMetadataHash = if (Test-Path -LiteralPath $buildMetadataPath -PathType Leaf) {
+    (Get-FileHash -LiteralPath $buildMetadataPath -Algorithm SHA256).Hash
+} else { $null }
 $installedHashBefore = if (Test-Path -LiteralPath $destinationWorker -PathType Leaf) {
     (Get-FileHash -LiteralPath $destinationWorker -Algorithm SHA256).Hash
 } else { $null }
 $driversBefore = @(Get-WinFspDriverInventory)
 $driverIdentityBefore = Get-DriverIdentityJson -Inventory $driversBefore
+$mountBefore = $null
+$mountBeforeError = $null
+if ($mountPinComplete -and (Test-Path -LiteralPath $installedServiceExe -PathType Leaf)) {
+    try {
+        $mountBefore = Get-ExpectedMountHealth -ServiceExe $installedServiceExe `
+            -Target $ExpectedTarget -Mount $ExpectedMount
+    } catch {
+        $mountBeforeError = $_.Exception.Message
+    }
+}
 
 $checks = [ordered]@{
-    branch_main = $branch -eq "main"
-    worktree_clean = $status.Count -eq 0
     source_worker_exists = [bool]$sourceHash
     build_metadata_exists = $null -ne $metadata
     production_build = [bool]($metadata -and $metadata.production_build -eq $true)
     native_hardlinks = [bool]($metadata -and $metadata.winfsp_native_hardlinks -eq $true)
-    source_revision_exact = [bool]($metadata -and $head -and
-        [string]$metadata.source_commit -eq $head -and $metadata.source_dirty -eq $false)
     installed_worker_exists = [bool]$installedHashBefore
     service_exists = $null -ne $service
     service_automatic = [bool]($serviceCim -and $serviceCim.StartMode -eq "Auto")
     winfsp_driver_inventory = [bool]($driversBefore.Count -gt 0 -and
         @($driversBefore | Where-Object { -not $_.sha256 }).Count -eq 0)
+    mount_pin_complete = [bool](-not $mountPinRequested -or $mountPinComplete)
+    expected_mount_safe_before = [bool](-not $mountPinRequested -or
+        ($mountBefore -and $mountBefore.exists -eq $true -and
+        $mountBefore.root_exists -eq $true -and $mountBefore.read_only -eq $true -and
+        $mountBefore.allow_raw_writes -eq $false))
+}
+if ($packageMode) {
+    $checks["package_arguments_complete"] = [bool]$packageInputsComplete
+    $checks["package_zip_exists"] = [bool]$packageHash
+    $checks["package_sha256_matches"] = [bool]($packageHash -and
+        $packageHash -eq $expectedPackageHash)
+    $checks["package_worker_entry_exists"] = [bool]$zipWorkerHash
+    $checks["package_worker_sha256_matches"] = [bool]($zipWorkerHash -and
+        $zipWorkerHash -eq $expectedWorkerHash)
+    $checks["stage_worker_matches_package"] = [bool]($sourceHash -and $zipWorkerHash -and
+        $sourceHash -eq $zipWorkerHash)
+    $checks["stage_metadata_matches_package"] = [bool]($stageMetadataHash -and
+        $zipMetadataHash -and $stageMetadataHash -eq $zipMetadataHash)
+    $checks["package_metadata_source_clean"] = [bool]($metadata -and
+        $metadata.source_dirty -eq $false -and
+        -not [string]::IsNullOrWhiteSpace([string]$metadata.source_commit))
+} else {
+    $checks["branch_main"] = $branch -eq "main"
+    $checks["worktree_clean"] = $status.Count -eq 0
+    $checks["source_revision_exact"] = [bool]($metadata -and $head -and
+        [string]$metadata.source_commit -eq $head -and $metadata.source_dirty -eq $false)
 }
 $preflightOk = @($checks.GetEnumerator() | Where-Object { -not $_.Value }).Count -eq 0
 $result = [ordered]@{
@@ -132,16 +280,39 @@ $result = [ordered]@{
     apply_requested = [bool]$Apply
     applied = $false
     elevated = Test-IsAdministrator
+    deployment_mode = if ($packageMode) { "exact_package_worker" } else { "clean_main_worker" }
     source_commit = if ($metadata) { [string]$metadata.source_commit } else { $null }
     source_worker = $sourceWorker
     source_sha256 = $sourceHash
     installed_worker = $destinationWorker
     installed_sha256_before = $installedHashBefore
     installed_sha256_after = $installedHashBefore
+    package = if ($packageMode) {
+        [ordered]@{
+            zip_path = $resolvedPackageZip
+            expected_zip_sha256 = $expectedPackageHash
+            actual_zip_sha256 = $packageHash
+            expected_worker_sha256 = $expectedWorkerHash
+            zip_worker_sha256 = $zipWorkerHash
+            stage_worker_sha256 = $sourceHash
+            inspection_error = $packageInspectionError
+        }
+    } else { $null }
     service_name = $ServiceName
     service_status_before = if ($service) { [string]$service.Status } else { $null }
     service_status_after = if ($service) { [string]$service.Status } else { $null }
     service_start_mode = if ($serviceCim) { [string]$serviceCim.StartMode } else { $null }
+    expected_mount = if ($mountPinRequested) {
+        [ordered]@{
+            target = $ExpectedTarget
+            mount = $ExpectedMount
+            before = $mountBefore
+            before_error = $mountBeforeError
+            after = $null
+            rollback = $null
+            rollback_error = $null
+        }
+    } else { $null }
     checks = $checks
     backup_path = $null
     rollback_performed = $false
@@ -220,6 +391,12 @@ try {
         -Status ([System.ServiceProcess.ServiceControllerStatus]::Running) `
         -Seconds $TimeoutSeconds
 
+    if ($mountPinRequested) {
+        $result.expected_mount.after = Wait-ExpectedReadOnlyMount `
+            -ServiceExe $installedServiceExe -Target $ExpectedTarget `
+            -Mount $ExpectedMount -Seconds $TimeoutSeconds
+    }
+
     $driversAfter = @(Get-WinFspDriverInventory)
     if ((Get-DriverIdentityJson -Inventory $driversAfter) -ne $driverIdentityBefore) {
         throw "Driver hash changed during worker-only deployment."
@@ -251,6 +428,16 @@ try {
                 $service = Wait-ServiceStatus -Name $ServiceName `
                     -Status ([System.ServiceProcess.ServiceControllerStatus]::Running) `
                     -Seconds $TimeoutSeconds
+            }
+            if ($mountPinRequested) {
+                try {
+                    $result.expected_mount.rollback = Wait-ExpectedReadOnlyMount `
+                        -ServiceExe $installedServiceExe -Target $ExpectedTarget `
+                        -Mount $ExpectedMount -Seconds $TimeoutSeconds
+                } catch {
+                    $result.expected_mount.rollback_error = $_.Exception.Message
+                    $result.error += " Rollback mount verification failed: $($_.Exception.Message)"
+                }
             }
         } catch {
             $result.error += " Service recovery failed: $($_.Exception.Message)"

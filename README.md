@@ -152,13 +152,26 @@ and installed binary hashes, and writes
 Packaged install/repair resolves Qt DLLs and `platforms\qwindows.dll` from the
 extracted package before using a developer Qt path. Both scripts support
 non-admin `-ValidatePayloadOnly` checks.
-`start-repair-elevated.ps1 -SelfTest` validates encoded target/mount round-trip
-without elevation; release-package verification runs this check automatically.
+`start-repair-elevated.ps1 -SelfTest` validates encoded target/mount, package
+directory, and test-signing opt-in round-trip without elevation;
+release-package verification runs this check automatically.
 
 To pin one known mount to read-only during repair, pass both values:
 
 ```powershell
 .\scripts\start-repair-elevated.ps1 -UsbTarget '\\?\GLOBALROOT\Device\Harddisk1\Partition1' -UsbMount V:
+```
+
+To repair from one exact extracted test-signed package, pin both package repair
+script and payload directory. This preserves exact package binaries and does not
+reboot Windows:
+
+```powershell
+$stage = (Resolve-Path '.\artifacts\lifecycle-current\package\APFS-for-Windows-0.1.0-test-signed').Path
+.\scripts\start-repair-elevated.ps1 `
+  -RepairScript (Join-Path $stage 'repair-apfs-for-windows-install.ps1') `
+  -BuildDir $stage -AllowTestSignedDriver `
+  -UsbTarget '\\?\GLOBALROOT\Device\Harddisk1\Partition1' -UsbMount V:
 ```
 
 Configure a persistent read-only APFS mount:
@@ -214,6 +227,23 @@ metadata without elevation by default. Run it from Administrator PowerShell with
 `-Apply` only for a worker-only physical-USB certification deployment. It hashes
 the source and installed worker, preserves Automatic service mode, verifies the
 driver did not change, and rolls back a failed replacement.
+
+Package-worker mode replaces clean-main identity with explicit ZIP and worker
+SHA-256 pins. It verifies worker and build metadata directly inside the ZIP,
+requires staged copies to match, and preserves current driver identity:
+
+```powershell
+.\scripts\deploy-current-worker-for-certification.ps1 `
+  -BuildDir $stage -PackageZip "$stage.zip" `
+  -ExpectedPackageSha256 '<package-sha256>' `
+  -ExpectedWorkerSha256 '<worker-sha256>'
+# Repeat from Administrator PowerShell with -Apply after preflight passes.
+```
+
+Use worker-only package mode for current no-reboot physical certification.
+Full test-package repair also replaces WinFsp driver; do not use it on host
+unless test-driver loading is already permitted. Production-signed full-package
+repair remains final release path.
 
 Apple VM round-trip verification accepts connection data only as runtime
 parameters. No password, key, or password-file content is copied into source or
@@ -343,7 +373,7 @@ passed exact Windows VM install/reboot/tray/uninstall lifecycle. Evidence is in
 `docs\evidence\clean-candidate-2026-08-17.json`. Both remain test-signed and are
 not production releases.
 
-Current source `d5e68ccef376ba115d4fbcf98391c56d8f1b2977` passed production-mode
+Historical source `d5e68ccef376ba115d4fbcf98391c56d8f1b2977` passed production-mode
 build and CTest 13/13. Its 31-file test-signed package, SHA-256
 `B2944BB636EED3003DC827A169550E3DB813A0C2BF39ACCC5DECA7CF873EDCBD`,
 verified under Windows PowerShell 5.1 and PowerShell 7, then passed exact
@@ -351,6 +381,18 @@ Windows VM install, VM reboot persistence, one stacked `AP`/`FS` tray process
 with `Open` and `Exit`, installed-hash matching, uninstall, and independent
 residue cleanup. Only the VM rebooted. Sanitized evidence is in
 `docs\evidence\windows-vm-install-lifecycle-d5e68cc-2026-08-17.json`.
+
+Current candidate source `7d23245ee487ab0db833c114d521558442d8208a`
+passed production-mode build, CTest 13/13, push-triggered repository gates, and
+two-path reproducibility. Its 31-file test-signed ZIP SHA-256 is
+`C2B9A2950AE62EA114BBB3E2F880048D777B87682B673F6CFF7C60B9ABF536F6`;
+worker SHA-256 is
+`F04E290A6F1FB39402A948D5831BC3FCAF4BBBA6E8F762C51322C84589E3BD25`.
+Windows PowerShell 5.1 and PowerShell 7 package verification passed. Exact ZIP
+install, Automatic service, dedicated runtime, VM reboot and saved `R:` restore,
+one stacked `AP`/`FS` tray with `Open`/`Exit`, exact hashes, uninstall, and
+independent residue cleanup passed. Only the Windows VM rebooted. Evidence:
+`docs\evidence\current-candidate-7d23245-2026-08-17.json`.
 
 License notices:
 
@@ -460,9 +502,18 @@ Verified USB evidence:
   metadata, ACL, symlink, file/directory/root EAs, cleanup, and exact 9,001-byte
   then 12,017-byte regular-file stream EA replacement/deletion passed. The proof
   directory was removed and root metadata was restored. Per owner direction,
-  the pinned test mount remains explicitly read/write with raw writes enabled;
+  the pinned test mount remained explicitly read/write with raw writes enabled
+  at that historical checkpoint;
   newly discovered mounts still default read-only. Sanitized evidence:
   `docs\evidence\stream-xattr-usb-2026-08-17.json`.
+- Latest installed-runtime revalidation completed at `2026-08-17T08:07:27Z`.
+  Non-admin create/read/rename/overwrite/delete, Unicode names, a 394-character
+  path, Robocopy, four concurrent readers, metadata, ACL, symlink, file/
+  directory/root EAs, and 9,001/12,017-byte stream EAs passed. Cleanup was
+  durable; `V:` was restored read-only with raw writes disabled and an empty
+  root. This proof covers installed worker `E94F3E1...BFCA8`, not exact package
+  worker `F04E290...BD25`. Exact-package physical proof remains open. Sanitized
+  evidence: `docs\evidence\physical-usb-current-installed-revalidation-2026-08-17.json`.
 - Current media layout changed during SAK recertification. On
   `2026-08-16T17:22:33Z`, the same pinned 31,042,043,904-byte USB disk exposed
   Windows MBR Partition 1 at `V:` while the exact target probe identified a
@@ -481,11 +532,11 @@ Verified USB evidence:
   `\\.\PhysicalDrive1` and Partition 1 resolve to `disk:1:offset:0`, while only
   exact Partition 1 remains configured at `V:` across service resync intervals.
 - `scripts\verify-current-apfs-state.ps1` generated
-  `artifacts\state\current-apfs-state.json`. The latest direct proof independently
-  confirms the installed worker matches the current build, stale proof entries
-  are gone, and the service is Automatic/running. The pinned `V:` test mapping
-  is intentionally writable; this does not change the default read-only policy
-  for newly discovered media.
+  `artifacts\state\current-apfs-state.json`. That historical direct proof
+  confirmed its installed worker matched its build. Current independent audit
+  instead records stale proof entries gone, service Automatic/running, `V:`
+  read-only/raw-disabled, and installed/exact-package worker mismatch. Newly
+  discovered media remains read-only by default.
 - `artifacts\usb-rw\icons8-jester-debug-before-delete.json` captured the stale
   `icons8-jester.svg` inode before cleanup. `apfs_probe --debug-file` showed no
   decmpfs/resource-fork payload and an impossible APFS extent block
@@ -505,7 +556,9 @@ Verified USB evidence:
 - `scripts\start-repair-elevated.ps1` is the normal-user guarded launcher for
   repair. It writes `artifacts\repair\start-repair-elevated-proof.json`, refuses
   to create another UAC prompt while `consent.exe` is already pending, and waits
-  for the elevated repair proof artifact when launched.
+  for the elevated repair proof artifact when launched. `-RepairScript`,
+  `-BuildDir`, and `-AllowTestSignedDriver` let it preserve an exact extracted
+  test-package payload through elevation.
 - `scripts\verify-service-recovery-policy.ps1` checks the installed service is
   Automatic with three SCM restart actions and non-crash failure recovery enabled.
 - `scripts\verify-service-control-ipc.ps1` generated

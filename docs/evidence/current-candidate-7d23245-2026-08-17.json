@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "recorded_utc": "2026-08-17T08:22:00Z",
+  "classification": "test-signed development candidate; not a production release",
+  "ok": true,
+  "source": {
+    "commit": "7d23245ee487ab0db833c114d521558442d8208a",
+    "branch": "main",
+    "clean": true,
+    "production_build_mode": true,
+    "ctest": "13/13",
+    "repository_gates": "success"
+  },
+  "package": {
+    "name": "APFS-for-Windows-0.1.0-test-signed.zip",
+    "file_count": 31,
+    "size_bytes": 31710755,
+    "sha256": "C2B9A2950AE62EA114BBB3E2F880048D777B87682B673F6CFF7C60B9ABF536F6",
+    "worker_sha256": "F04E290A6F1FB39402A948D5831BC3FCAF4BBBA6E8F762C51322C84589E3BD25",
+    "driver_signing_mode": "test",
+    "production_ready": false,
+    "windows_powershell_5_1_verification": true,
+    "powershell_7_verification": true
+  },
+  "reproducibility": {
+    "ok": true,
+    "distinct_source_paths": true,
+    "source_paths_removed_after_test": true,
+    "ctest_passes": 2,
+    "matching_project_binary_hashes": true,
+    "matching_build_metadata": true,
+    "matching_complete_zip": true,
+    "cleanup_errors": 0
+  },
+  "windows_vm_lifecycle": {
+    "started_utc": "2026-08-17T08:14:53.9582688Z",
+    "completed_utc": "2026-08-17T08:20:15.1795406Z",
+    "ok": true,
+    "host_rebooted": false,
+    "windows_vm_rebooted": true,
+    "package_hash_unchanged": true,
+    "fixture_sha256": "AD49EEEB3E404D04324E027B1935C79C4395CB068C98E6CFB32828DAD030B8C7",
+    "mount": "R:",
+    "read_only": true,
+    "automatic_service_running_before_and_after_reboot": true,
+    "dedicated_driver_running": true,
+    "package_runtime_dll_loaded": true,
+    "installed_binary_hashes_match_package": true,
+    "saved_mount_restored": true,
+    "expected_file_sha256": "B58EE1D8BF6C0FF48A5D0AB28DCC938E941CE9AC9091E9C103D85C3784C1E4FC",
+    "file_hash_match": true,
+    "read_only_write_denied": true,
+    "interactive_tray_process_count": 1,
+    "tray_icon_available": true,
+    "tray_actions": [
+      "Open",
+      "Exit"
+    ]
+  },
+  "uninstall": {
+    "ok": true,
+    "service_removed": true,
+    "dedicated_driver_removed": true,
+    "mount_removed": true,
+    "manager_processes_stopped": true,
+    "startup_task_removed": true,
+    "run_fallback_removed": true,
+    "start_menu_removed": true,
+    "apps_and_features_registration_removed": true,
+    "install_root_removed": true,
+    "reboot_required": false,
+    "remote_artifacts_cleaned": true
+  },
+  "limitations": [
+    "The package and dedicated driver are test-signed.",
+    "The lifecycle fixture is read-only; separate image, raw-VHD, macOS, and physical USB lanes carry read/write/delete evidence.",
+    "The exact current package worker has not yet replaced the older worker serving the physical host USB.",
+    "Production signing and real physical surprise-unplug or power-loss recovery remain open."
+  ]
+}

@@ -3,12 +3,14 @@
 [CmdletBinding()]
 param(
     [string]$RepairScript = "scripts\repair-apfs-for-windows-install.ps1",
+    [string]$BuildDir = "",
     [string]$RepairOutputPath = "artifacts\repair\install-repair-proof.json",
     [string]$OutputPath = "artifacts\repair\start-repair-elevated-proof.json",
     [string]$UsbTarget = "",
     [string]$UsbMount = "",
     [int]$MaxPhysicalDrives = 32,
     [int]$TimeoutSeconds = 300,
+    [switch]$AllowTestSignedDriver,
     [switch]$SelfTest
 )
 
@@ -45,6 +47,12 @@ function New-RepairEncodedCommand {
     if (-not [string]::IsNullOrWhiteSpace($UsbTarget)) {
         $command[-1] += " -UsbTarget $(ConvertTo-PowerShellLiteral $UsbTarget)" +
             " -UsbMount $(ConvertTo-PowerShellLiteral $UsbMount)"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($resolvedBuildDir)) {
+        $command[-1] += " -BuildDir $(ConvertTo-PowerShellLiteral $resolvedBuildDir)"
+    }
+    if ($AllowTestSignedDriver) {
+        $command[-1] += " -AllowTestSignedDriver"
     }
     $command += @(
         "    if (-not `$?) { exit 1 }",
@@ -95,6 +103,11 @@ function Write-ResultAndExit {
 
 $startedUtc = (Get-Date).ToUniversalTime()
 $resolvedRepairScript = Resolve-RepoPath $RepairScript
+$resolvedBuildDir = if ([string]::IsNullOrWhiteSpace($BuildDir)) {
+    ""
+} else {
+    Resolve-RepoPath $BuildDir
+}
 $resolvedRepairOutput = Resolve-RepoPath $RepairOutputPath
 $resolvedOutput = Resolve-RepoPath $OutputPath
 
@@ -104,10 +117,14 @@ if ($SelfTest) {
         [Convert]::FromBase64String($encodedCommand))
     $targetLiteral = ConvertTo-PowerShellLiteral $UsbTarget
     $mountLiteral = ConvertTo-PowerShellLiteral $UsbMount
+    $buildLiteral = ConvertTo-PowerShellLiteral $resolvedBuildDir
     $ok = -not [string]::IsNullOrWhiteSpace($UsbTarget) -and
         -not [string]::IsNullOrWhiteSpace($UsbMount) -and
+        -not [string]::IsNullOrWhiteSpace($resolvedBuildDir) -and
         $decodedCommand.Contains("-UsbTarget $targetLiteral") -and
         $decodedCommand.Contains("-UsbMount $mountLiteral") -and
+        $decodedCommand.Contains("-BuildDir $buildLiteral") -and
+        $decodedCommand.Contains("-AllowTestSignedDriver") -and
         $decodedCommand.Contains((ConvertTo-PowerShellLiteral $resolvedRepairScript)) -and
         $decodedCommand.Contains((ConvertTo-PowerShellLiteral $resolvedRepairOutput))
     [ordered]@{
@@ -117,6 +134,8 @@ if ($SelfTest) {
         no_elevation_requested = $true
         target_roundtrip = [bool]$decodedCommand.Contains("-UsbTarget $targetLiteral")
         mount_roundtrip = [bool]$decodedCommand.Contains("-UsbMount $mountLiteral")
+        build_dir_roundtrip = [bool]$decodedCommand.Contains("-BuildDir $buildLiteral")
+        allow_test_signed_driver_roundtrip = [bool]$decodedCommand.Contains("-AllowTestSignedDriver")
         command_decoded = $true
     } | ConvertTo-Json -Depth 4
     if (-not $ok) { exit 1 }
@@ -139,6 +158,8 @@ $baseResult = [ordered]@{
         elevated = [bool](Test-CurrentProcessAdmin)
     }
     repair_script = $resolvedRepairScript
+    build_dir = $resolvedBuildDir
+    allow_test_signed_driver = [bool]$AllowTestSignedDriver
     repair_output_path = $resolvedRepairOutput
     pending_uac = $pendingUac
     blockers = @()
@@ -150,6 +171,12 @@ $baseResult = [ordered]@{
 
 if (-not (Test-Path -LiteralPath $resolvedRepairScript -PathType Leaf)) {
     $baseResult.blockers = @("repair script not found")
+    Write-ResultAndExit -Result $baseResult -ExitCode 1
+}
+
+if (-not [string]::IsNullOrWhiteSpace($resolvedBuildDir) -and
+    -not (Test-Path -LiteralPath $resolvedBuildDir -PathType Container)) {
+    $baseResult.blockers = @("build directory not found")
     Write-ResultAndExit -Result $baseResult -ExitCode 1
 }
 
@@ -174,6 +201,12 @@ if (Test-CurrentProcessAdmin) {
         )
         if (-not [string]::IsNullOrWhiteSpace($UsbTarget)) {
             $repairArgs += @("-UsbTarget", $UsbTarget, "-UsbMount", $UsbMount)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($resolvedBuildDir)) {
+            $repairArgs += @("-BuildDir", $resolvedBuildDir)
+        }
+        if ($AllowTestSignedDriver) {
+            $repairArgs += "-AllowTestSignedDriver"
         }
         & powershell @repairArgs
         $repairExit = $LASTEXITCODE
