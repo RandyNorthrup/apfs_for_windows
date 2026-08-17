@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "component": "apfs_for_windows",
+  "check": "clean_candidate_build_and_package",
+  "status": "development_certified",
+  "source_commit": "7ddcb7a1d0151a7d2221d68f5564c3288f9c97f7",
+  "source_clean": true,
+  "worker_sha256": "C1682B13E0E1D1451C482B9280D5DCBB601447EE685E4F8C6B86704113BF5E7D",
+  "results": {
+    "production_build_mode": true,
+    "warnings_as_errors": true,
+    "winfsp_required": true,
+    "native_hardlinks_required": true,
+    "ctest": "13/13",
+    "repository_ci": {
+      "ok": true,
+      "run": "https://github.com/RandyNorthrup/apfs_for_windows/actions/runs/31998331261"
+    },
+    "local_winfs": {
+      "ok": true,
+      "artifact_sha256": "AF9F089AB27B2DF8A5AD90B6DF13DAAA6F3D45045169FB8BC8C5C5A31F8215C6"
+    },
+    "macos_vm": {
+      "ok": true,
+      "fsck_apfs_passes": 3,
+      "artifact_sha256": "11F212B2028E30CAB2DC847677C29B6158B07BAC58759ECDE224EFC264BCD1EC"
+    },
+    "test_signed_package": {
+      "ok": true,
+      "production_ready": false,
+      "file_count": 31,
+      "zip_sha256": "50EECCD5ECDD4A3393FD26C8DF932E3C13858D35476574DF226681EC8B432FA5",
+      "package_proof_sha256": "72E032FE7C3E5DA70D400F33CFACFF58503670C737D4B44E512554414086573A",
+      "verification_proof_sha256": "66493E4890990F1672C6A35CEE227FCB848E282277179F9B9E5A406E12072D3F"
+    },
+    "physical_usb": {
+      "previous_feature_build_ok": true,
+      "previous_worker_sha256": "E94F3E1E642F0C6908F2D730CD6BEA05C1BB476D1591D9D3CF0C07062D6BFCA8",
+      "clean_candidate_worker_deployed": false,
+      "clean_candidate_usb_proof": false,
+      "reason": "Installed worker replacement requires an approved administrator session; no access-control or signing policy bypass was attempted.",
+      "host_rebooted": false
+    }
+  },
+  "limitations": [
+    "This candidate is test-signed and is not a production release.",
+    "Exact clean-candidate physical USB proof remains open until administrator-approved deployment.",
+    "Microsoft-compatible driver signing and application Authenticode signing remain open.",
+    "Exact production-signed lifecycle and USB proof remain open.",
+    "Physical fault-recovery and protected APFS policy gates remain open."
+  ]
+}

@@ -307,6 +307,11 @@ or dedicated-driver residue. This closes the development lifecycle gate only;
 production still requires Microsoft-compatible driver signing and
 Authenticode-signed application binaries. Exact package identity is recorded
 outside the archive in `docs\evidence\winfsp-hardlink-package-2026-08-17.json`.
+Latest clean-source test candidate SHA-256 is
+`50EECCD5ECDD4A3393FD26C8DF932E3C13858D35476574DF226681EC8B432FA5`;
+its build/package/interoperability evidence is in
+`docs\evidence\clean-candidate-2026-08-17.json`. It remains test-signed and is
+not a production release.
 
 License notices:
 

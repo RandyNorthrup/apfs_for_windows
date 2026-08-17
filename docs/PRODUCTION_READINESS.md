@@ -17,6 +17,7 @@ Current classification: **development-certified, not production-ready**.
 | Repository source boundary | Upstream S.A.K. APFS paths verified read-only and unchanged since import |
 | Repository hygiene | No duplicate code files, forbidden tracked roots, conflict markers, or tracked secrets |
 | Production compiler mode | Pinned coherent WinFsp input, native hard-link ABI, `/W4 /WX`, CTest 13/13 |
+| Clean candidate build | Source `7ddcb7a1d0151a7d2221d68f5564c3288f9c97f7`; production mode, clean metadata, CI green, local WinFsp and macOS stream proofs passed |
 | Current-build physical APFS proof | Matching installed/build worker; non-admin namespace, metadata, EA, ACL, symlink, cleanup, and 9,001/12,017-byte regular-file/directory/root stream EA operations |
 | Native Windows hard-link transport | Exact dedicated driver/DLL/worker pairing; root and nested create, link-count lifecycle, alias mutation, stock-driver coexistence |
 | Dedicated runtime source | Pinned commit approved after kernel/ABI review, clean build, and isolated VM transport proof |
@@ -31,6 +32,13 @@ It is explicitly test-signed and is not a production artifact.
 Source approval details are in
 `docs/evidence/winfsp-runtime-source-approval-2026-08-17.json`; approval does not
 waive production driver signing or exact-package release gates.
+
+Latest clean-source test package is
+`APFS-for-Windows-0.1.0-test-signed.zip`, SHA-256
+`50EECCD5ECDD4A3393FD26C8DF932E3C13858D35476574DF226681EC8B432FA5`.
+Its 31-file manifest and payload checks pass, but it has not replaced the older
+VM-lifecycle candidate and is not production signed. Clean-candidate evidence is
+tracked in `docs/evidence/clean-candidate-2026-08-17.json`.
 
 ## Open production blockers
 
@@ -56,6 +64,15 @@ directory streams and passed three `fsck_apfs -n` runs. The host was not
 rebooted. The pinned test mapping remains explicitly writable by owner direction;
 newly discovered media still defaults read-only. See
 `docs/evidence/directory-root-stream-xattrs-2026-08-17.json`.
+
+Clean source commit `7ddcb7a1d0151a7d2221d68f5564c3288f9c97f7` produced worker
+SHA-256 `C1682B13E0E1D1451C482B9280D5DCBB601447EE685E4F8C6B86704113BF5E7D`.
+That exact worker passed CTest 13/13, local two-mount WinFsp coverage, and the
+macOS root/directory stream round trip with three `fsck_apfs -n` passes. The
+installed physical-USB worker remains the earlier feature build because its
+Program Files replacement needs administrator approval; no ACL, signing, or
+boot-policy bypass was attempted. Exact clean-candidate USB proof therefore
+remains open.
 
 ## Strict check
 

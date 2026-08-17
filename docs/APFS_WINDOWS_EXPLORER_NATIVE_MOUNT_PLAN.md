@@ -1281,6 +1281,16 @@ Exit gate: release checklist passes with artifacts under this repo.
   `fsck_apfs -n` runs. Windows then read matching returned hashes.
 - Sanitized proof:
   `docs/evidence/directory-root-stream-xattrs-2026-08-17.json`.
+- Clean source commit `7ddcb7a1d0151a7d2221d68f5564c3288f9c97f7`
+  built in production mode with WinFsp/native-hardlink requirements and `/WX`.
+  CTest passed 13/13, CI passed, and the exact clean worker passed local WinFsp
+  plus macOS root/directory stream proofs. Verified 31-file test package SHA-256
+  is `50EECCD5ECDD4A3393FD26C8DF932E3C13858D35476574DF226681EC8B432FA5`.
+- Exact clean-worker physical USB rerun remains open because replacing the
+  installed Program Files worker requires administrator approval. The service,
+  driver, boot policy, and existing writable `V:` mount were left unchanged;
+  no access-control bypass was attempted. Clean-candidate proof is tracked at
+  `docs/evidence/clean-candidate-2026-08-17.json`.
 - Remaining production blockers are production driver signing, application
   Authenticode signing, retained clean CI/kernel-test provenance,
   production-signed exact-package lifecycle and physical USB validation,
