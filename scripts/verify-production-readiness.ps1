@@ -4,6 +4,7 @@
 param(
     [string]$BuildDir = "build\Release",
     [string]$PackageRoot = "artifacts\package",
+    [string]$ReproducibleProofPath = "artifacts\reproducible-build\proof.json",
     [bool]$RequireCleanGit = $true,
     [switch]$SkipTests,
     [string]$OutputPath = "artifacts\production\production-readiness.json"
@@ -101,6 +102,17 @@ $sourceStatus = @(& git -C $repoRoot status --porcelain 2>$null)
 $sourceRevisionOk = $buildMetadata -and $sourceHead -and
     ([string]$buildMetadata.source_commit -eq $sourceHead) -and
     $buildMetadata.source_dirty -eq $false -and $sourceStatus.Count -eq 0
+$reproducibleEvidence = Read-JsonOrNull -Path (Resolve-RepoPath $ReproducibleProofPath)
+$reproducibleEvidenceOk = $reproducibleEvidence -and
+    $reproducibleEvidence.ok -eq $true -and
+    [string]$reproducibleEvidence.source_commit -ceq $sourceHead -and
+    $reproducibleEvidence.source_paths_distinct -eq $true -and
+    $reproducibleEvidence.source_paths_removed_after_test -eq $true -and
+    [int]$reproducibleEvidence.ctest_passes -eq 2 -and
+    $reproducibleEvidence.metadata_ok -eq $true -and
+    $reproducibleEvidence.package_verification_ok -eq $true -and
+    @($reproducibleEvidence.files).Count -eq 6 -and
+    @($reproducibleEvidence.files | Where-Object { $_.ok -ne $true }).Count -eq 0
 $winFspApproved = $winFspBoundary.payload -and
     $winFspBoundary.payload.production_approved -eq $true
 
@@ -177,6 +189,7 @@ $gateStatus = [ordered]@{
     release_package = [bool]$package.ok
     production_build_mode = [bool]$productionBuildOk
     reproducible_build_metadata = [bool]$reproducibleBuildOk
+    reproducible_build_evidence = [bool]$reproducibleEvidenceOk
     exact_source_revision = [bool]$sourceRevisionOk
     native_hardlink_build = [bool]$hardlinkBuildOk
     authenticode_signatures = [bool]$signaturesOk
@@ -210,6 +223,7 @@ $result = [ordered]@{
     tests = $testResult
     package = $package
     build_metadata = $buildMetadata
+    reproducible_build_evidence = $reproducibleEvidence
     signatures = @($signatureReports)
     lifecycle_evidence = @($lifecycleEvidence)
     hardlink_transport_evidence = $hardlinkTransport

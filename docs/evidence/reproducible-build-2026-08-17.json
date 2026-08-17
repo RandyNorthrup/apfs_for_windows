@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "component": "apfs_for_windows",
+  "check": "reproducible_release_build",
+  "status": "development_certified",
+  "source_commit": "09c4653308ebe91ba1677588165981f9f7379e30",
+  "no_admin_required": true,
+  "host_rebooted": false,
+  "results": {
+    "source_paths_distinct": true,
+    "source_paths_removed_after_test": true,
+    "ctest": "13/13 per worktree",
+    "package_verification_passes": 2,
+    "metadata_match": true,
+    "matched_files": {
+      "apfs_mount_service.exe": "2F529C12488628BE273F9E272685A7E7B5C46A92075C19932B8EFC5A5CF2A860",
+      "apfs_winfs_worker.exe": "AB68CFF5A5CAE3E35CA04A56336F0DB97DED05B651AD0E758B9A79780D4CB12A",
+      "apfs_mount_manager.exe": "BA0F3441E95F8FD94EB5A76FC4A03A7BB199D5A3C862080E19E68768ECF0C264",
+      "apfs_probe.exe": "6D1E14E419685C00CA757E1571BB202B995DFA7245EE4B4E3BB92566CA4FE42F",
+      "apfs-build-metadata.json": "AC7C4FD3C9F02FD606325DB99E58A020ECD4722DBF752DDE8827B2C54BD6528A",
+      "APFS-for-Windows-0.1.0-test-signed.zip": "D8E7A7792351A391A21C53710E383FC0C566071D527F2870327EB680B38A9ADE"
+    },
+    "package_size_bytes": 13173640
+  },
+  "limitations": [
+    "The package is test-signed and is not a production release.",
+    "The proof covers project executables, metadata, and the pre-production package; it does not close production signing.",
+    "Pinned WinFsp kernel/runtime reproducibility in retained CI remains open."
+  ]
+}

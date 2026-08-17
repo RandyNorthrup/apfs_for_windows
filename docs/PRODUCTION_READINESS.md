@@ -34,6 +34,14 @@ Source approval details are in
 `docs/evidence/winfsp-runtime-source-approval-2026-08-17.json`; approval does not
 waive production driver signing or exact-package release gates.
 
+Source commit `09c4653308ebe91ba1677588165981f9f7379e30` passed the
+two-clean-worktree reproducibility verifier. Both detached paths passed CTest
+13/13 and package verification; all four shipped executables, build metadata,
+and the full 13,173,640-byte test-signed ZIP were byte-identical. The ZIP
+SHA-256 was `D8E7A7792351A391A21C53710E383FC0C566071D527F2870327EB680B38A9ADE`.
+This closes application and pre-signing package reproducibility only. See
+`docs/evidence/reproducible-build-2026-08-17.json`.
+
 Clean source commit `7ddcb7a` produced two retained test candidates. Package
 SHA-256 `50EECCD5ECDD4A3393FD26C8DF932E3C13858D35476574DF226681EC8B432FA5`
 passed local WinFsp and macOS interoperability. Package SHA-256
@@ -43,6 +51,13 @@ Open/Exit, exact installed hashes, clean uninstall, and remote cleanup. Both are
 test-signed and not production artifacts. See
 `docs/evidence/clean-candidate-2026-08-17.json`.
 
+Reproducibility proof for source `09c4653308ebe91ba1677588165981f9f7379e30`
+passed two detached source paths, two CTest 13/13 runs, two package verifications,
+matching hashes for every shipped project executable and metadata, and matching
+full test-package SHA-256
+`D8E7A7792351A391A21C53710E383FC0C566071D527F2870327EB680B38A9ADE`.
+See `docs/evidence/reproducible-build-2026-08-17.json`.
+
 ## Open production blockers
 
 | Blocker | Required closure |
@@ -51,7 +66,7 @@ test-signed and not production artifacts. See
 | Application trust | Authenticode-sign project executables and release installer/package flow |
 | Production package lifecycle | Repeat clean install, startup, mount, Explorer mutation, reboot, tray Exit, and uninstall with the production-signed package SHA-256 |
 | Production physical USB package | Repeat Explorer read/write/delete and stream-xattr proof with exact production-signed package binaries |
-| Reproducible build | Move the proven clean VS2022/WDK build into retained CI with kernel tests and provenance |
+| Reproducible kernel/runtime CI | Move the pinned WinFsp VS2022/WDK build into retained CI with kernel tests and provenance |
 | Fault recovery | Real surprise-unplug and interrupted-write/power-loss recovery on disposable physical APFS media |
 | Remaining APFS policy | Sealed/FileVault/per-file-key and filesystem-owned mutation policy beyond current fail-closed behavior |
 | Release governance | Protected branch, required CI checks, reviewed release tag, provenance, and retained evidence |
