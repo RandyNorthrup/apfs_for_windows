@@ -1,5 +1,3 @@
-// Copyright (c) 2026 Randy Northrup. All rights reserved.
-
 /// @file apfs_lzbitmap_encode.h
 /// @brief Clean-room encoder for Apple's LZBITMAP whole-buffer stream format.
 ///

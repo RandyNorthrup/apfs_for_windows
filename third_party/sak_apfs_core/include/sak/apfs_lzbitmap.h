@@ -1,5 +1,3 @@
-// Copyright (c) 2026 Randy Northrup. All rights reserved.
-
 /// @file apfs_lzbitmap.h
 /// @brief APFS LZBITMAP (com.apple.decmpfs algorithm 14) resource-fork container.
 ///
@@ -101,6 +99,17 @@ inline constexpr int kApfsLzbitmapMaxBlockBytes = kApfsLzbitmapBlockSize + 1;
         return block.mid(1);
     }
     return std::nullopt;
+}
+
+// Decode an INLINE LZBITMAP (decmpfs algo 13) payload -- the bytes after the 16-byte header
+// are ONE on-disk lzbitmap block (an inline file is a single block of at most 64 KiB).
+// nullopt on any mismatch (fail closed).
+[[nodiscard]] inline std::optional<QByteArray> apfsDecodeInlineLzbitmap(const QByteArray& payload,
+                                                                        uint64_t uncompressedSize) {
+    if (uncompressedSize > static_cast<uint64_t>(kApfsLzbitmapBlockSize)) {
+        return std::nullopt;
+    }
+    return apfsLzbitmapDecodeBlock(payload, static_cast<int>(uncompressedSize));
 }
 
 // Build a block_offs resource-fork dstream for @data, encoding each 64 KiB block with @encodeBlock

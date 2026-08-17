@@ -47,7 +47,7 @@
     "ok": true,
     "disk_number": 1,
     "partition_number": 1,
-    "serial": "067D19C65080",
+    "serial": "redacted",
     "physical_size_bytes": 31042043904,
     "apfs_container_bytes": 536870912,
     "target": "\\\\?\\GLOBALROOT\\Device\\Harddisk1\\Partition1",

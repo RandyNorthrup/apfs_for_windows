@@ -10,7 +10,7 @@ param(
     [string]$UsbMount = "",
     [int]$MaxPhysicalDrives = 32,
     [string]$StartMenuDir = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\APFS for Windows",
-    [string]$AppVersion = "0.1.0",
+    [string]$AppVersion = "",
     [int]$TimeoutSeconds = 60,
     [string]$OutputPath = "artifacts\repair\install-repair-proof.json",
     [switch]$SkipWinFspCheck,
@@ -18,6 +18,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "lib\project-version.ps1")
+$AppVersion = Get-ApfsProjectVersion -ExplicitVersion $AppVersion -CallerRoot $PSScriptRoot
 
 if ([string]::IsNullOrWhiteSpace($BuildDir)) {
     $scriptLocalService = Join-Path $PSScriptRoot "apfs_mount_service.exe"

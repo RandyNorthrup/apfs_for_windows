@@ -1,11 +1,102 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(apfs_for_windows VERSION 0.1.0 LANGUAGES C CXX)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
+    message(FATAL_ERROR "In-source builds are not supported. Use cmake -S . -B build.")
+endif()
+
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" APFS_PROJECT_VERSION LIMIT_COUNT 1)
+string(STRIP "${APFS_PROJECT_VERSION}" APFS_PROJECT_VERSION)
+if(NOT APFS_PROJECT_VERSION MATCHES "^[0-9]+\.[0-9]+\.[0-9]+$")
+    message(FATAL_ERROR "VERSION must contain one semantic version such as 0.1.0.")
+endif()
+
+project(apfs_for_windows VERSION ${APFS_PROJECT_VERSION} LANGUAGES C CXX)
+
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/winfsp-apfs.json" APFS_WINFSP_MANIFEST_JSON)
+string(JSON APFS_WINFSP_FORK_REPOSITORY GET "${APFS_WINFSP_MANIFEST_JSON}" repository)
+string(JSON APFS_WINFSP_FORK_COMMIT GET "${APFS_WINFSP_MANIFEST_JSON}" commit)
+find_package(Git REQUIRED)
+execute_process(
+    COMMAND "${GIT_EXECUTABLE}" -C "${CMAKE_CURRENT_SOURCE_DIR}" rev-parse HEAD
+    RESULT_VARIABLE APFS_SOURCE_GIT_RESULT
+    OUTPUT_VARIABLE APFS_SOURCE_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+execute_process(
+    COMMAND "${GIT_EXECUTABLE}" -C "${CMAKE_CURRENT_SOURCE_DIR}" status --porcelain
+    RESULT_VARIABLE APFS_SOURCE_STATUS_RESULT
+    OUTPUT_VARIABLE APFS_SOURCE_STATUS
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+if(NOT APFS_SOURCE_GIT_RESULT EQUAL 0 OR NOT APFS_SOURCE_STATUS_RESULT EQUAL 0)
+    message(FATAL_ERROR "Unable to read source Git provenance.")
+endif()
+if(APFS_SOURCE_STATUS)
+    set(APFS_SOURCE_DIRTY ON)
+else()
+    set(APFS_SOURCE_DIRTY OFF)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+
+option(APFS_PRODUCTION_BUILD "Enforce production dependency and compiler gates." OFF)
+option(APFS_REQUIRE_WINFSP "Fail configuration when WinFsp is unavailable." OFF)
+option(APFS_REQUIRE_NATIVE_HARDLINKS "Require the WinFsp native hard-link ABI." OFF)
+option(APFS_WARNINGS_AS_ERRORS "Treat warnings in project-owned targets as errors." OFF)
+
+if(APFS_PRODUCTION_BUILD)
+    set(APFS_REQUIRE_WINFSP ON)
+    set(APFS_REQUIRE_NATIVE_HARDLINKS ON)
+    set(APFS_WARNINGS_AS_ERRORS ON)
+    if(APFS_SOURCE_DIRTY)
+        message(FATAL_ERROR "Production builds require a clean main checkout.")
+    endif()
+    if(NOT WinFsp_ROOT)
+        message(FATAL_ERROR "Production builds require an explicit -DWinFsp_ROOT=<coherent-runtime-root>.")
+    endif()
+    execute_process(
+        COMMAND git -C "${WinFsp_ROOT}" rev-parse HEAD
+        RESULT_VARIABLE APFS_WINFSP_GIT_RESULT
+        OUTPUT_VARIABLE APFS_WINFSP_CHECKOUT_COMMIT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    if(NOT APFS_WINFSP_GIT_RESULT EQUAL 0 OR
+            NOT APFS_WINFSP_CHECKOUT_COMMIT STREQUAL APFS_WINFSP_FORK_COMMIT)
+        message(FATAL_ERROR
+            "Production WinFsp_ROOT must be the pinned winfsp-apfs commit ${APFS_WINFSP_FORK_COMMIT}.")
+    endif()
+    execute_process(
+        COMMAND git -C "${WinFsp_ROOT}" status --porcelain
+        RESULT_VARIABLE APFS_WINFSP_STATUS_RESULT
+        OUTPUT_VARIABLE APFS_WINFSP_CHECKOUT_STATUS
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    if(NOT APFS_WINFSP_STATUS_RESULT EQUAL 0 OR APFS_WINFSP_CHECKOUT_STATUS)
+        message(FATAL_ERROR "Production WinFsp_ROOT must be a clean checkout.")
+    endif()
+endif()
+
+function(apfs_apply_project_options target)
+    target_compile_definitions(${target} PRIVATE APFS_PROJECT_VERSION="${PROJECT_VERSION}")
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /permissive- /sdl /utf-8 /Zc:__cplusplus /guard:cf)
+        if(APFS_WARNINGS_AS_ERRORS)
+            target_compile_options(${target} PRIVATE /WX)
+        endif()
+        get_target_property(target_type ${target} TYPE)
+        if(NOT target_type STREQUAL "STATIC_LIBRARY")
+            target_link_options(${target} PRIVATE /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA /guard:cf)
+        endif()
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -fstack-protector-strong)
+        if(APFS_WARNINGS_AS_ERRORS)
+            target_compile_options(${target} PRIVATE -Werror)
+        endif()
+    endif()
+endfunction()
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Widgets Network)
 get_target_property(APFS_QT_CORE_DLL Qt6::Core IMPORTED_LOCATION_RELEASE)
@@ -31,12 +122,6 @@ target_include_directories(sak_lzfse PUBLIC
     third_party/lzfse/src
 )
 
-if(MSVC)
-    target_compile_options(sak_lzfse PRIVATE /w)
-else()
-    target_compile_options(sak_lzfse PRIVATE -w)
-endif()
-
 add_library(sak_apfs_core STATIC
     third_party/sak_apfs_core/src/core/apfs_crypto.cpp
     third_party/sak_apfs_core/src/core/apfs_keybag.cpp
@@ -53,6 +138,7 @@ target_include_directories(sak_apfs_core PUBLIC
 
 target_compile_definitions(sak_apfs_core PRIVATE QT_NO_KEYWORDS)
 target_link_libraries(sak_apfs_core PUBLIC Qt6::Core sak_lzfse)
+apfs_apply_project_options(sak_apfs_core)
 
 if(WIN32)
     target_compile_definitions(sak_apfs_core PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -64,11 +150,13 @@ add_executable(apfs_probe
 )
 
 target_link_libraries(apfs_probe PRIVATE sak_apfs_core Qt6::Core)
+apfs_apply_project_options(apfs_probe)
 
 add_executable(apfs_mount_service
     src/service/apfs_mount_service.cpp
 )
 target_link_libraries(apfs_mount_service PRIVATE sak_apfs_core Qt6::Core Qt6::Network)
+apfs_apply_project_options(apfs_mount_service)
 if(WIN32)
     target_compile_definitions(apfs_mount_service PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_link_libraries(apfs_mount_service PRIVATE advapi32)
@@ -86,6 +174,40 @@ else()
     target_compile_definitions(apfs_winfs_worker PRIVATE APFS_HAVE_WINFSP=0)
     message(WARNING "WinFsp SDK not found; apfs_winfs_worker builds in scaffold mode.")
 endif()
+if(APFS_REQUIRE_WINFSP AND NOT WinFsp_FOUND)
+    message(FATAL_ERROR "APFS_REQUIRE_WINFSP is enabled, but WinFsp was not found.")
+endif()
+
+set(APFS_WINFSP_HAS_NATIVE_HARDLINKS OFF)
+if(WinFsp_FOUND)
+    set(APFS_WINFSP_HEADER "${WinFsp_INCLUDE_DIR}/winfsp/winfsp.h")
+    file(STRINGS "${APFS_WINFSP_HEADER}" APFS_WINFSP_HARDLINK_MACRO
+        REGEX "^#define[ \t]+FSP_FILE_SYSTEM_INTERFACE_HAS_CREATE_HARD_LINK[ \t]+1")
+    file(STRINGS "${APFS_WINFSP_HEADER}" APFS_WINFSP_HARDLINK_CALLBACK
+        REGEX "CreateHardLink")
+    if(APFS_WINFSP_HARDLINK_MACRO AND APFS_WINFSP_HARDLINK_CALLBACK)
+        set(APFS_WINFSP_HAS_NATIVE_HARDLINKS ON)
+    endif()
+endif()
+if(APFS_REQUIRE_NATIVE_HARDLINKS AND NOT APFS_WINFSP_HAS_NATIVE_HARDLINKS)
+    message(FATAL_ERROR "Native hard links require the reviewed WinFsp protocol/kernel fork.")
+endif()
+if(APFS_WINFSP_HAS_NATIVE_HARDLINKS)
+    target_compile_definitions(apfs_winfs_worker PRIVATE APFS_WINFSP_NATIVE_HARDLINKS=1)
+else()
+    target_compile_definitions(apfs_winfs_worker PRIVATE APFS_WINFSP_NATIVE_HARDLINKS=0)
+endif()
+if(APFS_PRODUCTION_BUILD)
+    target_compile_definitions(apfs_winfs_worker PRIVATE APFS_PRODUCTION_BUILD=1)
+else()
+    target_compile_definitions(apfs_winfs_worker PRIVATE APFS_PRODUCTION_BUILD=0)
+endif()
+if(APFS_SOURCE_DIRTY)
+    set(APFS_SOURCE_DIRTY_JSON true)
+else()
+    set(APFS_SOURCE_DIRTY_JSON false)
+endif()
+apfs_apply_project_options(apfs_winfs_worker)
 if(WIN32)
     target_compile_definitions(apfs_winfs_worker PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_link_libraries(apfs_winfs_worker PRIVATE advapi32)
@@ -95,11 +217,35 @@ add_executable(apfs_mount_manager
     src/manager/apfs_mount_manager.cpp
 )
 target_link_libraries(apfs_mount_manager PRIVATE Qt6::Core Qt6::Widgets Qt6::Network)
+apfs_apply_project_options(apfs_mount_manager)
 
 add_executable(apfs_core_selftest
     src/tests/apfs_core_selftest.cpp
 )
 target_link_libraries(apfs_core_selftest PRIVATE sak_apfs_core Qt6::Core)
+apfs_apply_project_options(apfs_core_selftest)
+
+if(APFS_PRODUCTION_BUILD)
+    set(APFS_PRODUCTION_BUILD_JSON true)
+else()
+    set(APFS_PRODUCTION_BUILD_JSON false)
+endif()
+if(WinFsp_FOUND)
+    set(APFS_WINFSP_FOUND_JSON true)
+else()
+    set(APFS_WINFSP_FOUND_JSON false)
+endif()
+if(APFS_WINFSP_HAS_NATIVE_HARDLINKS)
+    set(APFS_WINFSP_HARDLINKS_JSON true)
+else()
+    set(APFS_WINFSP_HARDLINKS_JSON false)
+endif()
+file(TO_CMAKE_PATH "${WinFsp_INCLUDE_DIR}" APFS_WINFSP_INCLUDE_JSON)
+file(TO_CMAKE_PATH "${WinFsp_LIBRARY}" APFS_WINFSP_LIBRARY_JSON)
+file(TO_CMAKE_PATH "${WinFsp_RUNTIME_DLL}" APFS_WINFSP_RUNTIME_JSON)
+file(GENERATE
+    OUTPUT "${CMAKE_BINARY_DIR}/$<CONFIG>/apfs-build-metadata.json"
+    CONTENT "{\n  \"schema_version\": 1,\n  \"version\": \"${PROJECT_VERSION}\",\n  \"configuration\": \"$<CONFIG>\",\n  \"source_commit\": \"${APFS_SOURCE_COMMIT}\",\n  \"source_dirty\": ${APFS_SOURCE_DIRTY_JSON},\n  \"production_build\": ${APFS_PRODUCTION_BUILD_JSON},\n  \"winfsp_found\": ${APFS_WINFSP_FOUND_JSON},\n  \"winfsp_native_hardlinks\": ${APFS_WINFSP_HARDLINKS_JSON},\n  \"winfsp_fork_repository\": \"${APFS_WINFSP_FORK_REPOSITORY}\",\n  \"winfsp_fork_commit\": \"${APFS_WINFSP_FORK_COMMIT}\",\n  \"winfsp_include_dir\": \"${APFS_WINFSP_INCLUDE_JSON}\",\n  \"winfsp_library\": \"${APFS_WINFSP_LIBRARY_JSON}\",\n  \"winfsp_runtime_dll\": \"${APFS_WINFSP_RUNTIME_JSON}\"\n}\n")
 
 enable_testing()
 add_test(NAME apfs_probe_help COMMAND apfs_probe --help)
@@ -118,8 +264,8 @@ add_test(NAME apfs_core_selftest COMMAND apfs_core_selftest)
 set(APFS_TEST_PATH_MODS "PATH=path_list_prepend:${APFS_QT_RUNTIME_DIR}")
 list(APPEND APFS_TEST_PATH_MODS "QT_PLUGIN_PATH=set:${APFS_QT_PLUGIN_DIR}")
 if(WinFsp_FOUND)
-    get_filename_component(APFS_WINFSP_ROOT "${WinFsp_INCLUDE_DIR}" DIRECTORY)
-    list(APPEND APFS_TEST_PATH_MODS "PATH=path_list_prepend:${APFS_WINFSP_ROOT}/bin")
+    get_filename_component(APFS_WINFSP_RUNTIME_DIR "${WinFsp_RUNTIME_DLL}" DIRECTORY)
+    list(APPEND APFS_TEST_PATH_MODS "PATH=path_list_prepend:${APFS_WINFSP_RUNTIME_DIR}")
 endif()
 
 set_tests_properties(apfs_probe_help apfs_worker_status apfs_service_console apfs_service_health apfs_service_control_self_test apfs_service_ipc_self_test apfs_service_log_rotation apfs_service_discovery_empty apfs_service_partition_parser apfs_manager_status apfs_manager_self_test apfs_core_selftest PROPERTIES

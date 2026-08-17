@@ -3,11 +3,13 @@
 [CmdletBinding()]
 param(
     [string]$InstallRoot = "$env:ProgramFiles\APFS for Windows",
-    [string]$ExpectedVersion = "0.1.0",
+    [string]$ExpectedVersion = "",
     [string]$OutputPath = "artifacts\install\installed-app-registration.json"
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "lib\project-version.ps1")
+$ExpectedVersion = Get-ApfsProjectVersion -ExplicitVersion $ExpectedVersion -CallerRoot $PSScriptRoot
 
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string]$Path)

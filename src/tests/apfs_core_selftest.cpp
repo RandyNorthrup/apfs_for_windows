@@ -308,7 +308,7 @@ int verifyCheckpointView(const QString &imagePath, const QByteArray &seedData,
 int main(int argc, char *argv[]) {
   QCoreApplication app(argc, argv);
   QCoreApplication::setApplicationName(QStringLiteral("apfs_core_selftest"));
-  QCoreApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+  QCoreApplication::setApplicationVersion(QStringLiteral(APFS_PROJECT_VERSION));
 
   const QStringList args = app.arguments();
   const int makeImageIndex = args.indexOf(QStringLiteral("--make-image"));
@@ -321,6 +321,12 @@ int main(int argc, char *argv[]) {
   const QString makeLargeImagePath =
       makeLargeImageIndex >= 0 && makeLargeImageIndex + 1 < args.size()
           ? QFileInfo(args.at(makeLargeImageIndex + 1)).absoluteFilePath()
+          : QString{};
+  const int makeHardlinkImageIndex =
+      args.indexOf(QStringLiteral("--make-hardlink-image"));
+  const QString makeHardlinkImagePath =
+      makeHardlinkImageIndex >= 0 && makeHardlinkImageIndex + 1 < args.size()
+          ? QFileInfo(args.at(makeHardlinkImageIndex + 1)).absoluteFilePath()
           : QString{};
 
   QTemporaryDir temp;
@@ -1363,10 +1369,227 @@ int main(int argc, char *argv[]) {
     return rc;
   }
 
+  const QString nestedHardlinkImage =
+      tempDir.filePath(QStringLiteral("nested-hardlink.apfs"));
+  const auto nestedHardlink =
+      sak::PartitionApfsWriter::commitImageOnlyFileHardlink(
+          {.source_image_path = nestedWriteImage,
+           .written_image_path = nestedHardlinkImage,
+           .source_file_name = QStringLiteral("deep.txt"),
+           .link_file_name = QStringLiteral("deep-link.txt"),
+           .source_parent_directory_path = QStringLiteral("/docs/sub"),
+           .link_parent_directory_path = QStringLiteral("/docs"),
+           .options = options});
+  if (!nestedHardlink.ok) {
+    return fail(QStringLiteral("commit nested cross-parent hard link"),
+                QStringLiteral("commitImageOnlyFileHardlink failed"),
+                nestedHardlink.blockers);
+  }
+
+  const QString thirdHardlinkImage =
+      tempDir.filePath(QStringLiteral("third-hardlink.apfs"));
+  const auto thirdHardlink =
+      sak::PartitionApfsWriter::commitImageOnlyFileHardlink(
+          {.source_image_path = nestedHardlinkImage,
+           .written_image_path = thirdHardlinkImage,
+           .source_file_name = QStringLiteral("deep-link.txt"),
+           .link_file_name = QStringLiteral("deep-root-link.txt"),
+           .source_parent_directory_path = QStringLiteral("/docs"),
+           .link_parent_directory_path = QStringLiteral("/"),
+           .options = options});
+  if (!thirdHardlink.ok) {
+    return fail(QStringLiteral("commit third hard-link name"),
+                QStringLiteral("commitImageOnlyFileHardlink failed"),
+                thirdHardlink.blockers);
+  }
+  if (const int rc =
+          verifyRead(thirdHardlinkImage, QStringLiteral("/docs/deep-link.txt"),
+                     nestedPathData, &proofs);
+      rc != 0) {
+    return rc;
+  }
+  if (const int rc =
+          verifyRead(thirdHardlinkImage, QStringLiteral("/deep-root-link.txt"),
+                     nestedPathData, &proofs);
+      rc != 0) {
+    return rc;
+  }
+
+  const auto sourceHardlinkListing =
+      sak::PartitionApfsFileSystemReader::listDirectoryFromImage(
+          thirdHardlinkImage, QStringLiteral("/docs/sub"), 20);
+  const auto destinationHardlinkListing =
+      sak::PartitionApfsFileSystemReader::listDirectoryFromImage(
+          thirdHardlinkImage, QStringLiteral("/docs"), 20);
+  const auto rootHardlinkListing =
+      sak::PartitionApfsFileSystemReader::listDirectoryFromImage(
+          thirdHardlinkImage, QStringLiteral("/"), 40);
+  const auto *sourceHardlinkEntry =
+      findEntry(sourceHardlinkListing, QStringLiteral("deep.txt"));
+  const auto *destinationHardlinkEntry =
+      findEntry(destinationHardlinkListing, QStringLiteral("deep-link.txt"));
+  const auto *rootHardlinkEntry =
+      findEntry(rootHardlinkListing, QStringLiteral("deep-root-link.txt"));
+  if (!sourceHardlinkListing.ok || !destinationHardlinkListing.ok ||
+      !rootHardlinkListing.ok || !sourceHardlinkEntry ||
+      !destinationHardlinkEntry || !rootHardlinkEntry ||
+      sourceHardlinkEntry->object_id == 0 ||
+      sourceHardlinkEntry->object_id != destinationHardlinkEntry->object_id ||
+      sourceHardlinkEntry->object_id != rootHardlinkEntry->object_id ||
+      sourceHardlinkEntry->hard_link_count != 3 ||
+      destinationHardlinkEntry->hard_link_count != 3 ||
+      rootHardlinkEntry->hard_link_count != 3) {
+    QStringList blockers = sourceHardlinkListing.blockers;
+    blockers.append(destinationHardlinkListing.blockers);
+    blockers.append(rootHardlinkListing.blockers);
+    return fail(QStringLiteral("verify three-name hard-link inode identity"),
+                QStringLiteral("hard-link names did not resolve to one inode"),
+                blockers);
+  }
+
+  const QByteArray hardlinkOverwriteData(
+      "APFS hard-link identity-preserving overwrite proof");
+  const QString hardlinkWriteImage =
+      tempDir.filePath(QStringLiteral("hardlink-write.apfs"));
+  const auto hardlinkWrite = sak::PartitionApfsWriter::commitImageOnlyFileWrite(
+      {.source_image_path = thirdHardlinkImage,
+       .written_image_path = hardlinkWriteImage,
+       .file_name = QStringLiteral("deep-link.txt"),
+       .file_data = hardlinkOverwriteData,
+       .parent_directory_path = QStringLiteral("/docs"),
+       .options = options});
+  if (!hardlinkWrite.ok) {
+    return fail(QStringLiteral("overwrite through hard-link name"),
+                QStringLiteral("commitImageOnlyFileWrite failed"),
+                hardlinkWrite.blockers);
+  }
+  for (const QString &path : {QStringLiteral("/docs/sub/deep.txt"),
+                              QStringLiteral("/docs/deep-link.txt"),
+                              QStringLiteral("/deep-root-link.txt")}) {
+    if (const int rc =
+            verifyRead(hardlinkWriteImage, path, hardlinkOverwriteData, &proofs);
+        rc != 0) {
+      return rc;
+    }
+  }
+  const auto sourceAfterHardlinkWrite =
+      sak::PartitionApfsFileSystemReader::listDirectoryFromImage(
+          hardlinkWriteImage, QStringLiteral("/docs/sub"), 20);
+  const auto destinationAfterHardlinkWrite =
+      sak::PartitionApfsFileSystemReader::listDirectoryFromImage(
+          hardlinkWriteImage, QStringLiteral("/docs"), 20);
+  const auto rootAfterHardlinkWrite =
+      sak::PartitionApfsFileSystemReader::listDirectoryFromImage(
+          hardlinkWriteImage, QStringLiteral("/"), 40);
+  const auto *sourceAfterHardlinkWriteEntry =
+      findEntry(sourceAfterHardlinkWrite, QStringLiteral("deep.txt"));
+  const auto *destinationAfterHardlinkWriteEntry =
+      findEntry(destinationAfterHardlinkWrite, QStringLiteral("deep-link.txt"));
+  const auto *rootAfterHardlinkWriteEntry =
+      findEntry(rootAfterHardlinkWrite, QStringLiteral("deep-root-link.txt"));
+  if (!sourceAfterHardlinkWriteEntry || !destinationAfterHardlinkWriteEntry ||
+      !rootAfterHardlinkWriteEntry ||
+      sourceAfterHardlinkWriteEntry->object_id != sourceHardlinkEntry->object_id ||
+      destinationAfterHardlinkWriteEntry->object_id != sourceHardlinkEntry->object_id ||
+      rootAfterHardlinkWriteEntry->object_id != sourceHardlinkEntry->object_id ||
+      sourceAfterHardlinkWriteEntry->hard_link_count != 3 ||
+      destinationAfterHardlinkWriteEntry->hard_link_count != 3 ||
+      rootAfterHardlinkWriteEntry->hard_link_count != 3) {
+    QStringList blockers = sourceAfterHardlinkWrite.blockers;
+    blockers.append(destinationAfterHardlinkWrite.blockers);
+    blockers.append(rootAfterHardlinkWrite.blockers);
+    return fail(QStringLiteral("verify hard-link overwrite identity"),
+                QStringLiteral("overwrite split or changed the hard-link inode"),
+                blockers);
+  }
+
+  if (!makeHardlinkImagePath.isEmpty()) {
+    const QFileInfo imageInfo(makeHardlinkImagePath);
+    QDir().mkpath(imageInfo.absolutePath());
+    QFile::remove(makeHardlinkImagePath);
+    if (!QFile::copy(hardlinkWriteImage, makeHardlinkImagePath)) {
+      return fail(QStringLiteral("make hard-link image"),
+                  QStringLiteral("unable to copy hard-link image"));
+    }
+    appendProof(&proofs, QStringLiteral("make hard-link image"),
+                {{QStringLiteral("path"), makeHardlinkImagePath},
+                 {QStringLiteral("inode_object_id"),
+                  QString::number(sourceHardlinkEntry->object_id)},
+                 {QStringLiteral("link_names"), 3}});
+  }
+
+  const auto collisionHardlink =
+      sak::PartitionApfsWriter::commitImageOnlyFileHardlink(
+          {.source_image_path = hardlinkWriteImage,
+           .written_image_path =
+               tempDir.filePath(QStringLiteral("hardlink-collision.apfs")),
+           .source_file_name = QStringLiteral("deep.txt"),
+           .link_file_name = QStringLiteral("deep-link.txt"),
+           .source_parent_directory_path = QStringLiteral("/docs/sub"),
+           .link_parent_directory_path = QStringLiteral("/docs"),
+           .options = options});
+  if (collisionHardlink.ok || collisionHardlink.blockers.isEmpty()) {
+    return fail(QStringLiteral("reject hard-link destination collision"),
+                QStringLiteral("existing destination name was accepted"));
+  }
+
+  const QString thirdHardlinkDeletedImage =
+      tempDir.filePath(QStringLiteral("third-hardlink-deleted.apfs"));
+  const auto thirdHardlinkDelete =
+      sak::PartitionApfsWriter::commitImageOnlyFileDelete(
+          {.source_image_path = hardlinkWriteImage,
+           .written_image_path = thirdHardlinkDeletedImage,
+           .file_name = QStringLiteral("deep-root-link.txt"),
+           .options = options});
+  if (!thirdHardlinkDelete.ok) {
+    return fail(QStringLiteral("delete third hard-link name"),
+                QStringLiteral("commitImageOnlyFileDelete failed"),
+                thirdHardlinkDelete.blockers);
+  }
+
+  const QString secondHardlinkDeletedImage =
+      tempDir.filePath(QStringLiteral("second-hardlink-deleted.apfs"));
+  const auto secondHardlinkDelete =
+      sak::PartitionApfsWriter::commitImageOnlyFileDelete(
+          {.source_image_path = thirdHardlinkDeletedImage,
+           .written_image_path = secondHardlinkDeletedImage,
+           .file_name = QStringLiteral("deep-link.txt"),
+           .parent_directory_path = QStringLiteral("/docs"),
+           .options = options});
+  if (!secondHardlinkDelete.ok) {
+    return fail(QStringLiteral("delete second hard-link name"),
+                QStringLiteral("commitImageOnlyFileDelete failed"),
+                secondHardlinkDelete.blockers);
+  }
+  if (const int rc = verifyRead(secondHardlinkDeletedImage,
+                                QStringLiteral("/docs/sub/deep.txt"),
+                                hardlinkOverwriteData, &proofs);
+      rc != 0) {
+    return rc;
+  }
+  const auto survivingHardlinkListing =
+      sak::PartitionApfsFileSystemReader::listDirectoryFromImage(
+          secondHardlinkDeletedImage, QStringLiteral("/docs/sub"), 20);
+  const auto *survivingHardlinkEntry =
+      findEntry(survivingHardlinkListing, QStringLiteral("deep.txt"));
+  if (!survivingHardlinkListing.ok || !survivingHardlinkEntry ||
+      survivingHardlinkEntry->hard_link_count != 1) {
+    return fail(QStringLiteral("verify collapsed hard-link count"),
+                QStringLiteral("surviving name did not report link count 1"),
+                survivingHardlinkListing.blockers);
+  }
+  appendProof(&proofs,
+              QStringLiteral("arbitrary three-name hard-link lifecycle"),
+              {{QStringLiteral("inode_object_id"),
+                QString::number(sourceHardlinkEntry->object_id)},
+               {QStringLiteral("collision_rejected"), true},
+               {QStringLiteral("overwrite_preserved_identity"), true},
+               {QStringLiteral("surviving_names"), 1}});
+
   const QString nestedRenameImage =
       tempDir.filePath(QStringLiteral("nested-rename.apfs"));
   const auto nestedRename = sak::PartitionApfsWriter::commitImageOnlyFileRename(
-      {.source_image_path = nestedWriteImage,
+      {.source_image_path = secondHardlinkDeletedImage,
        .written_image_path = nestedRenameImage,
        .file_name = QStringLiteral("deep.txt"),
        .new_file_name = QStringLiteral("deep-renamed.txt"),
@@ -1379,7 +1602,7 @@ int main(int argc, char *argv[]) {
   }
   if (const int rc = verifyRead(nestedRenameImage,
                                 QStringLiteral("/docs/sub/deep-renamed.txt"),
-                                nestedPathData, &proofs);
+                                hardlinkOverwriteData, &proofs);
       rc != 0) {
     return rc;
   }
@@ -1703,6 +1926,75 @@ int main(int argc, char *argv[]) {
     sak::PartitionApfsWriter::setRawDeviceTargetPredicateForTesting({});
     return rc;
   }
+
+  sak::PartitionApfsRawFileHardlinkCommitRequest rawHardlinkRequest;
+  rawHardlinkRequest.target_path = largeFileImage;
+  rawHardlinkRequest.target_container_bytes = largeTargetBytes;
+  rawHardlinkRequest.source_file_name = QStringLiteral("stream.bin");
+  rawHardlinkRequest.link_file_name = QStringLiteral("stream-raw-link.bin");
+  rawHardlinkRequest.source_parent_directory_path =
+      QStringLiteral("/Raw Large Metadata/Raw Sub Renamed");
+  rawHardlinkRequest.link_parent_directory_path = QStringLiteral("/");
+  rawHardlinkRequest.target_mutation_confirmed = true;
+  rawHardlinkRequest.allow_raw_device_target = true;
+  rawHardlinkRequest.options = rawOptions;
+  const auto rawHardlink =
+      sak::PartitionApfsWriter::commitRawFileHardlink(rawHardlinkRequest);
+  if (!rawHardlink.ok) {
+    sak::PartitionApfsWriter::setRawDeviceTargetPredicateForTesting({});
+    return fail(QStringLiteral("commit raw cross-parent hard link"),
+                QStringLiteral("commitRawFileHardlink failed"),
+                rawHardlink.blockers);
+  }
+  if (const int rc =
+          verifyRead(largeFileImage, QStringLiteral("/stream-raw-link.bin"),
+                     rawStreamData, &proofs);
+      rc != 0) {
+    sak::PartitionApfsWriter::setRawDeviceTargetPredicateForTesting({});
+    return rc;
+  }
+  const auto rawNestedHardlinkListing =
+      sak::PartitionApfsFileSystemReader::listDirectoryFromImage(
+          largeFileImage, QStringLiteral("/Raw Large Metadata/Raw Sub Renamed"),
+          20);
+  const auto rawRootHardlinkListing =
+      sak::PartitionApfsFileSystemReader::listDirectoryFromImage(
+          largeFileImage, QStringLiteral("/"), 40);
+  const auto *rawHardlinkSource =
+      findEntry(rawNestedHardlinkListing, QStringLiteral("stream.bin"));
+  const auto *rawHardlinkDestination =
+      findEntry(rawRootHardlinkListing, QStringLiteral("stream-raw-link.bin"));
+  if (!rawNestedHardlinkListing.ok || !rawRootHardlinkListing.ok ||
+      !rawHardlinkSource || !rawHardlinkDestination ||
+      rawHardlinkSource->object_id == 0 ||
+      rawHardlinkSource->object_id != rawHardlinkDestination->object_id) {
+    sak::PartitionApfsWriter::setRawDeviceTargetPredicateForTesting({});
+    QStringList blockers = rawNestedHardlinkListing.blockers;
+    blockers.append(rawRootHardlinkListing.blockers);
+    return fail(QStringLiteral("verify raw hard-link inode identity"),
+                QStringLiteral("raw hard-link names did not share one inode"),
+                blockers);
+  }
+
+  sak::PartitionApfsRawFileDeleteCommitRequest rawHardlinkDeleteRequest;
+  rawHardlinkDeleteRequest.target_path = largeFileImage;
+  rawHardlinkDeleteRequest.target_container_bytes = largeTargetBytes;
+  rawHardlinkDeleteRequest.file_name = QStringLiteral("stream-raw-link.bin");
+  rawHardlinkDeleteRequest.target_mutation_confirmed = true;
+  rawHardlinkDeleteRequest.allow_raw_device_target = true;
+  rawHardlinkDeleteRequest.options = rawOptions;
+  const auto rawHardlinkDelete =
+      sak::PartitionApfsWriter::commitRawFileDelete(rawHardlinkDeleteRequest);
+  if (!rawHardlinkDelete.ok) {
+    sak::PartitionApfsWriter::setRawDeviceTargetPredicateForTesting({});
+    return fail(QStringLiteral("delete raw hard-link name"),
+                QStringLiteral("commitRawFileDelete failed"),
+                rawHardlinkDelete.blockers);
+  }
+  appendProof(&proofs, QStringLiteral("raw arbitrary hard-link lifecycle"),
+              {{QStringLiteral("inode_object_id"),
+                QString::number(rawHardlinkSource->object_id)},
+               {QStringLiteral("surviving_names"), 1}});
 
   sak::PartitionApfsRawFileRenameCommitRequest rawFileRenameRequest;
   rawFileRenameRequest.target_path = largeFileImage;

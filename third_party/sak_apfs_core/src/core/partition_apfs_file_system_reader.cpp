@@ -1,5 +1,3 @@
-// Copyright (c) 2026 Randy Northrup. All rights reserved.
-
 /// @file partition_apfs_file_system_reader.cpp
 /// @brief Read-only APFS file browser for Partition Manager.
 
@@ -11,6 +9,7 @@
 #include "sak/apfs_lzbitmap.h"
 #include "sak/apfs_resource_fork.h"
 #include "sak/partition_apfs_writer.h"
+#include "sak/partition_export_containment.h"
 #include "sak/partition_raw_device_io.h"
 
 #include <QDir>
@@ -125,6 +124,20 @@ constexpr uint32_t kApfsContainerIncompatFusion = 0x00'00'01'00;
 constexpr uint64_t kApfsSupportedContainerIncompat = kApfsContainerIncompatVersion2 |
                                                      kApfsContainerIncompatFusion;
 constexpr uint64_t kApfsVolumeIncompatIncompleteRestore = 0x00'00'00'10;
+constexpr uint64_t kApfsVolumeIncompatCaseInsensitive =
+    0x00'00'00'01;  // APFS_INCOMPAT_CASE_INSENSITIVE
+constexpr uint64_t kApfsVolumeIncompatNormalizationInsensitive =
+    0x00'00'00'08;  // APFS_INCOMPAT_NORMALIZATION_INSENSITIVE
+constexpr uint64_t kApfsVolumeIncompatSealed = 0x00'00'00'20;  // APFS_INCOMPAT_SEALED_VOLUME
+// Volume-incompat bits this read-only browser knows it can traverse correctly: case- and
+// normalization-insensitivity affect only name comparison (the reader reads names verbatim),
+// and a sealed volume is merely integrity-protected/read-only. INCOMPLETE_RESTORE is rejected
+// with its own message below; any bit outside this set (dataless snaps, encryption-rolling,
+// or a future unknown) is refused fail-closed, symmetric with validateContainerFeatures.
+constexpr uint64_t kApfsSupportedVolumeIncompat = kApfsVolumeIncompatCaseInsensitive |
+                                                  kApfsVolumeIncompatNormalizationInsensitive |
+                                                  kApfsVolumeIncompatSealed |
+                                                  kApfsVolumeIncompatIncompleteRestore;
 constexpr uint64_t kApfsObjIdMask = 0x0F'FF'FF'FF'FF'FF'FF'FFULL;
 constexpr uint64_t kApfsObjTypeMask = 0xF0'00'00'00'00'00'00'00ULL;
 constexpr int kApfsObjTypeShift = 60;
@@ -162,7 +175,15 @@ constexpr qsizetype kApfsInodeOwnerOffset = 0x48;
 constexpr qsizetype kApfsInodeGroupOffset = 0x4C;
 constexpr qsizetype kApfsInodeModeOffset = 0x50;
 constexpr qsizetype kApfsInodeInternalFlagsOffset = 0x30;
+// j_inode_val identity fields preserved verbatim across an arbitrary import (all < the
+// kApfsInodeXfieldsOffset bound the caller already checks): the four timestamps, the BSD
+// flags, and the owner/group. Mirrors the writer's applyRecoveredInodeMetadata offsets.
+constexpr qsizetype kApfsInodeCreateTimeOffset = 0x10;
+constexpr qsizetype kApfsInodeModTimeOffset = 0x18;
+constexpr qsizetype kApfsInodeChangeTimeOffset = 0x20;
+constexpr qsizetype kApfsInodeAccessTimeOffset = 0x28;
 constexpr uint64_t kApfsInodeFlagSparse = 0x00'00'02'00;  // APFS_INODE_IS_SPARSE
+constexpr qsizetype kApfsInodeUncompressedSizeOffset = 0x54;
 constexpr qsizetype kApfsInodeXfieldsOffset = 0x5C;
 constexpr uint16_t kApfsModeTypeMask = 0170000;
 constexpr uint16_t kApfsModeDirectory = 0040000;
@@ -276,7 +297,7 @@ QString utf8Field(const QByteArray& bytes, qsizetype offset, qsizetype length) {
     }
     const qsizetype clamped = std::min(length, bytes.size() - offset);
     const QByteArray raw = bytes.mid(offset, clamped);
-    const int terminator = raw.indexOf('\0');
+    const int terminator = static_cast<int>(raw.indexOf('\0'));
     return QString::fromUtf8(terminator >= 0 ? raw.left(terminator) : raw).trimmed();
 }
 
@@ -368,18 +389,12 @@ QString uniquePath(const QDir& dir, const QString& safeName, const QString& suff
     return {};
 }
 
-bool writeExportFile(const QString& path,
-                     const QByteArray& data,
-                     QStringList* blockers,
-                     const QString& sourcePath) {
-    QFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate) || file.write(data) != data.size()) {
-        blockers->append(
-            QStringLiteral("Unable to write exported APFS file for %1").arg(sourcePath));
-        return false;
-    }
-    return true;
-}
+// The containment guard is defined once, in sak/partition_export_containment.h, and shared with
+// the ext and HFS+ exporters. It used to be copied into each of the three, which is exactly how
+// HFS+ came to ship without it (R5-P4-44).
+using sak::partition_export::pathWithinRoot;
+
+using sak::partition_export::writeFile;
 
 struct ApfsObjectHeader {
     uint64_t oid{0};
@@ -391,10 +406,10 @@ struct ApfsObjectHeader {
 };
 
 ApfsObjectHeader objectHeader(const QByteArray& block) {
-    return {le64(block, kApfsObjectOidOffset),
-            le64(block, kApfsObjectXidOffset),
-            le32(block, kApfsObjectTypeOffset),
-            le32(block, kApfsObjectSubtypeOffset)};
+    return {.oid = le64(block, kApfsObjectOidOffset),
+            .xid = le64(block, kApfsObjectXidOffset),
+            .type = le32(block, kApfsObjectTypeOffset),
+            .subtype = le32(block, kApfsObjectSubtypeOffset)};
 }
 
 struct BtreeInfo {
@@ -454,7 +469,18 @@ struct InodeRecord {
     uint32_t bsd_flags{0};
     uint32_t owner_id{0};
     uint32_t group_id{0};
+    // Identity metadata preserved verbatim across an arbitrary import so an adopted real
+    // Apple file keeps its owner/group/permissions/flags/timestamps (not generated defaults).
+    uint32_t owner{0};
+    uint32_t group{0};
+    uint64_t create_time{0};
+    uint64_t mod_time{0};
+    uint64_t change_time{0};
+    uint64_t access_time{0};
     bool sparse{false};  // A7 (A-h): INODE_IS_SPARSE -- a trailing/embedded hole reads as zeros
+    // The j_inode_val uncompressed-size field, valid when internal_flags carries
+    // APFS_INODE_HAS_UNCOMPRESSED_SIZE (a compressed file's logical size; 0 otherwise).
+    uint64_t uncompressed_size{0};
 };
 
 struct FileExtentRecord {
@@ -533,7 +559,7 @@ public:
         }
 
         QVector<DirectoryRecord> entries = directoryRecordsFor(*directoryId);
-        std::sort(entries.begin(), entries.end(), [](const auto& left, const auto& right) {
+        std::ranges::sort(entries, [](const auto& left, const auto& right) {
             return QString::localeAwareCompare(left.name, right.name) < 0;
         });
 
@@ -797,6 +823,26 @@ private:
         if (!validateBlockGeometry(result)) {
             return false;
         }
+        // Reconcile the claimed container block count with the REAL backing device:
+        // a corrupt or hostile nx_block_count larger than the device would let the
+        // extent-bounds checks (which trust blockCount_) accept block indices past
+        // the device end. Clamp to what the device actually holds.
+        if (device_ != nullptr && blockSize_ != 0) {
+            const uint64_t deviceBytes =
+                static_cast<uint64_t>(std::max<qint64>(0, device_->size()));
+            if (deviceBytes != 0) {
+                blockCount_ = std::min<uint64_t>(blockCount_, deviceBytes / blockSize_);
+            }
+        }
+        // Checked AFTER the clamp, so it catches both a superblock declaring zero blocks and a
+        // device too small to hold even one. readBlock bounds every read against this count, and
+        // a zero count used to be treated as "no bound at all" -- exactly inverting the check on
+        // the one input that gives it nothing to check against.
+        if (blockCount_ == 0) {
+            result->blockers.append(
+                QStringLiteral("APFS container declares no blocks, or the device holds none"));
+            return false;
+        }
         if (firstBlock->size() < static_cast<qsizetype>(blockSize_)) {
             return readBlock(0, firstBlock, result);
         }
@@ -816,8 +862,8 @@ private:
         return true;
     }
 
-    [[nodiscard]] bool validateContainerFeatures(const QByteArray& nxBlock,
-                                                 PartitionApfsFileReadResult* result) const {
+    [[nodiscard]] static bool validateContainerFeatures(const QByteArray& nxBlock,
+                                                        PartitionApfsFileReadResult* result) {
         const uint64_t incompatible = le64(nxBlock, kApfsNxIncompatibleFeaturesOffset);
         if ((incompatible & kApfsContainerIncompatVersion1) != 0) {
             result->blockers.append(QStringLiteral("APFS version 1 containers are unsupported"));
@@ -879,8 +925,15 @@ private:
         }
         const uint64_t volumeIncompatible = le64(volumeBlock,
                                                  kApfsVolumeIncompatibleFeaturesOffset);
+        volumeCaseInsensitive_ = (volumeIncompatible & kApfsVolumeIncompatCaseInsensitive) != 0;
         if ((volumeIncompatible & kApfsVolumeIncompatIncompleteRestore) != 0) {
             result->blockers.append(QStringLiteral("APFS volume has incomplete-restore state"));
+            return false;
+        }
+        if ((volumeIncompatible & ~kApfsSupportedVolumeIncompat) != 0) {
+            result->blockers.append(
+                QStringLiteral("APFS volume has unsupported incompatible features 0x%1")
+                    .arg(volumeIncompatible, 0, kDisplayHexBase));
             return false;
         }
         if (!unlockEncryptedVolume(volumeBlock, result)) {
@@ -1045,11 +1098,72 @@ private:
         return true;
     }
 
+    // The com.apple.decmpfs attribute value for @fileId: the embedded value when present,
+    // else a DSTREAM-backed value assembled from its own stream extents (truncated to the
+    // recorded byte length) so both layouts decode identically. Empty = not compressed;
+    // nullopt = the stream assembly failed (blocker already appended).
+    [[nodiscard]] std::optional<QByteArray> decmpfsAttributeFor(
+        uint64_t fileId, PartitionApfsFileReadResult* result) {
+        const QByteArray embedded = decmpfsByInode_.value(fileId);
+        if (!embedded.isEmpty()) {
+            return embedded;
+        }
+        const auto stream = decmpfsStreamByInode_.constFind(fileId);
+        if (stream == decmpfsStreamByInode_.cend()) {
+            return QByteArray{};
+        }
+        const auto blob = assembleResourceForkBlob(stream->first, result);
+        if (!blob.has_value()) {
+            return std::nullopt;
+        }
+        return blob->left(static_cast<qsizetype>(stream->second));
+    }
+
+    // Build the read target for a compressed file: its logical size is the decmpfs header's
+    // uncompressed_size; a *_RSRC file additionally carries its com.apple.ResourceFork data
+    // stream's object id (0 when absent, i.e. the inline case).
+    [[nodiscard]] std::optional<FileReadTarget> compressedFileReadTarget(
+        const InodeRecord& inode,
+        const QByteArray& attribute,
+        uint64_t effectiveMax,
+        uint64_t fileId,
+        PartitionApfsFileReadResult* result,
+        bool warnOnTruncate = true) const {
+        const auto header = apfsParseDecmpfsHeader(attribute);
+        if (!header.has_value()) {
+            result->blockers.append(QStringLiteral("APFS decmpfs attribute is malformed"));
+            return std::nullopt;
+        }
+        // The decode paths materialize the FULL uncompressed payload before truncating, so a
+        // malformed header with a huge uncompressed_size would allocate it verbatim (OOM).
+        // Fail closed past the read ceiling instead.
+        if (header->uncompressed_size > kMaxFileReadBytes) {
+            result->blockers.append(
+                QStringLiteral("APFS compressed file reports %1 uncompressed bytes, over the "
+                               "%2-byte read ceiling")
+                    .arg(header->uncompressed_size)
+                    .arg(kMaxFileReadBytes));
+            return std::nullopt;
+        }
+        const uint64_t bytesToRead = std::min<uint64_t>(header->uncompressed_size, effectiveMax);
+        if (warnOnTruncate && header->uncompressed_size > bytesToRead) {
+            result->warnings.append(
+                QStringLiteral("APFS file read truncated at %1 bytes").arg(bytesToRead));
+            result->truncated = true;
+        }
+        return FileReadTarget{.inode = inode,
+                              .bytes_to_read = bytesToRead,
+                              .compressed = true,
+                              .decmpfs_xattr = attribute,
+                              .resource_fork_obj_id = resourceForkObjIdByInode_.value(fileId, 0)};
+    }
+
+    // Non-const: a DSTREAM-backed decmpfs attribute is assembled from its stream extents here.
     [[nodiscard]] std::optional<FileReadTarget> resolveFileReadTarget(
         const QString& path,
         uint64_t maxBytes,
         PartitionApfsFileReadResult* result,
-        bool warnOnTruncate = true) const {
+        bool warnOnTruncate = true) {
         const QString normalized = cleanPath(path);
         const auto record = resolveFile(normalized, result);
         if (!record.has_value()) {
@@ -1071,33 +1185,21 @@ private:
             maxBytes == 0 ? kMaxFileReadBytes : std::min<uint64_t>(maxBytes, kMaxFileReadBytes);
         // A compressed file has no data stream; its logical size is the decmpfs
         // header's uncompressed_size, decoded from the attribute on read.
-        const auto decmpfs = decmpfsByInode_.constFind(record->file_id);
-        if (decmpfs != decmpfsByInode_.cend()) {
-            const auto header = apfsParseDecmpfsHeader(*decmpfs);
-            if (!header.has_value()) {
-                result->blockers.append(QStringLiteral("APFS decmpfs attribute is malformed"));
-                return std::nullopt;
-            }
-            const uint64_t logical = header->uncompressed_size;
-            const uint64_t bytesToRead = std::min<uint64_t>(logical, effectiveMax);
-            if (warnOnTruncate && logical > bytesToRead) {
-                result->warnings.append(
-                    QStringLiteral("APFS file read truncated at %1 bytes").arg(bytesToRead));
-            }
-            // A resource-fork-compressed file carries a com.apple.ResourceFork data stream
-            // (0 when absent, i.e. the inline case).
-            return FileReadTarget{*inode,
-                                  bytesToRead,
-                                  true,
-                                  *decmpfs,
-                                  resourceForkObjIdByInode_.value(record->file_id, 0)};
+        const auto resolved = decmpfsAttributeFor(record->file_id, result);
+        if (!resolved.has_value()) {
+            return std::nullopt;
+        }
+        if (!resolved->isEmpty()) {
+            return compressedFileReadTarget(
+                *inode, *resolved, effectiveMax, record->file_id, result, warnOnTruncate);
         }
         const uint64_t bytesToRead = std::min<uint64_t>(inode->size, effectiveMax);
         if (warnOnTruncate && inode->size > bytesToRead) {
             result->warnings.append(
                 QStringLiteral("APFS file read truncated at %1 bytes").arg(bytesToRead));
+            result->truncated = true;
         }
-        return FileReadTarget{*inode, bytesToRead};
+        return FileReadTarget{.inode = *inode, .bytes_to_read = bytesToRead};
     }
 
     // Decode a transparently-compressed file's content from its inline decmpfs
@@ -1139,6 +1241,17 @@ private:
                     payload, header->uncompressed_size, &out, &result->blockers)) {
                 return false;
             }
+        } else if (header->algo == kApfsCompressLzbitmapAttr) {
+            // Inline LZBITMAP (algo 13, the Apple Silicon default): the payload after the
+            // 16-byte header is one lzbitmap block. Previously misrouted to the resource-fork
+            // path (algo 13 was not classified inline), which failed the read outright.
+            const QByteArray payload = target.decmpfs_xattr.mid(kApfsDecmpfsHeaderBytes);
+            const auto lzbitmapOut = apfsDecodeInlineLzbitmap(payload, header->uncompressed_size);
+            if (!lzbitmapOut.has_value()) {
+                result->blockers.append(QStringLiteral("APFS inline LZBITMAP decode failed"));
+                return false;
+            }
+            out = *lzbitmapOut;
         } else {
             result->blockers.append(
                 QStringLiteral("APFS decmpfs decode failed for algorithm %1").arg(header->algo));
@@ -1161,12 +1274,24 @@ private:
         }
         uint64_t totalBytes = 0;
         for (const auto& extent : extents) {
+            // Overflow-safe ceiling: a crafted extent table (huge lengths or a
+            // wrapping sum) must not size a multi-GiB blob allocation; the
+            // ordinary read path is capped at kMaxFileReadBytes output anyway.
+            if (extent.length > kMaxFileReadBytes ||
+                totalBytes + extent.length > kMaxFileReadBytes) {
+                result->blockers.append(
+                    QStringLiteral("APFS ResourceFork stream %1 exceeds the read ceiling")
+                        .arg(objId));
+                return std::nullopt;
+            }
             totalBytes += extent.length;
         }
         PartitionApfsFileReadResult blobRead;
         uint64_t cursor = 0;
         for (const auto& extent : extents) {
-            if (!appendReadableExtent(extent, totalBytes, &cursor, &blobRead)) {
+            // A stream xattr's extents may legitimately skip block-aligned gaps; keep the
+            // sparse (zero-fill) behavior for the blob assembly.
+            if (!appendReadableExtent(extent, totalBytes, true, &cursor, &blobRead)) {
                 result->blockers.append(blobRead.blockers);
                 return std::nullopt;
             }
@@ -1216,7 +1341,7 @@ private:
 
     [[nodiscard]] QVector<FileExtentRecord> sortedExtents(uint64_t privateId) const {
         QVector<FileExtentRecord> extents = extentsByOwner_.values(privateId).toVector();
-        std::sort(extents.begin(), extents.end(), [](const auto& left, const auto& right) {
+        std::ranges::sort(extents, [](const auto& left, const auto& right) {
             return left.logical_offset < right.logical_offset;
         });
         return extents;
@@ -1262,7 +1387,8 @@ private:
 
         uint64_t cursor = 0;
         for (const auto& extent : extents) {
-            if (!appendReadableExtent(extent, target.bytes_to_read, &cursor, result)) {
+            if (!appendReadableExtent(
+                    extent, target.bytes_to_read, target.inode.sparse, &cursor, result)) {
                 return false;
             }
         }
@@ -1295,7 +1421,7 @@ private:
 
         uint64_t cursor = offset;
         for (const auto& extent : extents) {
-            if (!appendReadableExtent(extent, end, &cursor, result)) {
+            if (!appendReadableExtent(extent, end, target.inode.sparse, &cursor, result)) {
                 return false;
             }
         }
@@ -1312,9 +1438,10 @@ private:
 
     [[nodiscard]] bool appendReadableExtent(const FileExtentRecord& extent,
                                             uint64_t bytesToRead,
+                                            bool sparseInode,
                                             uint64_t* cursor,
                                             PartitionApfsFileReadResult* result) {
-        if (!cursor || *cursor >= bytesToRead) {
+        if ((cursor == nullptr) || *cursor >= bytesToRead) {
             return true;
         }
         if (extent.flags != 0) {
@@ -1330,7 +1457,9 @@ private:
                 QStringLiteral("APFS encrypted file extents require a volume credential"));
             return false;
         }
-        appendSparsePrefix(extent, bytesToRead, cursor, result);
+        if (!appendSparsePrefix(extent, bytesToRead, sparseInode, cursor, result)) {
+            return false;
+        }
         if (*cursor >= bytesToRead || extent.logical_offset + extent.length <= *cursor) {
             return true;
         }
@@ -1357,21 +1486,31 @@ private:
         return true;
     }
 
-    void appendSparsePrefix(const FileExtentRecord& extent,
-                            uint64_t bytesToRead,
-                            uint64_t* cursor,
-                            PartitionApfsFileReadResult* result) const {
-        if (!cursor || extent.logical_offset <= *cursor) {
-            return;
+    // Zero-fill the logical gap before @extent. A gap is only legitimate on a SPARSE inode
+    // (an implicit hole); on a dense file it means an extent record was lost -- silently
+    // reading zeros there would mask corruption as file content, so fail closed instead.
+    [[nodiscard]] bool appendSparsePrefix(const FileExtentRecord& extent,
+                                          uint64_t bytesToRead,
+                                          bool sparseInode,
+                                          uint64_t* cursor,
+                                          PartitionApfsFileReadResult* result) const {
+        if ((cursor == nullptr) || extent.logical_offset <= *cursor) {
+            return true;
+        }
+        if (!sparseInode) {
+            result->blockers.append(QStringLiteral(
+                "APFS dense file has a gap in its extent records (a missing extent)"));
+            return false;
         }
         const uint64_t sparseBytes = std::min<uint64_t>(extent.logical_offset - *cursor,
                                                         bytesToRead - *cursor);
         result->data.append(QByteArray(static_cast<int>(sparseBytes), '\0'));
         *cursor += sparseBytes;
+        return true;
     }
 
     [[nodiscard]] bool mount(PartitionApfsFileReadResult* result) {
-        if (!device_ || !device_->isOpen()) {
+        if ((device_ == nullptr) || !device_->isOpen()) {
             result->blockers.append(QStringLiteral("APFS input is not open"));
             return false;
         }
@@ -1381,7 +1520,7 @@ private:
             return false;
         }
 
-        QByteArray nxBlock = latestContainerSuperblock(firstBlock, result);
+        const QByteArray nxBlock = latestContainerSuperblock(firstBlock, result);
         const auto nxHeader = objectHeader(nxBlock);
         containerXid_ = nxHeader.xid;
         containerUuid_ = nxBlock.mid(kApfsNxUuidOffset, kApfsUuidBytes);
@@ -1416,6 +1555,13 @@ private:
 
         const uint32_t descBlockCount = descBlockCountRaw;
         if (descBlockCount == 0 || descBlockCount > kMaxCheckpointDescriptorBlocks) {
+            // The descriptor ring is unusable, so the latest checkpoint cannot be located.
+            // Block zero holds a structurally valid nx_superblock copy and mount() re-validates
+            // its magic and feature masks before use, but surface the fallback (previously
+            // silent) so a stale-but-consistent view is never mistaken for the newest state.
+            result->warnings.append(
+                QStringLiteral("APFS checkpoint descriptor ring is empty or oversized; block-zero "
+                               "superblock used"));
             return firstBlock;
         }
         const uint64_t descBase = le64(firstBlock, kApfsNxDescBaseOffset);
@@ -1476,9 +1622,9 @@ private:
         const uint32_t maxFileSystems =
             std::min<uint32_t>(le32(nxBlock, kApfsNxMaxFileSystemsOffset), kApfsMaxFileSystems);
         for (uint32_t index = 0; index < maxFileSystems; ++index) {
-            const uint64_t oid =
-                le64(nxBlock,
-                     kApfsNxFsOidArrayOffset + static_cast<qsizetype>(index) * kApfsObjectIdBytes);
+            const uint64_t oid = le64(nxBlock,
+                                      kApfsNxFsOidArrayOffset +
+                                          (static_cast<qsizetype>(index) * kApfsObjectIdBytes));
             if (oid != 0) {
                 return oid;
             }
@@ -1528,7 +1674,13 @@ private:
         QByteArray node = root;
         for (int depth = 0; depth < kMaxObjectMapDepth; ++depth) {
             const uint16_t level = le16(node, kApfsBtreeNodeLevelOffset);
-            const auto entries = btreeEntries(node, info);
+            bool wellFormed = true;
+            const auto entries = btreeEntries(node, info, &wellFormed);
+            if (!wellFormed) {
+                result->blockers.append(
+                    QStringLiteral("APFS object-map B-tree node is structurally invalid"));
+                return std::nullopt;
+            }
             if (entries.isEmpty()) {
                 result->blockers.append(QStringLiteral("APFS object-map B-tree node is empty"));
                 return std::nullopt;
@@ -1546,11 +1698,11 @@ private:
         return std::nullopt;
     }
 
-    [[nodiscard]] std::optional<ObjectMapValue> bestObjectMapLeafValue(
+    [[nodiscard]] static std::optional<ObjectMapValue> bestObjectMapLeafValue(
         const QByteArray& node,
         const QVector<BtreeEntryView>& entries,
         uint64_t oid,
-        uint64_t xid) const {
+        uint64_t xid) {
         std::optional<ObjectMapValue> best;
         for (const auto& entry : entries) {
             if (!isObjectMapLeafEntry(entry)) {
@@ -1560,17 +1712,18 @@ private:
             const uint64_t keyXid = le64(node, entry.key_offset + kApfsOmapKeyXidOffset);
             if (keyOid == oid && keyXid <= xid && (!best.has_value() || keyXid > best->xid)) {
                 const uint32_t valueFlags = le32(node, entry.value_offset);
-                best = ObjectMapValue{valueFlags,
-                                      le32(node, entry.value_offset + kApfsOmapValueSizeOffset),
-                                      le64(node, entry.value_offset + kApfsOmapValuePaddrOffset),
-                                      keyXid,
-                                      (valueFlags & kApfsOmapValueEncrypted) != 0};
+                best = ObjectMapValue{
+                    .flags = valueFlags,
+                    .size = le32(node, entry.value_offset + kApfsOmapValueSizeOffset),
+                    .physical_address = le64(node, entry.value_offset + kApfsOmapValuePaddrOffset),
+                    .xid = keyXid,
+                    .encrypted = (valueFlags & kApfsOmapValueEncrypted) != 0};
             }
         }
         return best;
     }
 
-    [[nodiscard]] bool isObjectMapLeafEntry(const BtreeEntryView& entry) const {
+    [[nodiscard]] static bool isObjectMapLeafEntry(const BtreeEntryView& entry) {
         return entry.key_length >= kApfsOmapKeyBytes && entry.value_length >= kApfsOmapValueBytes;
     }
 
@@ -1591,11 +1744,11 @@ private:
         return value;
     }
 
-    [[nodiscard]] std::optional<uint64_t> objectMapChildAddress(
+    [[nodiscard]] static std::optional<uint64_t> objectMapChildAddress(
         const QByteArray& node,
         const QVector<BtreeEntryView>& entries,
         uint64_t oid,
-        uint64_t xid) const {
+        uint64_t xid) {
         std::optional<uint64_t> childAddress;
         for (const auto& entry : entries) {
             if (!isObjectMapChildEntry(entry)) {
@@ -1613,7 +1766,7 @@ private:
         return childAddress;
     }
 
-    [[nodiscard]] bool isObjectMapChildEntry(const BtreeEntryView& entry) const {
+    [[nodiscard]] static bool isObjectMapChildEntry(const BtreeEntryView& entry) {
         return entry.key_length >= kApfsOmapKeyBytes &&
                entry.value_length >= kApfsBtreeChildPointerBytes;
     }
@@ -1632,9 +1785,17 @@ private:
             result->blockers.append(QStringLiteral("APFS root file-system tree is invalid"));
             return false;
         }
-        FsTreeScanState state{btreeInfo(root), {}, 0, 0};
+        FsTreeScanState state{
+            .info = btreeInfo(root), .seen_nodes = {}, .nodes_visited = 0, .records_visited = 0};
         if (!visitFileSystemTreeNode(rootTreeAddress_, rootTreeEncrypted_, 0, &state, result)) {
             return false;
+        }
+        hardLinkCountByInode_.clear();
+        for (const auto& record : directoryRecords_) {
+            auto& count = hardLinkCountByInode_[record.file_id];
+            if (count != std::numeric_limits<uint32_t>::max()) {
+                ++count;
+            }
         }
         fileSystemScanned_ = true;
         return true;
@@ -1650,7 +1811,12 @@ private:
             return false;
         }
         if (state->seen_nodes.contains(paddr)) {
-            return true;
+            // The fs-tree is a strict tree; a paddr reached twice is a cycle (corruption or a
+            // hostile image). Silently returning true would yield a truncated-but-"successful"
+            // scan, so fail closed.
+            result->blockers.append(
+                QStringLiteral("APFS file-system tree contains a cycle at block %1").arg(paddr));
+            return false;
         }
         if (++state->nodes_visited > kMaxFsTreeNodes) {
             result->blockers.append(QStringLiteral("APFS file-system tree node limit exceeded"));
@@ -1661,7 +1827,13 @@ private:
         if (!readDecryptedNode(paddr, encrypted, &node, result)) {
             return false;
         }
-        const auto entries = btreeEntries(node, state->info);
+        bool wellFormed = true;
+        const auto entries = btreeEntries(node, state->info, &wellFormed);
+        if (!wellFormed) {
+            result->blockers.append(
+                QStringLiteral("APFS file-system tree node %1 is structurally invalid").arg(paddr));
+            return false;
+        }
         const uint16_t level = le16(node, kApfsBtreeNodeLevelOffset);
         return level == 0 ? processFileSystemLeaf(node, entries, state, result)
                           : visitFileSystemChildren(node, entries, depth, state, result);
@@ -1688,7 +1860,12 @@ private:
                                                PartitionApfsFileReadResult* result) {
         for (const auto& entry : entries) {
             if (entry.value_length < kApfsBtreeChildPointerBytes) {
-                continue;
+                // Every entry in an index node maps a key to an 8-byte child OID. A value too
+                // small to hold that pointer is a malformed node; skipping it would drop a whole
+                // subtree from an otherwise "successful" scan, so fail closed.
+                result->blockers.append(QStringLiteral(
+                    "APFS index node has a child record too small to hold a node pointer"));
+                return false;
             }
             if (!visitMappedFileSystemChild(node, entry, depth, state, result)) {
                 return false;
@@ -1770,27 +1947,31 @@ private:
         return *key;
     }
 
-    // Capture an embedded com.apple.decmpfs attribute so a compressed file's
-    // logical content can be reconstructed from the attribute instead of the
-    // (absent) data stream. Resource-fork compression (dstream-backed) is a
-    // documented read follow-on; this handles the inline-xattr case.
-    // Capture a data-stream (resource-fork) xattr: record the com.apple.ResourceFork's owning
-    // object id (the le64 at the start of its j_xattr_dstream) so the compressed-file reader can
-    // assemble the cmpf blob from that id's extents. Other data-stream xattrs are ignored.
-    void captureResourceForkXattr(const QByteArray& node,
-                                  const BtreeEntryView& entry,
-                                  uint64_t objectId,
-                                  const QString& name,
-                                  uint16_t flags) {
-        constexpr qsizetype kXattrObjIdBytes = 8;  // le64 xattr_obj_id at j_xattr_dstream[0]
+    // Capture a data-stream xattr the compressed-file read path needs: for
+    // com.apple.ResourceFork, the owning object id (the le64 at the start of its
+    // j_xattr_dstream) so the cmpf blob can be assembled from that id's extents; for a
+    // DSTREAM-backed com.apple.decmpfs (the kernel writes one when the inline payload
+    // outgrows the embed limit), the owning object id plus the stream's byte length so the
+    // attribute value itself can be assembled at read time. Other stream xattrs are ignored.
+    void captureStreamXattr(const QByteArray& node,
+                            const BtreeEntryView& entry,
+                            uint64_t objectId,
+                            const QString& name,
+                            uint16_t flags) {
+        constexpr qsizetype kXattrDstreamMinBytes = 16;  // le64 xattr_obj_id + le64 dstream.size
         if ((flags & kApfsXattrDataStream) == 0 ||
-            name != QLatin1StringView(kApfsXattrNameResourceFork) ||
-            entry.value_offset + kApfsXattrValueXdataOffset + kXattrObjIdBytes >
+            entry.value_offset + kApfsXattrValueXdataOffset + kXattrDstreamMinBytes >
                 entry.value_offset + entry.value_length) {
             return;
         }
-        resourceForkObjIdByInode_.insert(
-            objectId, le64(node, entry.value_offset + kApfsXattrValueXdataOffset));
+        const uint64_t streamObjId = le64(node, entry.value_offset + kApfsXattrValueXdataOffset);
+        if (name == QLatin1StringView(kApfsXattrNameResourceFork)) {
+            resourceForkObjIdByInode_.insert(objectId, streamObjId);
+        } else if (name == QLatin1StringView(kApfsXattrNameCompressed)) {
+            const uint64_t streamBytes = le64(node,
+                                              entry.value_offset + kApfsXattrValueXdataOffset + 8);
+            decmpfsStreamByInode_.insert(objectId, {streamObjId, streamBytes});
+        }
     }
 
     void parseXattrRecord(const QByteArray& node, const BtreeEntryView& entry, uint64_t objectId) {
@@ -1811,7 +1992,7 @@ private:
         const uint16_t flags = le16(node, entry.value_offset + kApfsXattrValueFlagsOffset);
         const uint16_t xdataLen = le16(node, entry.value_offset + kApfsXattrValueXdataLenOffset);
         if ((flags & kApfsXattrDataEmbedded) == 0) {
-            captureResourceForkXattr(node, entry, objectId, name, flags);
+            captureStreamXattr(node, entry, objectId, name, flags);
             return;
         }
         if (entry.value_offset + kApfsXattrValueXdataOffset + xdataLen >
@@ -1841,14 +2022,23 @@ private:
                          kApfsDrecNameLengthMask;
         }
         if (nameLength == 0 || nameOffset + nameLength > entry.key_offset + entry.key_length) {
+            // Legacy (unhashed) j_drec key fallback: the 2-byte name_len must itself lie
+            // inside the key, and the name it declares must not spill past the key into a
+            // neighboring record (a malformed length would silently read garbage as a name).
+            if (entry.key_length < kApfsDrecLegacyNameOffset) {
+                return;
+            }
             nameOffset = entry.key_offset + kApfsDrecLegacyNameOffset;
             nameLength = le16(node, entry.key_offset + kApfsDrecNameLengthOffset);
+            if (nameOffset + nameLength > entry.key_offset + entry.key_length) {
+                return;
+            }
         }
         if (nameLength <= 0 || nameOffset >= node.size()) {
             return;
         }
         const qsizetype payloadLength = std::max<qsizetype>(0, nameLength - 1);
-        QString name = QString::fromUtf8(
+        const QString name = QString::fromUtf8(
             node.mid(nameOffset, std::min(payloadLength, node.size() - nameOffset)));
         if (name.isEmpty()) {
             return;
@@ -1879,13 +2069,26 @@ private:
         record.owner_id = le32(node, entry.value_offset + kApfsInodeOwnerOffset);
         record.group_id = le32(node, entry.value_offset + kApfsInodeGroupOffset);
         record.mode = le16(node, entry.value_offset + kApfsInodeModeOffset);
+        record.owner = le32(node, entry.value_offset + kApfsInodeOwnerOffset);
+        record.group = le32(node, entry.value_offset + kApfsInodeGroupOffset);
+        record.bsd_flags = le32(node, entry.value_offset + kApfsInodeBsdFlagsOffset);
+        record.create_time = le64(node, entry.value_offset + kApfsInodeCreateTimeOffset);
+        record.mod_time = le64(node, entry.value_offset + kApfsInodeModTimeOffset);
+        record.change_time = le64(node, entry.value_offset + kApfsInodeChangeTimeOffset);
+        record.access_time = le64(node, entry.value_offset + kApfsInodeAccessTimeOffset);
         record.size = inodeDstreamSize(node, entry);
-        record.sparse = (le64(node, entry.value_offset + kApfsInodeInternalFlagsOffset) &
-                         kApfsInodeFlagSparse) != 0;
+        const uint64_t internalFlags = le64(node,
+                                            entry.value_offset + kApfsInodeInternalFlagsOffset);
+        record.sparse = (internalFlags & kApfsInodeFlagSparse) != 0;
+        if ((internalFlags & kApfsInodeHasUncompressedSize) != 0 &&
+            entry.value_length >= kApfsInodeUncompressedSizeOffset + 8) {
+            record.uncompressed_size = le64(node,
+                                            entry.value_offset + kApfsInodeUncompressedSizeOffset);
+        }
         inodeById_.insert(record.object_id, record);
     }
 
-    uint64_t inodeDstreamSize(const QByteArray& node, const BtreeEntryView& entry) const {
+    static uint64_t inodeDstreamSize(const QByteArray& node, const BtreeEntryView& entry) {
         const qsizetype blobOffset = entry.value_offset + kApfsInodeXfieldsOffset;
         if (blobOffset + kApfsXfieldHeaderBytes > entry.value_offset + entry.value_length) {
             return 0;
@@ -1901,10 +2104,10 @@ private:
         // 1-2 xfields but shifted the data for a 3-xfield sparse inode.)
         const qsizetype metadataRelative = kApfsInodeXfieldsOffset + kApfsXfieldHeaderBytes;
         qsizetype dataRelative = metadataRelative +
-                                 static_cast<qsizetype>(count) * kApfsXfieldTocEntryBytes;
+                                 (static_cast<qsizetype>(count) * kApfsXfieldTocEntryBytes);
         for (uint16_t index = 0; index < count; ++index) {
-            const qsizetype fieldRelative = metadataRelative + static_cast<qsizetype>(index) *
-                                                                   kApfsXfieldTocEntryBytes;
+            const qsizetype fieldRelative =
+                metadataRelative + (static_cast<qsizetype>(index) * kApfsXfieldTocEntryBytes);
             if (fieldRelative + kApfsXfieldTocEntryBytes > entry.value_length) {
                 return 0;
             }
@@ -1957,13 +2160,23 @@ private:
         return records;
     }
 
+    // Match a path component against a directory record name using the VOLUME's case
+    // sensitivity: a case-insensitive compare on a case-SENSITIVE volume returns the first
+    // case-variant sibling in b-tree order (the wrong object).
+    [[nodiscard]] bool componentMatchesName(const QString& recordName,
+                                            const QString& component) const {
+        return recordName.compare(component,
+                                  volumeCaseInsensitive_ ? Qt::CaseInsensitive
+                                                         : Qt::CaseSensitive) == 0;
+    }
+
     [[nodiscard]] std::optional<uint64_t> resolveDirectory(
         const QString& path, PartitionApfsFileReadResult* result) const {
         uint64_t current = kApfsRootDirectoryId;
         for (const auto& part : pathParts(path)) {
             const auto records = directoryRecordsFor(current);
-            auto match = std::find_if(records.cbegin(), records.cend(), [&](const auto& record) {
-                return record.name.compare(part, Qt::CaseInsensitive) == 0;
+            auto match = std::ranges::find_if(records, [&](const auto& record) {
+                return componentMatchesName(record.name, part);
             });
             if (match == records.cend()) {
                 result->blockers.append(
@@ -1990,8 +2203,8 @@ private:
         uint64_t parent = kApfsRootDirectoryId;
         for (int index = 0; index < parts.size() - 1; ++index) {
             const auto records = directoryRecordsFor(parent);
-            auto match = std::find_if(records.cbegin(), records.cend(), [&](const auto& record) {
-                return record.name.compare(parts.at(index), Qt::CaseInsensitive) == 0;
+            auto match = std::ranges::find_if(records, [&](const auto& record) {
+                return componentMatchesName(record.name, parts.at(index));
             });
             if (match == records.cend() || match->directory_type != kApfsDirTypeDirectory) {
                 result->blockers.append(
@@ -2001,14 +2214,45 @@ private:
             parent = match->file_id;
         }
         const auto records = directoryRecordsFor(parent);
-        auto match = std::find_if(records.cbegin(), records.cend(), [&](const auto& record) {
-            return record.name.compare(parts.constLast(), Qt::CaseInsensitive) == 0;
+        auto match = std::ranges::find_if(records, [&](const auto& record) {
+            return componentMatchesName(record.name, parts.constLast());
         });
         if (match == records.cend()) {
             result->blockers.append(QStringLiteral("APFS file path not found: %1").arg(path));
             return std::nullopt;
         }
         return *match;
+    }
+
+    // Fill an entry's size + storage flags from the inode and any decmpfs attribute.
+    // A compressed file has no data stream (inode size 0); its logical size comes from
+    // the decmpfs header, or from the inode's uncompressed-size field for a DSTREAM-backed
+    // decmpfs. Sparse is read from the inode's INODE_IS_SPARSE flag.
+    void resolveEntryStorage(const DirectoryRecord& record,
+                             QHash<uint64_t, InodeRecord>::const_iterator inode,
+                             PartitionApfsFileEntry* entry) const {
+        entry->size_bytes = inode == inodeById_.cend() ? 0 : inode->size;
+        const auto decmpfs = decmpfsByInode_.constFind(record.file_id);
+        if (decmpfs != decmpfsByInode_.cend()) {
+            entry->compressed = true;
+            const auto header = apfsParseDecmpfsHeader(*decmpfs);
+            if (header.has_value()) {
+                entry->size_bytes = header->uncompressed_size;
+            }
+        } else if (decmpfsStreamByInode_.contains(record.file_id)) {
+            // A DSTREAM-backed decmpfs (attribute too large to embed) marks the
+            // file compressed too; its logical size is the inode's
+            // uncompressed-size field.
+            entry->compressed = true;
+            if (inode != inodeById_.cend()) {
+                entry->size_bytes = inode->uncompressed_size;
+            }
+        } else if (entry->size_bytes == 0 && inode != inodeById_.cend()) {
+            entry->size_bytes = inode->uncompressed_size;
+        }
+        if (inode != inodeById_.cend()) {
+            entry->sparse = inode->sparse;
+        }
     }
 
     [[nodiscard]] PartitionApfsFileEntry entryFromRecord(const DirectoryRecord& record,
@@ -2019,7 +2263,9 @@ private:
         entry.name = record.name;
         entry.path = childPath(parentPath, record.name);
         entry.object_id = record.file_id;
-        entry.size_bytes = inode == inodeById_.cend() ? 0 : inode->size;
+        entry.hard_link_count = std::max<uint32_t>(
+            1, hardLinkCountByInode_.value(record.file_id, 1));
+        resolveEntryStorage(record, inode, &entry);
         if (inode != inodeById_.cend()) {
             entry.created_time_ns = inode->created_time_ns;
             entry.modified_time_ns = inode->modified_time_ns;
@@ -2031,21 +2277,23 @@ private:
             entry.group_id = inode->group_id;
             entry.inode_mode = inode->mode;
         }
-        // A compressed file has no data stream (inode size 0); report its logical
-        // size from the decmpfs header so listings show the real size.
-        const auto decmpfs = decmpfsByInode_.constFind(record.file_id);
-        if (decmpfs != decmpfsByInode_.cend()) {
-            const auto header = apfsParseDecmpfsHeader(*decmpfs);
-            if (header.has_value()) {
-                entry.size_bytes = header->uncompressed_size;
-            }
-        }
         entry.directory = record.directory_type == kApfsDirTypeDirectory ||
                           (mode & kApfsModeTypeMask) == kApfsModeDirectory;
         entry.regular_file = record.directory_type == kApfsDirTypeRegularFile ||
                              (mode & kApfsModeTypeMask) == kApfsModeRegularFile;
         entry.symlink = record.directory_type == kApfsDirTypeSymlink ||
                         (mode & kApfsModeTypeMask) == kApfsModeSymlink;
+        entry.mode = mode;
+        if (inode != inodeById_.cend()) {
+            entry.uid = inode->owner;
+            entry.gid = inode->group;
+            entry.bsd_flags = inode->bsd_flags;
+            entry.create_time = inode->create_time;
+            entry.mod_time = inode->mod_time;
+            entry.change_time = inode->change_time;
+            entry.access_time = inode->access_time;
+            entry.has_inode_metadata = true;
+        }
         entry.type = entryTypeName(record.directory_type, mode);
         return entry;
     }
@@ -2102,7 +2350,8 @@ private:
             return true;
         }
         const uint64_t fileLogicalBlock =
-            (extent.logical_offset + (absolute - extent.physical_block * blockSize_)) / blockSize_;
+            (extent.logical_offset + (absolute - (extent.physical_block * blockSize_))) /
+            blockSize_;
         return decryptDataBlock(
             perFileKey, extent.crypto_id + fileLogicalBlock, blockIndex, block, result);
     }
@@ -2115,8 +2364,18 @@ private:
         if (!perFileKey.has_value()) {
             return false;
         }
+        // Bound the extent BEFORE the byte-offset multiplication: a malformed paddr near 2^64
+        // wraps `physical_block * blockSize_` and the per-block bounds check below would then
+        // pass for the WRONG block (reading unrelated data as file content).
+        const uint64_t extentBlocks = (extent.length + blockSize_ - 1) / blockSize_;
+        if (blockCount_ != 0 && (extent.physical_block >= blockCount_ ||
+                                 extentBlocks > blockCount_ - extent.physical_block)) {
+            result->blockers.append(
+                QStringLiteral("APFS file extent lies outside the container bounds"));
+            return false;
+        }
         uint64_t remaining = length;
-        uint64_t absolute = extent.physical_block * blockSize_ + extentOffset;
+        uint64_t absolute = (extent.physical_block * blockSize_) + extentOffset;
         while (remaining > 0) {
             const uint64_t blockOffset = absolute % blockSize_;
             QByteArray block;
@@ -2138,16 +2397,21 @@ private:
 
     [[nodiscard]] BtreeInfo btreeInfo(const QByteArray& rootBlock) const {
         const qsizetype offset = static_cast<qsizetype>(blockSize_) - kApfsBtreeInfoBytes;
-        return {le32(rootBlock, offset),
-                le32(rootBlock, offset + kApfsBtreeInfoNodeSizeOffset),
-                le32(rootBlock, offset + kApfsBtreeInfoKeySizeOffset),
-                le32(rootBlock, offset + kApfsBtreeInfoValueSizeOffset),
-                le64(rootBlock, offset + kApfsBtreeInfoKeyCountOffset),
-                le64(rootBlock, offset + kApfsBtreeInfoNodeCountOffset)};
+        return {.flags = le32(rootBlock, offset),
+                .node_size = le32(rootBlock, offset + kApfsBtreeInfoNodeSizeOffset),
+                .key_size = le32(rootBlock, offset + kApfsBtreeInfoKeySizeOffset),
+                .value_size = le32(rootBlock, offset + kApfsBtreeInfoValueSizeOffset),
+                .key_count = le64(rootBlock, offset + kApfsBtreeInfoKeyCountOffset),
+                .node_count = le64(rootBlock, offset + kApfsBtreeInfoNodeCountOffset)};
     }
 
+    // wellFormed is set false when the node's table-of-contents or any entry is out of bounds.
+    // Callers MUST fail closed on that: a malformed node silently yielding fewer/zero entries
+    // would otherwise produce a truncated-but-"successful" scan or object-map lookup.
     [[nodiscard]] QVector<BtreeEntryView> btreeEntries(const QByteArray& node,
-                                                       const BtreeInfo& info) const {
+                                                       const BtreeInfo& info,
+                                                       bool* wellFormed) const {
+        *wellFormed = true;
         QVector<BtreeEntryView> entries;
         const uint16_t flags = le16(node, kApfsBtreeNodeFlagsOffset);
         const uint16_t level = le16(node, kApfsBtreeNodeLevelOffset);
@@ -2164,56 +2428,62 @@ private:
         const qsizetype tocEntryBytes = fixed ? kApfsBtreeFixedTocEntryBytes
                                               : kApfsBtreeVariableTocEntryBytes;
         if (!btreeTableInBounds(node, count, tableStart, keyAreaStart, tocEntryBytes)) {
+            *wellFormed = false;
             return entries;
         }
         entries.reserve(static_cast<int>(std::min<uint32_t>(count, kApfsBtreeMaxEntryCount)));
-        const BtreeEntryContext context{keyAreaStart, valueAreaEnd, level, info};
+        const BtreeEntryContext context{.key_area_start = keyAreaStart,
+                                        .value_area_end = valueAreaEnd,
+                                        .level = level,
+                                        .info = info};
         for (uint32_t index = 0; index < count; ++index) {
-            const qsizetype toc = tableStart + static_cast<qsizetype>(index) * tocEntryBytes;
+            const qsizetype toc = tableStart + (static_cast<qsizetype>(index) * tocEntryBytes);
             const auto entry = fixed ? fixedBtreeEntry(node, toc, context)
                                      : variableBtreeEntry(node, toc, context);
-            if (entry.has_value() && btreeEntryInBounds(node, *entry)) {
-                entries.append(*entry);
+            if (!entry.has_value() || !btreeEntryInBounds(node, *entry)) {
+                *wellFormed = false;
+                return {};
             }
+            entries.append(*entry);
         }
         return entries;
     }
 
-    [[nodiscard]] bool btreeTableInBounds(const QByteArray& node,
-                                          uint32_t count,
-                                          qsizetype tableStart,
-                                          qsizetype keyAreaStart,
-                                          qsizetype tocEntryBytes) const {
+    [[nodiscard]] static bool btreeTableInBounds(const QByteArray& node,
+                                                 uint32_t count,
+                                                 qsizetype tableStart,
+                                                 qsizetype keyAreaStart,
+                                                 qsizetype tocEntryBytes) {
         return count <= kApfsBtreeMaxEntryCount && tableStart >= kApfsBtreeNodeHeaderBytes &&
-               tableStart + static_cast<qsizetype>(count) * tocEntryBytes <= node.size() &&
+               tableStart + (static_cast<qsizetype>(count) * tocEntryBytes) <= node.size() &&
                keyAreaStart <= node.size();
     }
 
-    [[nodiscard]] std::optional<BtreeEntryView> fixedBtreeEntry(
-        const QByteArray& node, qsizetype toc, const BtreeEntryContext& context) const {
+    [[nodiscard]] static std::optional<BtreeEntryView> fixedBtreeEntry(
+        const QByteArray& node, qsizetype toc, const BtreeEntryContext& context) {
         const uint16_t keyOffset = le16(node, toc);
         const uint16_t valueOffset = le16(node, toc + kApfsBtreeFixedTocValueOffset);
-        return BtreeEntryView{context.key_area_start + keyOffset,
-                              context.info.key_size,
-                              context.value_area_end - valueOffset,
-                              context.level > 0 ? kApfsBtreeChildPointerBytes
-                                                : context.info.value_size};
+        return BtreeEntryView{.key_offset = context.key_area_start + keyOffset,
+                              .key_length = context.info.key_size,
+                              .value_offset = context.value_area_end - valueOffset,
+                              .value_length = context.level > 0 ? kApfsBtreeChildPointerBytes
+                                                                : context.info.value_size};
     }
 
-    [[nodiscard]] std::optional<BtreeEntryView> variableBtreeEntry(
-        const QByteArray& node, qsizetype toc, const BtreeEntryContext& context) const {
+    [[nodiscard]] static std::optional<BtreeEntryView> variableBtreeEntry(
+        const QByteArray& node, qsizetype toc, const BtreeEntryContext& context) {
         const uint16_t keyOffset = le16(node, toc);
         const uint16_t keyLength = le16(node, toc + kApfsBtreeVariableTocKeyLengthOffset);
         const uint16_t valueOffset = le16(node, toc + kApfsBtreeVariableTocValueOffset);
         const uint16_t valueLength = le16(node, toc + kApfsBtreeVariableTocValueLengthOffset);
-        return BtreeEntryView{context.key_area_start + keyOffset,
-                              keyLength,
-                              context.value_area_end - valueOffset,
-                              valueLength};
+        return BtreeEntryView{.key_offset = context.key_area_start + keyOffset,
+                              .key_length = keyLength,
+                              .value_offset = context.value_area_end - valueOffset,
+                              .value_length = valueLength};
     }
 
-    [[nodiscard]] bool btreeEntryInBounds(const QByteArray& node,
-                                          const BtreeEntryView& entry) const {
+    [[nodiscard]] static bool btreeEntryInBounds(const QByteArray& node,
+                                                 const BtreeEntryView& entry) {
         return entry.key_length > 0 && entry.value_length >= 0 && entry.key_offset >= 0 &&
                entry.value_offset >= 0 && entry.key_offset + entry.key_length <= node.size() &&
                entry.value_offset + entry.value_length <= node.size();
@@ -2224,10 +2494,24 @@ private:
                                  PartitionApfsFileReadResult* result,
                                  bool appendBlocker = true,
                                  bool validateObjectChecksum = true) {
-        if (block >= blockCount_ && blockCount_ != 0) {
+        // No zero-count escape: blockCount_ is proven non-zero before any read reaches here
+        // (readInitialContainerBlock refuses a container that declares none), so an unbounded
+        // read cannot be reached by making the bound itself unreadable.
+        if (block >= blockCount_) {
             if (appendBlocker) {
                 result->blockers.append(
                     QStringLiteral("APFS block %1 is outside container bounds").arg(block));
+            }
+            return false;
+        }
+        // Guard block * blockSize_ against uint64 wrap: a corrupt superblock with a
+        // large blockSize_ and a block index that passes the bound check above can
+        // still overflow into a small, in-device byte offset (reading the wrong data).
+        if (blockSize_ != 0 && block > std::numeric_limits<uint64_t>::max() / blockSize_) {
+            if (appendBlocker) {
+                result->blockers.append(
+                    QStringLiteral("APFS block %1 offset overflows the device address space")
+                        .arg(block));
             }
             return false;
         }
@@ -2285,7 +2569,7 @@ private:
                                  QByteArray* bytes,
                                  PartitionApfsFileReadResult* result,
                                  bool appendBlocker = true) {
-        if (!bytes) {
+        if (bytes == nullptr) {
             return false;
         }
         if (length > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
@@ -2325,6 +2609,9 @@ private:
     uint64_t rootTreeAddress_{0};
     bool rootTreeEncrypted_{false};
     bool volumeOneKey_{false};  // ONEKEY whole-volume FileVault: data tweak = block addr
+    // APFS_INCOMPAT_CASE_INSENSITIVE: default volumes are case-insensitive (the common case);
+    // a case-SENSITIVE volume needs exact-case path lookups. Set from the volume superblock.
+    bool volumeCaseInsensitive_{true};
     QByteArray containerUuid_;
     uint64_t keylockerPaddr_{0};
     QByteArray vek_;  // 32-byte AES-XTS volume key (empty = locked / unencrypted)
@@ -2336,6 +2623,7 @@ private:
     ObjectMapState volumeOmap_;
     bool fileSystemScanned_{false};
     QVector<DirectoryRecord> directoryRecords_;
+    QHash<uint64_t, uint32_t> hardLinkCountByInode_;
     QHash<uint64_t, InodeRecord> inodeById_;
     QMultiHash<uint64_t, FileExtentRecord> extentsByOwner_;
     // Embedded com.apple.decmpfs attribute value (16-byte header + inline payload)
@@ -2344,6 +2632,9 @@ private:
     // A5 follow-on: for a resource-fork-compressed file, the object id owning its
     // com.apple.ResourceFork data stream (the cmpf blob's extents), keyed by inode id.
     QHash<uint64_t, uint64_t> resourceForkObjIdByInode_;
+    // DSTREAM-backed com.apple.decmpfs (the attribute value lives in its own data
+    // stream): {owning object id, attribute byte length} keyed by inode id.
+    QHash<uint64_t, QPair<uint64_t, uint64_t>> decmpfsStreamByInode_;
     // A7 (A-h): every embedded named attribute (ACL, Finder info, user xattrs)
     // keyed by inode object id, surfaced on a file read result.
     QMultiHash<uint64_t, QPair<QString, QByteArray>> xattrsByInode_;
@@ -2353,6 +2644,7 @@ private:
 struct ApfsExportFrame {
     QString source_path;
     QString output_directory;
+    uint64_t object_id{0};  // inode object id of this directory; 0 = the export root
 };
 
 void appendApfsExportRequestBlockers(const QString& imagePath,
@@ -2375,14 +2667,16 @@ void appendApfsExportRequestBlockers(const QString& imagePath,
 
 class ApfsDirectoryExporter {
 public:
-    ApfsDirectoryExporter(QIODevice* image, const PartitionApfsDirectoryExportOptions& options)
-        : reader_(image), options_(options) {}
+    ApfsDirectoryExporter(QIODevice* image,
+                          const PartitionApfsDirectoryExportOptions& options,
+                          const QString& canonicalRoot)
+        : reader_(image), options_(options), canonical_root_(canonicalRoot) {}
 
     PartitionApfsDirectoryExportResult run(const QString& sourcePath,
                                            const QString& outputDirectory) {
-        pending_.append(
-            {sourcePath.trimmed().isEmpty() ? QStringLiteral("/") : sourcePath.trimmed(),
-             outputDirectory});
+        pending_.append({.source_path = sourcePath.trimmed().isEmpty() ? QStringLiteral("/")
+                                                                       : sourcePath.trimmed(),
+                         .output_directory = outputDirectory});
         while (!pending_.isEmpty()) {
             if (!processFrame(pending_.takeLast())) {
                 break;
@@ -2394,11 +2688,14 @@ public:
 
 private:
     [[nodiscard]] bool processFrame(const ApfsExportFrame& frame) {
-        const QString visitKey = cleanPath(frame.source_path).toLower();
-        if (visited_directories_.contains(visitKey)) {
+        // Dedupe by inode object id, not a folded path: on a case-SENSITIVE APFS volume /Foo
+        // and /foo are distinct directories a lowercased key would collide (dropping a subtree),
+        // and a hard-linked directory reaches one inode by several paths. The object id is
+        // unambiguous under either case-sensitivity.
+        if (visited_directories_.contains(frame.object_id)) {
             return true;
         }
-        visited_directories_.insert(visitKey);
+        visited_directories_.insert(frame.object_id);
         const auto listing = reader_.listDirectory(
             frame.source_path, std::max(1, options_.max_entries - result_.entries_scanned));
         result_.warnings.append(listing.warnings);
@@ -2447,7 +2744,11 @@ private:
 
     [[nodiscard]] bool consumeEntrySlot() {
         if (result_.entries_scanned >= options_.max_entries) {
-            result_.warnings.append(QStringLiteral("APFS export entry cap reached"));
+            // The cap halted the walk with the tree unfinished; reporting ok=true would claim a
+            // complete export. Record a blocker (symmetric with the byte-cap path and the ext
+            // exporter) so ok resolves false on a truncated export.
+            result_.blockers.append(
+                QStringLiteral("APFS export entry cap reached before the tree was fully exported"));
             return false;
         }
         ++result_.entries_scanned;
@@ -2461,8 +2762,16 @@ private:
                 QStringLiteral("Unable to create exported directory: %1").arg(targetPath));
             return false;
         }
+        if (!pathWithinRoot(canonical_root_, targetPath)) {
+            result_.blockers.append(
+                QStringLiteral("Exported directory escapes the export root (reparse point): %1")
+                    .arg(targetPath));
+            return false;
+        }
         ++result_.directories_exported;
-        pending_.append({entry.path, targetPath});
+        pending_.append({.source_path = entry.path,
+                         .output_directory = targetPath,
+                         .object_id = entry.object_id});
         return true;
     }
 
@@ -2482,7 +2791,19 @@ private:
             result_.blockers.append(file.blockers);
             return false;
         }
-        if (!writeExportFile(targetPath, file.data, &result_.blockers, entry.path)) {
+        // ok means the read succeeded, NOT that it returned the whole file. Writing a truncated
+        // read to the export target produces a file that is complete-looking, silently short, and
+        // indistinguishable afterwards from the real thing -- the caller exported it to keep.
+        // fitsByteCaps refuses anything over the cap before the read, so reaching this is a
+        // truncation the reader found on its own (an over-ceiling decmpfs size, a short stream).
+        if (file.truncated) {
+            result_.blockers.append(
+                QStringLiteral("APFS file was truncated by the read ceiling, so it was not "
+                               "exported: %1")
+                    .arg(entry.path));
+            return false;
+        }
+        if (!writeFile(targetPath, file.data, &result_.blockers, entry.path, canonical_root_)) {
             return false;
         }
         ++result_.files_exported;
@@ -2507,7 +2828,8 @@ private:
     PartitionApfsDirectoryExportOptions options_;
     PartitionApfsDirectoryExportResult result_;
     QVector<ApfsExportFrame> pending_;
-    QSet<QString> visited_directories_;
+    QSet<uint64_t> visited_directories_;
+    const QString canonical_root_;
 };
 
 PartitionApfsFileReadResult withOpenedApfsImage(
@@ -2642,13 +2964,24 @@ PartitionApfsDirectoryExportResult PartitionApfsFileSystemReader::exportDirector
         return exportResult;
     }
 
-    QDir root(output_directory);
+    const QDir root(output_directory);
     if (!root.mkpath(QStringLiteral("."))) {
         exportResult.blockers.append(QStringLiteral("Unable to create output directory"));
         return exportResult;
     }
+    const QString canonicalRoot = QFileInfo(root.absolutePath()).canonicalFilePath();
+    if (canonicalRoot.isEmpty()) {
+        exportResult.blockers.append(QStringLiteral("Unable to resolve export root path"));
+        return exportResult;
+    }
 
-    return ApfsDirectoryExporter(image.get(), options).run(source_path, root.absolutePath());
+    return ApfsDirectoryExporter(image.get(), options, canonicalRoot)
+        .run(source_path, root.absolutePath());
+}
+
+bool PartitionApfsFileSystemReader::exportPathWithinRootForTesting(const QString& canonical_root,
+                                                                   const QString& child) {
+    return pathWithinRoot(canonical_root, child);
 }
 
 }  // namespace sak

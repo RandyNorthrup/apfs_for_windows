@@ -7,12 +7,14 @@ param(
     [string]$QtBin = "C:\Qt\6.10.3\msvc2022_64\bin",
     [string]$ServiceName = "ApfsForWindowsMountService",
     [string]$StartMenuDir = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\APFS for Windows",
-    [string]$AppVersion = "0.1.0",
+    [string]$AppVersion = "",
     [switch]$SkipWinFspCheck,
     [switch]$ValidatePayloadOnly
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "lib\project-version.ps1")
+$AppVersion = Get-ApfsProjectVersion -ExplicitVersion $AppVersion -CallerRoot $PSScriptRoot
 
 if ([string]::IsNullOrWhiteSpace($BuildDir)) {
     $scriptLocalService = Join-Path $PSScriptRoot "apfs_mount_service.exe"

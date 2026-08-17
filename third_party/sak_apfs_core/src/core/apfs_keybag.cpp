@@ -1,5 +1,3 @@
-// Copyright (c) 2025 Randy Northrup. All rights reserved.
-
 /// @file apfs_keybag.cpp
 /// @brief APFS FileVault keybag + DER key-blob construction implementation.
 
@@ -9,7 +7,9 @@
 
 #include <QtEndian>
 
+#include <cstdint>
 #include <cstring>
+#include <limits>
 
 namespace sak::apfs_keybag {
 
@@ -40,7 +40,7 @@ struct DerField {
 /// @brief Decode a big-endian DER INTEGER value into a uint64.
 uint64_t derBigEndianU64(const QByteArray& value) {
     uint64_t v = 0;
-    for (char c : value) {
+    for (const char c : value) {
         v = (v << 8) | static_cast<uint8_t>(c);
     }
     return v;
@@ -59,7 +59,13 @@ void assignKeyBlobField(KeyBlobParams* out, uint8_t tag, const QByteArray& value
         out->wrappedKey = value;
         break;
     case 0x84:
-        out->iterations = derBigEndianU64(value);
+        // A DER INTEGER wider than 8 bytes cannot be a real PBKDF2 iteration count and would
+        // silently overflow the uint64 accumulator in derBigEndianU64. Treat an over-wide
+        // value as out-of-range (UINT64_MAX) so the downstream iteration cap fails the unlock
+        // closed instead of deriving against a wrapped, attacker-chosen count.
+        out->iterations = value.size() <= static_cast<qsizetype>(sizeof(uint64_t))
+                              ? derBigEndianU64(value)
+                              : std::numeric_limits<uint64_t>::max();
         break;
     case 0x85:
         out->salt = value;
@@ -72,21 +78,38 @@ void assignKeyBlobField(KeyBlobParams* out, uint8_t tag, const QByteArray& value
 /// @brief Parse a flat sequence of DER TLV fields (short + long-form lengths).
 QList<DerField> derParse(const QByteArray& buf) {
     QList<DerField> out;
-    int i = 0;
+    qsizetype i = 0;
     while (i + 2 <= buf.size()) {
         const uint8_t tag = static_cast<uint8_t>(buf.at(i++));
-        int len = static_cast<uint8_t>(buf.at(i++));
+        qint64 len = static_cast<uint8_t>(buf.at(i++));
         if ((len & 0x80) != 0) {
-            int n = len & 0x7f;
+            const int n = static_cast<int>(len & 0x7f);
             len = 0;
-            for (int k = 0; k < n && i < buf.size(); ++k) {
-                len = (len << 8) | static_cast<uint8_t>(buf.at(i++));
+            // Reject the indefinite form (n==0), a length that cannot fit qint64 (n>8), or one
+            // whose length bytes run off the buffer -- accumulating them unchecked overflowed
+            // the old signed int to a NEGATIVE len that slipped past the i+len bound and drove
+            // buf.at(i) to a negative (out-of-bounds) index.
+            if (n == 0 || n > 8 || i + n > buf.size()) {
+                break;
             }
+            // Accumulate UNSIGNED. An 8-byte length with bit 63 set overflows a signed qint64
+            // shift, which is undefined behaviour before the len<0 test below ever sees it --
+            // the check was relying on the wrap it is not entitled to assume. Bounding the
+            // unsigned value against the bytes actually remaining also removes the i+len
+            // overflow the later test would otherwise have to survive.
+            quint64 accumulated = 0;
+            for (int k = 0; k < n; ++k) {
+                accumulated = (accumulated << 8) | static_cast<uint8_t>(buf.at(i++));
+            }
+            if (accumulated > static_cast<quint64>(buf.size() - i)) {
+                break;
+            }
+            len = static_cast<qint64>(accumulated);
         }
-        if (i + len > buf.size()) {
+        if (len < 0 || i + len > buf.size()) {
             break;
         }
-        out.append({tag, buf.mid(i, len)});
+        out.append({.tag = tag, .value = buf.mid(i, len)});
         i += len;
     }
     return out;
@@ -134,13 +157,18 @@ QList<KeybagEntry> parseKeybagBlock(const QByteArray& block, bool align16) {
         if (p + 0x18 + klen > block.size()) {
             break;
         }
-        out.append({block.mid(p, 16), getLe16(block, p + 0x10), block.mid(p + 0x18, klen)});
+        out.append({.uuid = block.mid(p, 16),
+                    .tag = getLe16(block, p + 0x10),
+                    .keydata = block.mid(p + 0x18, klen)});
         p += align16 ? ((0x18 + klen + 15) & ~15) : (0x18 + klen);
     }
     return out;
 }
 
 bool parseKeyBlob(const QByteArray& blob, KeyBlobParams* out) {
+    if (out == nullptr) {
+        return false;
+    }
     const QList<DerField> top = derParse(blob);
     if (top.isEmpty() || top.first().tag != 0x30) {
         return false;

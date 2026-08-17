@@ -417,6 +417,7 @@ struct ResolvedEntry {
   bool symlink{false};
   uint64_t objectId{1};
   uint64_t sizeBytes{0};
+  uint32_t hardLinks{1};
   uint64_t createdTimeNs{0};
   uint64_t modifiedTimeNs{0};
   uint64_t changedTimeNs{0};
@@ -734,8 +735,12 @@ public:
                            ? fileTimeFromUnixNs(entry.changedTimeNs)
                            : createdTime_;
     info->IndexNumber = entry.objectId == 0 ? 1 : entry.objectId;
-    info->HardLinks = 1;
+    info->HardLinks = std::max<uint32_t>(1, entry.hardLinks);
     info->ReparseTag = entry.symlink ? IO_REPARSE_TAG_SYMLINK : 0;
+    trace(QStringLiteral("FileInfo path=%1 object=%2 links=%3")
+              .arg(entry.path)
+              .arg(info->IndexNumber)
+              .arg(info->HardLinks));
   }
 
   uint32_t serialNumber() const {
@@ -1145,6 +1150,40 @@ public:
     return status;
   }
 
+#if defined(FSP_FILE_SYSTEM_INTERFACE_HAS_CREATE_HARD_LINK)
+  NTSTATUS createHardLink(FileContext *context, const QString &newPath,
+                          bool replaceIfExists,
+                          FSP_FSCTL_FILE_INFO *fileInfo) {
+    if (readOnly_) {
+      return STATUS_MEDIA_WRITE_PROTECTED;
+    }
+    if (!context || context->entry.directory || !context->entry.regularFile ||
+        context->entry.symlink) {
+      return STATUS_NOT_SUPPORTED;
+    }
+    if (replaceIfExists) {
+      return STATUS_NOT_SUPPORTED;
+    }
+    if (context->stagedWriteDirty) {
+      const NTSTATUS flushStatus = flushFile(context, nullptr);
+      if (!NT_SUCCESS(flushStatus)) {
+        return flushStatus;
+      }
+    }
+
+    ResolvedEntry linked;
+    const NTSTATUS status =
+        commitFileHardLink(context->entry.path, newPath, &linked);
+    if (!NT_SUCCESS(status)) {
+      return status;
+    }
+    context->entry.hardLinks = linked.hardLinks;
+    updateOpenContextHardLinks(context->entry.objectId, linked.hardLinks);
+    fillFileInfo(context->entry, fileInfo);
+    return STATUS_SUCCESS;
+  }
+#endif
+
   NTSTATUS flushFile(FileContext *context, FSP_FSCTL_FILE_INFO *info) {
     if (!context) {
       return STATUS_INVALID_PARAMETER;
@@ -1420,6 +1459,7 @@ private:
                                   .symlink = false,
                                   .objectId = kApfsVolumeRootObjectId,
                                   .sizeBytes = 0,
+                                  .hardLinks = 1,
                                   .createdTimeNs = root.inode_created_time_ns,
                                   .modifiedTimeNs = root.inode_modified_time_ns,
                                   .changedTimeNs = root.inode_changed_time_ns,
@@ -1467,6 +1507,7 @@ private:
                                 .symlink = entry.symlink,
                                 .objectId = entry.object_id,
                                 .sizeBytes = entry.size_bytes,
+                                .hardLinks = entry.hard_link_count,
                                 .createdTimeNs = entry.created_time_ns,
                                 .modifiedTimeNs = entry.modified_time_ns,
                                 .changedTimeNs = entry.changed_time_ns,
@@ -2101,6 +2142,86 @@ private:
     }
     return resolvePathNoLock(normalizedNew, updated);
   }
+
+#if defined(FSP_FILE_SYSTEM_INTERFACE_HAS_CREATE_HARD_LINK)
+  NTSTATUS commitFileHardLink(const QString &sourcePath,
+                              const QString &linkPath,
+                              ResolvedEntry *updated) {
+    const QString normalizedSource = normalizeApfsPath(sourcePath);
+    const QString normalizedLink = normalizeApfsPath(linkPath);
+    QString sourceParentPath;
+    QString sourceFileName;
+    QString linkParentPath;
+    QString linkFileName;
+    if (!splitMutableFilePath(normalizedSource, &sourceParentPath,
+                              &sourceFileName) ||
+        !splitMutableFilePath(normalizedLink, &linkParentPath, &linkFileName)) {
+      return STATUS_NOT_SUPPORTED;
+    }
+
+    QMutexLocker locker(&ioMutex_);
+    readerSession_.reset();
+    device_.reset();
+    QString tempPath;
+    sak::PartitionApfsImageCheckpointCommitResult result;
+    if (rawTarget_) {
+      result = sak::PartitionApfsWriter::commitRawFileHardlink(
+          {.target_path = target_,
+           .target_container_bytes = targetContainerBytes_,
+           .source_file_name = sourceFileName,
+           .link_file_name = linkFileName,
+           .source_parent_directory_path = sourceParentPath,
+           .link_parent_directory_path = linkParentPath,
+           .target_mutation_confirmed = allowRawWrites_,
+           .allow_raw_device_target = allowRawWrites_,
+           .options = writerOptions()});
+    } else {
+      tempPath = mutationTempPathNoLock(QStringLiteral("hardlink"));
+      result = sak::PartitionApfsWriter::commitImageOnlyFileHardlink(
+          {.source_image_path = target_,
+           .written_image_path = tempPath,
+           .source_file_name = sourceFileName,
+           .link_file_name = linkFileName,
+           .source_parent_directory_path = sourceParentPath,
+           .link_parent_directory_path = linkParentPath,
+           .options = writerOptions()});
+      if (result.ok) {
+        QString replaceError;
+        if (!replaceTargetWithTempNoLock(tempPath, &replaceError)) {
+          trace(QStringLiteral("hard-link replace failed: %1")
+                    .arg(replaceError));
+          reloadTargetNoLock();
+          return STATUS_ACCESS_DENIED;
+        }
+      } else {
+        QFile::remove(tempPath);
+      }
+    }
+
+    const NTSTATUS mutationStatus =
+        resultStatus(QStringLiteral("file-hardlink"), result);
+    QString reloadError;
+    const NTSTATUS reloadStatus = reloadTargetNoLock(&reloadError);
+    if (!NT_SUCCESS(reloadStatus)) {
+      trace(QStringLiteral("reload after hard link failed: %1")
+                .arg(reloadError));
+      return reloadStatus;
+    }
+    if (!NT_SUCCESS(mutationStatus)) {
+      return mutationStatus;
+    }
+    return resolvePathNoLock(normalizedLink, updated);
+  }
+
+  void updateOpenContextHardLinks(uint64_t objectId, uint32_t hardLinks) {
+    QMutexLocker locker(&contextMutex_);
+    for (const auto &context : activeContexts_) {
+      if (context && context->entry.objectId == objectId) {
+        context->entry.hardLinks = hardLinks;
+      }
+    }
+  }
+#endif
 
   NTSTATUS
   commitInodeMetadata(const QString &path, bool directory,
@@ -2922,6 +3043,21 @@ NTSTATUS FsRename(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext,
                    replaceIfExists != FALSE);
 }
 
+#if defined(FSP_FILE_SYSTEM_INTERFACE_HAS_CREATE_HARD_LINK)
+NTSTATUS FsCreateHardLink(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext,
+                          PWSTR fileName, PWSTR newFileName,
+                          BOOLEAN replaceIfExists,
+                          FSP_FSCTL_FILE_INFO *fileInfo) {
+  auto *context = reinterpret_cast<FileContext *>(fileContext);
+  trace(QStringLiteral("CreateHardLink %1 -> %2 replace=%3")
+            .arg(fromWide(fileName), fromWide(newFileName))
+            .arg(replaceIfExists));
+  return stateOf(fileSystem)
+      ->createHardLink(context, fromWide(newFileName),
+                       replaceIfExists != FALSE, fileInfo);
+}
+#endif
+
 NTSTATUS FsGetSecurity(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext,
                        PSECURITY_DESCRIPTOR descriptor,
                        SIZE_T *descriptorSize) {
@@ -3070,6 +3206,9 @@ FSP_FILE_SYSTEM_INTERFACE *apfsInterface() {
     iface.GetReparsePoint = FsGetReparsePoint;
     iface.SetReparsePoint = FsSetReparsePoint;
     iface.DeleteReparsePoint = FsDeleteReparsePoint;
+#if defined(FSP_FILE_SYSTEM_INTERFACE_HAS_CREATE_HARD_LINK)
+    iface.CreateHardLink = FsCreateHardLink;
+#endif
     initialized = true;
   }
   return &iface;
@@ -3097,7 +3236,10 @@ NTSTATUS runMount(const QString &target, const QString &mountPoint,
   params.MaxComponentLength = 255 * sizeof(WCHAR);
   params.VolumeCreationTime = currentFileTime();
   params.VolumeSerialNumber = state.serialNumber();
-  params.FileInfoTimeout = 1000;
+  // APFS hard-link aliases share inode metadata, but WinFsp caches metadata per
+  // pathname. Disable that cache so link-count changes stay coherent across
+  // every alias after create or delete.
+  params.FileInfoTimeout = 0;
   params.CaseSensitiveSearch = 1;
   params.CasePreservedNames = 1;
   params.UnicodeOnDisk = 1;
@@ -3109,6 +3251,9 @@ NTSTATUS runMount(const QString &target, const QString &mountPoint,
   params.ReadOnlyVolume = readOnly ? 1 : 0;
   params.PostCleanupWhenModifiedOnly = 0;
   params.AlwaysUseDoubleBuffering = 1;
+#if defined(FSP_FILE_SYSTEM_INTERFACE_HAS_CREATE_HARD_LINK)
+  params.HardLinks = readOnly ? 0 : 1;
+#endif
   wcscpy_s(params.FileSystemName, L"APFS");
 
   FSP_FILE_SYSTEM *fileSystem = nullptr;
@@ -3163,6 +3308,12 @@ void printStatus() {
 #if APFS_HAVE_WINFSP
       {QStringLiteral("status"), QStringLiteral("ready")},
       {QStringLiteral("winfsp_sdk"), QStringLiteral("found")},
+#if APFS_WINFSP_NATIVE_HARDLINKS
+      {QStringLiteral("native_hard_links"), true},
+#else
+      {QStringLiteral("native_hard_links"), false},
+#endif
+      {QStringLiteral("production_build"), APFS_PRODUCTION_BUILD != 0},
       {QStringLiteral("winfsp_callbacks"),
        QStringLiteral("read_only_and_guarded_image_rw_apfs")}};
 #else
@@ -3178,7 +3329,7 @@ void printStatus() {
 int main(int argc, char *argv[]) {
   QCoreApplication app(argc, argv);
   QCoreApplication::setApplicationName(QStringLiteral("apfs_winfs_worker"));
-  QCoreApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+  QCoreApplication::setApplicationVersion(QStringLiteral(APFS_PROJECT_VERSION));
 
   QCommandLineParser parser;
   parser.setApplicationDescription(QStringLiteral("WinFsp APFS mount worker."));

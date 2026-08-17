@@ -35,7 +35,7 @@
     "disk_number": 1,
     "partition_number": 1,
     "mount": "V:",
-    "serial": "067D19C65080",
+    "serial": "redacted",
     "physical_size_bytes": 31042043904,
     "apfs_container_bytes": 536870912,
     "normal_user_create_write_hash_rename_delete": true,

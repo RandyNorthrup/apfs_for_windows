@@ -2,14 +2,20 @@
 
 Native Windows Explorer APFS mount utility.
 
+Current classification: **development-certified, not production-ready**. See
+`docs/PRODUCTION_READINESS.md` for closed gates and exact blockers.
+
 Current state:
 
 - Local APFS core fork lives under `third_party/sak_apfs_core`, imported from
-  source commit `2f1d9844fabb3e6e8190f906e5cf4906e5e5f281` and patched only
+  source commit `5587736df4d27e0eb5ca6e9f60f3c69614023b13` and patched only
   inside this repository.
 - Apple LZFSE/LZVN reference code is vendored under `third_party/lzfse` for
   APFS compression paths.
-- WinFsp 2025 runtime/SDK is supported and detected by CMake.
+- Stock WinFsp runtime/SDK is supported for development mounts. Native Windows
+  hard-link transport is pinned to public fork
+  `RandyNorthrup/winfsp-apfs` commit
+  `a95017786229034c5dc62e5f1384bf4303d235e9` through one submodule on `main`.
 - `apfs_probe` can probe APFS images/raw devices, list the root directory, and
   read files by APFS path with SHA-256 output. It also has `--debug-file` for
   APFS inode/xattr/extent diagnostics on one path.
@@ -97,10 +103,14 @@ Current state:
 Build:
 
 ```powershell
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_PREFIX_PATH=C:\Qt\6.10.3\msvc2022_64
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_PREFIX_PATH=C:\Qt\6.10.3\msvc2022_64 -DWinFsp_ROOT="C:\Program Files (x86)\WinFsp"
 cmake --build build --config Release --parallel
 ctest --test-dir build -C Release --output-on-failure
 ```
+
+Production-mode configuration additionally requires a clean checkout of the
+pinned WinFsp fork, native hard-link ABI, `/W4 /WX`, and explicit coherent
+WinFsp header/library/runtime paths. Build metadata is emitted beside binaries.
 
 Developer install, from elevated PowerShell:
 
@@ -171,7 +181,7 @@ Verify installed service and APFS USB mount state:
 .\scripts\verify-installed-app-registration.ps1
 .\scripts\verify-installed-service-mode-policy.ps1 -PreflightOnly
 .\scripts\start-repair-elevated.ps1
-.\scripts\run-apfs-for-windows-certification.ps1 -RunUsbWriteProof
+.\scripts\run-apfs-for-windows-certification.ps1 -UsbExpectedSerial '<serial>' -RunUsbWriteProof
 .\scripts\verify-usb-mounted-file-actions.ps1 -CleanupStaleProofEntries
 .\scripts\verify-apfs-boot-persistence.ps1 -VerifyNow
 .\scripts\verify-service-worker-restart.ps1 -ExpectedSha256 5DE304A213068C0F526D99253D0D4A18A4652E95D010A0E96D43CB5ED758A32B
@@ -182,8 +192,8 @@ Verify installed service and APFS USB mount state:
 .\scripts\verify-service-policy.ps1
 .\scripts\verify-service-target-loss.ps1
 .\scripts\verify-service-device-notifications.ps1
-.\scripts\verify-usb-raw-rw.ps1
-.\scripts\verify-usb-normal-user-rw.ps1 -NoDiagnostics
+.\scripts\verify-usb-raw-rw.ps1 -ExpectedSerial '<serial>'
+.\scripts\verify-usb-normal-user-rw.ps1 -ExpectedSerial '<serial>' -NoDiagnostics
 ```
 
 Apple VM round-trip verification accepts connection data only as runtime
@@ -206,7 +216,7 @@ check first:
 
 ```powershell
 .\scripts\verify-current-apfs-state.ps1 -UsbTarget '\\?\GLOBALROOT\Device\Harddisk1\Partition1'
-.\scripts\verify-usb-normal-user-rw.ps1 -DiskNumber 1 -PartitionNumber 1 -Mount V: -NoDiagnostics
+.\scripts\verify-usb-normal-user-rw.ps1 -DiskNumber 1 -PartitionNumber 1 -ExpectedSerial '<serial>' -Mount V: -NoDiagnostics
 ```
 
 `-NoDiagnostics` uses the same mutation path but skips large trace/log tails in
@@ -220,7 +230,7 @@ empty proof directory without elevation or service policy changes:
 ```powershell
 .\scripts\verify-usb-mounted-file-actions.ps1 -PreflightOnly
 .\scripts\verify-usb-mounted-file-actions.ps1 -CleanupStaleProofEntries
-.\scripts\run-apfs-for-windows-certification.ps1 -RunUsbMountedFileActions
+.\scripts\run-apfs-for-windows-certification.ps1 -UsbExpectedSerial '<serial>' -RunUsbMountedFileActions
 ```
 
 Service policy changes still touch ProgramData; the current machine rejected a
@@ -269,16 +279,18 @@ Build a release ZIP without installing:
 This stages `artifacts\package\APFS-for-Windows-0.1.0`, creates
 `artifacts\package\APFS-for-Windows-0.1.0.zip`, and verifies the required
 binaries, Qt runtime files, install/repair/uninstall scripts, README, license
-notices, and APFS core provenance note are present. Package verification also
-runs install and repair payload-only validation from the staged directory.
+notices, APFS/WinFsp provenance, build metadata, payload manifest, and SHA-256
+list. Package verification also rehashes every manifest entry and runs install
+and repair payload-only validation from the staged directory.
 
-Windows 11 VM lifecycle certification now covers clean package install,
+Historical Windows 11 VM lifecycle certification covers clean package install,
 Automatic service start, saved `R:` mount restoration across a VM reboot,
 exact file hash and read-only enforcement, one interactive tray process with
 `Open` and `Exit`, and packaged uninstall with no product residue. WinFsp and the
 APFS fixture remain after uninstall. Sanitized proof is tracked at
-`docs\evidence\windows-vm-install-lifecycle-2026-08-17.json`. The host PC was not
-rebooted.
+`docs\evidence\windows-vm-install-lifecycle-2026-08-17.json`; it applies only to
+package hash `D2F1D99D...E49B`, not the current build. No VM action is part of
+repository or local production-readiness checks.
 
 License notices:
 
@@ -302,12 +314,25 @@ Copied APFS core source boundary:
 Do not edit `C:\Users\Randy\Coding\S.A.K.-Utility` for this project. Copy or
 import code into this repository first, then modify the local copy only.
 `scripts\verify-sak-source-boundary.ps1` verifies the source checkout status,
-the recorded source commit, expected copied APFS files, and declared local fork
-deltas under `third_party\sak_apfs_core`.
+recorded commit/blob/file hashes, exact copied APFS file set, and declared local
+fork deltas under `third_party\sak_apfs_core`. Unrelated source-checkout work is
+reported but does not invalidate unchanged imported APFS paths.
+
+Repository and production gates:
+
+```powershell
+.\scripts\verify-repository-hygiene.ps1
+.\scripts\verify-winfsp-fork-boundary.ps1
+.\scripts\verify-production-readiness.ps1
+```
+
+Strict production readiness intentionally fails while signing, exact-package
+lifecycle, native hard-link runtime, and physical fault-recovery evidence remain
+open.
 
 Verified USB evidence:
 
-- Disk 2, Seagate Expansion Desk, serial `NAAA3QVK`, USB, non-boot/non-system,
+- Disk 2, Seagate Expansion Desk, serial redacted, USB, non-boot/non-system,
   stayed Windows-offline/RAW for raw-device proof.
 - Service-launched `Z:` read-only APFS mount lists `clone.bin`, `link.bin`,
   `src.bin` in normal shell.
@@ -316,14 +341,14 @@ Verified USB evidence:
 - All three files read as `A7-RAW-CERT-SHARED-PAYLOAD-2026` with SHA-256
   `5DE304A213068C0F526D99253D0D4A18A4652E95D010A0E96D43CB5ED758A32B`.
 - Normal write attempt to `Z:\normal-write-deny-test.txt` is denied.
-- In the July media layout, Disk 1, `USB DISK 3.0`, serial `067D19C65080`, GPT APFS partition 2,
+- In the July media layout, Disk 1, `USB DISK 3.0`, serial redacted, GPT APFS partition 2,
   30,832,287,744-byte APFS partition, is pinned for destructive USB RW proof.
   Earlier proof artifacts are historical; current USB RW verifiers use one root
   proof directory plus one direct child file, then restore read-only config
   without rebooting or restarting the service.
 - Historical serial-pinned normal-user USB RW proof: on
   `2026-07-10T06:51:00Z`, `scripts\verify-usb-normal-user-rw.ps1 -NoDiagnostics`
-  passed against Disk 1 partition 2 at `Y:` as `MINI-DT\Randy` without reboot:
+  passed against Disk 1 partition 2 at `Y:` as a normal user without reboot:
   proof directory create passed, child file write hash matched
   `84430AC23FB71E125BF33F1D9A1DE3E30676F8EE776CB4B790BCDCD4905F2FC1`, rename
   passed, file delete passed, directory delete passed, service PID stayed
@@ -461,10 +486,11 @@ Verified USB evidence:
   also need an explicit collision policy because Windows EA lookup is
   case-insensitive. Empty values and exact UTF-8 xattr names are now certified
   through the reserved Windows EA transport.
-  Existing Apple hard links remain preserved across Windows mutations. WinFsp's
-  current public protocol still marks hard-link support unimplemented, so native
-  hard-link creation requires a WinFsp protocol/kernel fork or another filesystem
-  driver path rather than another user-mode callback.
+  Existing Apple hard links remain preserved across Windows mutations. Copied
+  APFS core now creates arbitrary-depth hard links and preserves sibling IDs.
+  Public `winfsp-apfs` fork transports native Windows hard-link requests and
+  reports link counts; WDK kernel tests, exact runtime installation proof, and
+  production driver signing remain open.
 
 Verified copied-core mutation evidence:
 

@@ -1,5 +1,3 @@
-// Copyright (c) 2026 Randy Northrup. All rights reserved.
-
 /// @file partition_file_system_detector.h
 /// @brief Read-only raw file-system signature detector for Partition Manager.
 
@@ -16,6 +14,10 @@ class QIODevice;
 
 namespace sak {
 
+// Advisory, signature-based detection result: a match reports the family plus raw
+// geometry/metadata in `details` for the technician to inspect. It is intentionally NOT a
+// validity verdict -- the FS readers/writers that actually mutate a volume re-validate
+// geometry independently and fail closed there, so this detector stays informational.
 struct PartitionFileSystemDetection {
     QString file_system;
     QString source;

@@ -65,7 +65,7 @@ $checks = @(
     [pscustomobject]@{
         name = "core_provenance_commit"
         path = $coreReadmePath
-        ok = Test-FileContains -Path $coreReadmePath -Pattern "2f1d9844fabb3e6e8190f906e5cf4906e5e5f281"
+        ok = Test-FileContains -Path $coreReadmePath -Pattern "5587736df4d27e0eb5ca6e9f60f3c69614023b13"
     }
 )
 

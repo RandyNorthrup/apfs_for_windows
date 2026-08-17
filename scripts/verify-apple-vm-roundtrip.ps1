@@ -473,10 +473,79 @@ try {
 
     $mutateScript = Join-Path $runDirectory "mutate-apfs-roundtrip.sh"
     $validateScript = Join-Path $runDirectory "validate-apfs-roundtrip.sh"
+    $hardlinkValidateScript = Join-Path $runDirectory "validate-windows-hardlinks.sh"
     Write-LfScriptCopy -Source (Join-Path $PSScriptRoot "apple-vm\mutate-apfs-roundtrip.sh") `
         -Destination $mutateScript
     Write-LfScriptCopy -Source (Join-Path $PSScriptRoot "apple-vm\validate-apfs-roundtrip.sh") `
         -Destination $validateScript
+    Write-LfScriptCopy -Source (Join-Path $PSScriptRoot "apple-vm\validate-windows-hardlinks.sh") `
+        -Destination $hardlinkValidateScript
+
+    $hardlinkImage = Join-Path $runDirectory "windows-hardlinks.apfs"
+    $hardlinkImageRaw = @(& $selfTestExe --make-hardlink-image $hardlinkImage 2>&1)
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $hardlinkImage -PathType Leaf)) {
+        throw "APFS hard-link image generation failed: $($hardlinkImageRaw -join "`n")"
+    }
+    $hardlinkOriginHash = (Get-FileHash -LiteralPath $hardlinkImage -Algorithm SHA256).Hash
+    Invoke-PscpTransfer -Source $hardlinkImage `
+        -Destination "${remoteEndpoint}:$remoteRun/windows-hardlinks.apfs" `
+        -Label "upload Windows hard-link image"
+    Invoke-PscpTransfer -Source $hardlinkValidateScript `
+        -Destination "${remoteEndpoint}:$remoteRun/validate-windows-hardlinks.sh" `
+        -Label "upload macOS hard-link validator"
+    $hardlinkRemoteOutput = Invoke-PlinkCommand -Label "macOS Windows-hard-link validation" `
+        -Command "bash $(ConvertTo-PosixSingleQuoted "$remoteRun/validate-windows-hardlinks.sh") $(ConvertTo-PosixSingleQuoted "$remoteRun/windows-hardlinks.apfs") $(ConvertTo-PosixSingleQuoted "$remoteRun/hardlink")"
+    $hardlinkRemote = ConvertFrom-KeyValueOutput $hardlinkRemoteOutput
+    if ($hardlinkRemote.APPLE_HARDLINK_OK -ne "1" -or
+        $hardlinkRemote.LINK_COUNT_BEFORE -ne "3" -or
+        $hardlinkRemote.LINK_COUNT_AFTER_DELETE -ne "2" -or
+        $hardlinkRemote.LINK_COUNT_AFTER_REMOUNT -ne "2" -or
+        $hardlinkRemote.DELETED_NAME_ABSENT -ne "1" -or
+        $hardlinkRemote.FSCK_PASSES -ne "3") {
+        throw "macOS hard-link validation did not report success: $hardlinkRemoteOutput"
+    }
+
+    $hardlinkReturnImage = Join-Path $runDirectory "macos-hardlinks-return.apfs"
+    Invoke-PscpTransfer -Source "${remoteEndpoint}:$remoteRun/windows-hardlinks.apfs" `
+        -Destination $hardlinkReturnImage -Label "download macOS hard-link image"
+    $hardlinkSourceDebug = Invoke-ProbeDebug -ImagePath $hardlinkReturnImage `
+        -ApfsPath "/docs/sub/deep.txt"
+    $hardlinkSecondDebug = Invoke-ProbeDebug -ImagePath $hardlinkReturnImage `
+        -ApfsPath "/docs/deep-link.txt"
+    $hardlinkWorker = $null
+    try {
+        $hardlinkWorker = Start-ApfsWorker -Target $hardlinkReturnImage `
+            -Name "macos-hardlink-return"
+        $hardlinkSourcePath = Join-Path $mountRoot "docs\sub\deep.txt"
+        $hardlinkSecondPath = Join-Path $mountRoot "docs\deep-link.txt"
+        $hardlinkDeletedPath = Join-Path $mountRoot "deep-root-link.txt"
+        $hardlinkSourceHash =
+            (Get-FileHash -LiteralPath $hardlinkSourcePath -Algorithm SHA256).Hash
+        $hardlinkSecondHash =
+            (Get-FileHash -LiteralPath $hardlinkSecondPath -Algorithm SHA256).Hash
+        $hardlinkDeletedAbsent = -not (Test-Path -LiteralPath $hardlinkDeletedPath)
+    } finally {
+        Stop-ApfsWorker -Process $hardlinkWorker
+    }
+    $hardlinkWindowsReturn = [ordered]@{
+        source_object_id = [string]$hardlinkSourceDebug.inode_object_id
+        second_object_id = [string]$hardlinkSecondDebug.inode_object_id
+        source_sha256 = $hardlinkSourceHash
+        second_sha256 = $hardlinkSecondHash
+        deleted_name_absent = [bool]$hardlinkDeletedAbsent
+        image_sha256 = (Get-FileHash -LiteralPath $hardlinkReturnImage -Algorithm SHA256).Hash
+    }
+    $hardlinkRoundTripValid = [bool](
+        [uint64]$hardlinkSourceDebug.inode_object_id -ne 0 -and
+        [uint64]$hardlinkSourceDebug.inode_object_id -eq
+            [uint64]$hardlinkSecondDebug.inode_object_id -and
+        [uint64]$hardlinkSourceDebug.inode_object_id -eq [uint64]$hardlinkRemote.SOURCE_INODE -and
+        $hardlinkSourceHash -eq $hardlinkSecondHash -and
+        $hardlinkSourceHash -eq $hardlinkRemote.SOURCE_SHA256 -and
+        $hardlinkDeletedAbsent)
+    if (-not $hardlinkRoundTripValid) {
+        throw "Windows hard-link return validation failed."
+    }
 
     Invoke-PscpTransfer -Source $originImage -Destination "${remoteEndpoint}:$remoteRun/windows-origin.apfs" `
         -Label "upload Windows origin image"
@@ -817,6 +886,18 @@ try {
                 -Label "download $phase $name"
         }
     }
+    foreach ($name in @(
+        "fsck-before.txt",
+        "fsck-after-delete.txt",
+        "fsck-final.txt",
+        "before-mount.txt",
+        "after-delete-unmount.txt",
+        "verify-mount.txt",
+        "final-unmount.txt")) {
+        Invoke-PscpTransfer -Source "${remoteEndpoint}:$remoteRun/hardlink/$name" `
+            -Destination (Join-Path $runDirectory "hardlink-$name") `
+            -Label "download hard-link $name"
+    }
 
     $result = [ordered]@{
         component = "apfs_for_windows"
@@ -837,6 +918,13 @@ try {
             root_metadata_valid = [bool]$rootOriginWindowsValid
             root_inode_metadata = $rootOriginRaw
             root_inode_metadata_valid = [bool]$rootOriginRawValid
+        }
+        windows_created_hardlinks = [ordered]@{
+            ok = [bool]$hardlinkRoundTripValid
+            origin_image_sha256 = $hardlinkOriginHash
+            macos = $hardlinkRemote
+            windows_return = $hardlinkWindowsReturn
+            native_fsck_passes = 3
         }
         macos_mutation = $remoteMutation
         windows_return = $windowsReturn

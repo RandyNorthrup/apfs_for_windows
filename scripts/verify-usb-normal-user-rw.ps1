@@ -7,7 +7,7 @@ param(
     [string]$ConfigPath = "$env:ProgramData\APFS for Windows\mounts.json",
     [int]$DiskNumber = 1,
     [int]$PartitionNumber = 2,
-    [string]$ExpectedSerial = "067D19C65080",
+    [string]$ExpectedSerial,
     [UInt64]$MinimumDiskBytes = 30000000000,
     [UInt64]$MaximumDiskBytes = 33000000000,
     [string]$Mount = "Y:",
@@ -28,6 +28,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ([string]::IsNullOrWhiteSpace($ExpectedSerial)) {
+    throw "-ExpectedSerial is required for physical USB verification."
+}
 function Test-CurrentProcessAdmin {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)

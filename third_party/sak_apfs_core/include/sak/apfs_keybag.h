@@ -1,5 +1,3 @@
-// Copyright (c) 2025 Randy Northrup. All rights reserved.
-
 /// @file apfs_keybag.h
 /// @brief APFS FileVault keybag + key-blob construction (A6 / A-f).
 ///

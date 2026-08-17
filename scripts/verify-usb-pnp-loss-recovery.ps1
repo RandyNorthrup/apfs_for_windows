@@ -3,7 +3,7 @@
 [CmdletBinding()]
 param(
     [int]$DiskNumber = 1,
-    [string]$ExpectedSerial = "067D19C65080",
+    [string]$ExpectedSerial,
     [UInt64]$MinimumDiskBytes = 30000000000,
     [UInt64]$MaximumDiskBytes = 33000000000,
     [string]$Mount = "V:",
@@ -15,6 +15,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ([string]::IsNullOrWhiteSpace($ExpectedSerial)) {
+    throw "-ExpectedSerial is required for physical USB loss verification."
+}
 
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string]$Path)

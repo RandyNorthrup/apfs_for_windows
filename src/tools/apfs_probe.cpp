@@ -224,6 +224,8 @@ QJsonArray listRoot(QIODevice* device, int maxEntries) {
                                    {QStringLiteral("object_id"), QString::number(entry.object_id)},
                                    {QStringLiteral("size_bytes"),
                                     QString::number(entry.size_bytes)},
+                                   {QStringLiteral("hard_link_count"),
+                                    QString::number(entry.hard_link_count)},
                                    {QStringLiteral("directory"), entry.directory},
                                    {QStringLiteral("regular_file"), entry.regular_file},
                                    {QStringLiteral("symlink"), entry.symlink}});
@@ -368,7 +370,7 @@ QJsonObject partitionToJson(QIODevice* device,
 int main(int argc, char* argv[]) {
     QCoreApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("apfs_probe"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+    QCoreApplication::setApplicationVersion(QStringLiteral(APFS_PROJECT_VERSION));
 
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("Read-only APFS raw/image probe."));

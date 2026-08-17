@@ -1,5 +1,3 @@
-// Copyright (c) 2026 Randy Northrup. All rights reserved.
-
 /// @file partition_file_system_detector.cpp
 /// @brief Read-only raw file-system signature detector for Partition Manager.
 
@@ -368,6 +366,23 @@ std::optional<uint64_t> checkedProduct(uint64_t left, uint64_t right) {
     return left * right;
 }
 
+// ASCII control-character boundaries: code points below the first printable character (space,
+// U+0020) are C0 controls, and U+007F is DEL.
+constexpr char16_t kAsciiControlLimit = 0x20;
+constexpr char16_t kAsciiDelete = 0x7F;
+
+// Foreign on-disk name fields (volume labels, etc.) are embedded VERBATIM into human-readable
+// detection details that downstream UI renders line-by-line (joined with '\n') and that gates
+// parse. A control byte (code point < 0x20 or 0x7F) -- notably an embedded newline -- would let a
+// crafted label fabricate additional detail lines in the metadata dialog. Reject any field carrying
+// one rather than pass it through; a legitimate name never contains control characters.
+bool fieldTextHasControlCharacter(const QString& text) {
+    return std::ranges::any_of(text, [](QChar c) {
+        const char16_t code = c.unicode();
+        return code < kAsciiControlLimit || code == kAsciiDelete;
+    });
+}
+
 QString fixedAsciiField(const QByteArray& bytes, qsizetype offset, qsizetype length) {
     if (!hasBytes(bytes, offset, length)) {
         return {};
@@ -377,7 +392,11 @@ QString fixedAsciiField(const QByteArray& bytes, qsizetype offset, qsizetype len
     if (terminator >= 0) {
         field.truncate(terminator);
     }
-    return QString::fromLatin1(field).trimmed();
+    const QString value = QString::fromLatin1(field).trimmed();
+    if (fieldTextHasControlCharacter(value)) {
+        return {};
+    }
+    return value;
 }
 
 QString fixedUtf8Field(const QByteArray& bytes, qsizetype offset, qsizetype length) {
@@ -389,7 +408,11 @@ QString fixedUtf8Field(const QByteArray& bytes, qsizetype offset, qsizetype leng
     if (terminator >= 0) {
         field.truncate(terminator);
     }
-    return QString::fromUtf8(field).trimmed();
+    const QString value = QString::fromUtf8(field).trimmed();
+    if (fieldTextHasControlCharacter(value)) {
+        return {};
+    }
+    return value;
 }
 
 QString hex32(uint32_t value) {
@@ -476,11 +499,11 @@ std::optional<HfsWrapperInfo> hfsWrapperInfo(const QByteArray& bytes) {
         *embeddedOffset > static_cast<uint64_t>(std::numeric_limits<qsizetype>::max())) {
         return std::nullopt;
     }
-    return HfsWrapperInfo{*embeddedOffset,
-                          extentStartBlock,
-                          extentBlockCount,
-                          allocationBlockSize,
-                          allocationStartSector};
+    return HfsWrapperInfo{.embedded_offset_bytes = *embeddedOffset,
+                          .extent_start_block = extentStartBlock,
+                          .extent_block_count = extentBlockCount,
+                          .allocation_block_size = allocationBlockSize,
+                          .allocation_block_start_sector = allocationStartSector};
 }
 
 bool hasExtMagic(const QByteArray& bytes) {
@@ -583,8 +606,9 @@ std::optional<PartitionFileSystemDetection> detectExtFamily(const QByteArray& by
     const uint32_t compat = littleEndian32(bytes, superblock + kExtFeatureCompatOffset);
     const uint32_t incompat = littleEndian32(bytes, superblock + kExtFeatureIncompatOffset);
     const uint32_t roCompat = littleEndian32(bytes, superblock + kExtFeatureRoCompatOffset);
-    PartitionFileSystemDetection detection{extFamilyName(compat, incompat, roCompat),
-                                           PartitionFileSystemDetector::rawSignatureSource()};
+    PartitionFileSystemDetection detection{.file_system = extFamilyName(compat, incompat, roCompat),
+                                           .source =
+                                               PartitionFileSystemDetector::rawSignatureSource()};
     appendExtSuperblockDetails(&detection, bytes, compat, incompat, roCompat);
     return detection;
 }
@@ -618,8 +642,8 @@ std::optional<PartitionFileSystemDetection> detectHfsHeaderAt(
         return std::nullopt;
     }
 
-    PartitionFileSystemDetection detection{familyName,
-                                           PartitionFileSystemDetector::rawSignatureSource()};
+    PartitionFileSystemDetection detection{
+        .file_system = familyName, .source = PartitionFileSystemDetector::rawSignatureSource()};
     const uint16_t version = bigEndian16(bytes, headerOffset + kHfsVersionOffset);
     const uint32_t attributes = bigEndian32(bytes, headerOffset + kHfsAttributesOffset);
     const uint32_t fileCount = bigEndian32(bytes, headerOffset + kHfsFileCountOffset);
@@ -683,10 +707,12 @@ std::optional<SwapSignatureInfo> swapSignatureInfo(const QByteArray& bytes,
         }
         const qsizetype offset = pageSize - kSwapSignatureSize;
         if (matchesBytes(bytes, offset, "SWAPSPACE2", kSwapSignatureSize)) {
-            return SwapSignatureInfo{pageSize, QStringLiteral("SWAPSPACE2")};
+            return SwapSignatureInfo{.page_size = pageSize,
+                                     .signature = QStringLiteral("SWAPSPACE2")};
         }
         if (matchesBytes(bytes, offset, "SWAP-SPACE", kSwapSignatureSize)) {
-            return SwapSignatureInfo{pageSize, QStringLiteral("SWAP-SPACE")};
+            return SwapSignatureInfo{.page_size = pageSize,
+                                     .signature = QStringLiteral("SWAP-SPACE")};
         }
     }
     return std::nullopt;
@@ -809,8 +835,9 @@ std::optional<PartitionFileSystemDetection> detectXfsFamily(const QByteArray& by
         return std::nullopt;
     }
 
-    PartitionFileSystemDetection detection{QStringLiteral("XFS"),
-                                           PartitionFileSystemDetector::rawSignatureSource()};
+    PartitionFileSystemDetection detection{.file_system = QStringLiteral("XFS"),
+                                           .source =
+                                               PartitionFileSystemDetector::rawSignatureSource()};
     const uint32_t blockSize = bigEndian32(bytes, kXfsBlockSizeOffset);
     const uint64_t dataBlocks = bigEndian64(bytes, kXfsDataBlocksOffset);
     const uint64_t freeDataBlocks = bigEndian64(bytes, kXfsFreeDataBlocksOffset);
@@ -859,8 +886,9 @@ std::optional<PartitionFileSystemDetection> detectBtrfsFamily(const QByteArray& 
         return std::nullopt;
     }
 
-    PartitionFileSystemDetection detection{QStringLiteral("Btrfs"),
-                                           PartitionFileSystemDetector::rawSignatureSource()};
+    PartitionFileSystemDetection detection{.file_system = QStringLiteral("Btrfs"),
+                                           .source =
+                                               PartitionFileSystemDetector::rawSignatureSource()};
     const qsizetype superblock = kBtrfsSuperblockOffset;
     const BtrfsSuperblockValues values{
         .total_bytes = littleEndian64(bytes, superblock + kBtrfsTotalBytesOffset),
@@ -907,13 +935,25 @@ std::optional<PartitionFileSystemDetection> detectBtrfsFamily(const QByteArray& 
 
 void appendApfsSizeDetails(PartitionFileSystemDetection* detection,
                            uint32_t blockSize,
-                           uint64_t blockCount) {
+                           uint64_t blockCount,
+                           uint64_t partition_size_bytes) {
     if (blockSize < kMinimumApfsBlockSize || blockSize > kMaximumApfsBlockSize ||
         !isPowerOfTwo(blockSize) || blockCount == 0) {
         return;
     }
     if (const auto totalBytes = checkedProduct(blockSize, blockCount); totalBytes.has_value()) {
-        detection->total_bytes = *totalBytes;
+        // Reconcile the claimed container size against the validated partition size:
+        // a corrupt/hostile nx_block_count can claim more than the partition holds, so
+        // never report more than the partition actually provides. 0 = size unknown.
+        detection->total_bytes = (partition_size_bytes != 0)
+                                     ? std::min<uint64_t>(*totalBytes, partition_size_bytes)
+                                     : *totalBytes;
+        if (partition_size_bytes != 0 && *totalBytes > partition_size_bytes) {
+            detection->details.append(
+                QStringLiteral("Warning: APFS claims %1 bytes but the partition holds only %2")
+                    .arg(*totalBytes)
+                    .arg(partition_size_bytes));
+        }
     }
     detection->details.append(QStringLiteral("Block size: %1").arg(blockSize));
     detection->details.append(QStringLiteral("Block count: %1").arg(blockCount));
@@ -1011,7 +1051,7 @@ QStringList apfsVolumeOids(const QByteArray& bytes, uint32_t maxFileSystems) {
     const uint32_t boundedCount = std::min<uint32_t>(maxFileSystems, kApfsFileSystemOidCount);
     for (uint32_t index = 0; index < boundedCount; ++index) {
         const qsizetype offset = kApfsFileSystemOidArrayOffset +
-                                 static_cast<qsizetype>(index) * kUint64Size;
+                                 (static_cast<qsizetype>(index) * kUint64Size);
         const uint64_t oid = littleEndian64(bytes, offset);
         if (oid != 0) {
             oids.append(QStringLiteral("%1:%2").arg(index).arg(oid));
@@ -1024,7 +1064,7 @@ void appendApfsObjectReference(std::vector<ApfsObjectReference>* references,
                                const QString& label,
                                uint64_t oid) {
     if (oid > 0) {
-        references->push_back(ApfsObjectReference{label, oid});
+        references->push_back(ApfsObjectReference{.label = label, .oid = oid});
     }
 }
 
@@ -1044,7 +1084,7 @@ void appendApfsContainerObjectReferences(std::vector<ApfsObjectReference>* refer
     const uint32_t boundedCount = std::min<uint32_t>(maxFileSystems, kApfsFileSystemOidCount);
     for (uint32_t index = 0; index < boundedCount; ++index) {
         const qsizetype offset = kApfsFileSystemOidArrayOffset +
-                                 static_cast<qsizetype>(index) * kUint64Size;
+                                 (static_cast<qsizetype>(index) * kUint64Size);
         appendApfsObjectReference(references,
                                   QStringLiteral("volume OID slot %1").arg(index),
                                   littleEndian64(bytes, offset));
@@ -1124,7 +1164,7 @@ QString apfsReferencedObjectHeaderSummary(const QByteArray& bytes,
 }
 
 bool apfsObjectMapLabels(const QStringList& labels) {
-    return std::any_of(labels.cbegin(), labels.cend(), [](const QString& label) {
+    return std::ranges::any_of(labels, [](const QString& label) {
         return label.contains(QStringLiteral("object map OID"), Qt::CaseInsensitive);
     });
 }
@@ -1309,7 +1349,8 @@ bool appendApfsSpaceManagerDetails(PartitionFileSystemDetection* detection,
                                    const QByteArray& bytes,
                                    uint32_t blockSize,
                                    uint64_t blockCount) {
-    if (!detection || !apfsProbeBlockScanSupported(bytes, blockSize) || blockCount == 0) {
+    if ((detection == nullptr) || !apfsProbeBlockScanSupported(bytes, blockSize) ||
+        blockCount == 0) {
         return false;
     }
 
@@ -1318,7 +1359,8 @@ bool appendApfsSpaceManagerDetails(PartitionFileSystemDetection* detection,
         return false;
     }
 
-    const ApfsSpaceManagerContext context{blockSize, blockCount};
+    const ApfsSpaceManagerContext context{.containerBlockSize = blockSize,
+                                          .containerBlockCount = blockCount};
     const QStringList warnings = apfsSpaceManagerWarnings(context, *candidate);
     if (!warnings.isEmpty()) {
         detection->details.append(
@@ -1335,12 +1377,9 @@ bool appendApfsSpaceManagerDetails(PartitionFileSystemDetection* detection,
 }
 
 bool hasApfsSpaceManagerDetails(const PartitionFileSystemDetection& detection) {
-    for (const auto& detail : detection.details) {
-        if (detail.startsWith(QStringLiteral("APFS space manager block:"))) {
-            return true;
-        }
-    }
-    return false;
+    return std::ranges::any_of(detection.details, [](const QString& detail) {
+        return detail.startsWith(QStringLiteral("APFS space manager block:"));
+    });
 }
 
 std::optional<uint64_t> checkedSum(uint64_t left, uint64_t right) {
@@ -1380,7 +1419,7 @@ std::optional<QByteArray> readExactDeviceBytes(QIODevice* device,
                                                uint64_t absoluteOffset,
                                                qsizetype byteCount,
                                                QString* errorMessage) {
-    if (!device || !device->isOpen()) {
+    if ((device == nullptr) || !device->isOpen()) {
         setProbeError(errorMessage, QStringLiteral("Raw probe device is not open"));
         return std::nullopt;
     }
@@ -1479,17 +1518,17 @@ std::optional<ApfsSupplementalReadContext> apfsSupplementalReadContext(
         return std::nullopt;
     }
 
-    return ApfsSupplementalReadContext{device,
-                                       partitionOffsetBytes,
-                                       partitionSizeBytes,
-                                       blockSize,
-                                       blockCount,
-                                       expectedOid,
-                                       checkpoint};
+    return ApfsSupplementalReadContext{.device = device,
+                                       .partitionOffsetBytes = partitionOffsetBytes,
+                                       .partitionSizeBytes = partitionSizeBytes,
+                                       .blockSize = blockSize,
+                                       .blockCount = blockCount,
+                                       .expectedOid = expectedOid,
+                                       .checkpoint = checkpoint};
 }
 
 void setFirstSupplementalError(QString* target, const QString& error) {
-    if (target && target->isEmpty() && !error.isEmpty()) {
+    if ((target != nullptr) && target->isEmpty() && !error.isEmpty()) {
         *target = error;
     }
 }
@@ -1497,7 +1536,8 @@ void setFirstSupplementalError(QString* target, const QString& error) {
 bool appendApfsSupplementalCandidate(PartitionFileSystemDetection* detection,
                                      const ApfsSupplementalReadContext& context,
                                      const ApfsSpaceManagerCandidate& candidate) {
-    const ApfsSpaceManagerContext spaceContext{context.blockSize, context.blockCount};
+    const ApfsSpaceManagerContext spaceContext{.containerBlockSize = context.blockSize,
+                                               .containerBlockCount = context.blockCount};
     const QStringList warnings = apfsSpaceManagerWarnings(spaceContext, candidate);
     if (!warnings.isEmpty()) {
         detection->details.append(
@@ -1542,7 +1582,8 @@ bool scanApfsSupplementalSpaceManager(PartitionFileSystemDetection* detection,
 bool appendApfsSupplementalSpaceManagerDetails(PartitionFileSystemDetection* detection,
                                                const ApfsSupplementalInput& input,
                                                QString* errorMessage) {
-    if (!detection || !input.probeBytes || detection->file_system != QStringLiteral("APFS") ||
+    if ((detection == nullptr) || (input.probeBytes == nullptr) ||
+        detection->file_system != QStringLiteral("APFS") ||
         hasApfsSpaceManagerDetails(*detection)) {
         return false;
     }
@@ -1927,18 +1968,20 @@ void appendApfsVolumeCandidateDetails(PartitionFileSystemDetection* detection,
     }
 }
 
-std::optional<PartitionFileSystemDetection> detectApfsFamily(const QByteArray& bytes) {
+std::optional<PartitionFileSystemDetection> detectApfsFamily(const QByteArray& bytes,
+                                                             uint64_t partition_size_bytes) {
     if (!matchesBytes(bytes, kApfsMagicOffset, "NXSB", kApfsMagicSize)) {
         return std::nullopt;
     }
 
-    PartitionFileSystemDetection detection{QStringLiteral("APFS"),
-                                           PartitionFileSystemDetector::rawSignatureSource()};
+    PartitionFileSystemDetection detection{.file_system = QStringLiteral("APFS"),
+                                           .source =
+                                               PartitionFileSystemDetector::rawSignatureSource()};
     const uint32_t blockSize = littleEndian32(bytes, kApfsBlockSizeOffset);
     const uint64_t blockCount = littleEndian64(bytes, kApfsBlockCountOffset);
     const ApfsCheckpointValues checkpoint = apfsCheckpointValues(bytes);
     const uint32_t maxFileSystems = littleEndian32(bytes, kApfsMaxFileSystemsOffset);
-    appendApfsSizeDetails(&detection, blockSize, blockCount);
+    appendApfsSizeDetails(&detection, blockSize, blockCount, partition_size_bytes);
     appendDetailIfText(&detection,
                        QStringLiteral("Container UUID"),
                        uuidField(bytes, kApfsUuidOffset));
@@ -1981,8 +2024,8 @@ std::optional<PartitionFileSystemDetection> rawDetection(const QString& fileSyst
     if (fileSystem.isEmpty()) {
         return std::nullopt;
     }
-    return PartitionFileSystemDetection{fileSystem,
-                                        PartitionFileSystemDetector::rawSignatureSource()};
+    return PartitionFileSystemDetection{
+        .file_system = fileSystem, .source = PartitionFileSystemDetector::rawSignatureSource()};
 }
 
 std::optional<PartitionFileSystemDetection> detectSwapFamily(const QByteArray& bytes,
@@ -2028,7 +2071,7 @@ std::optional<PartitionFileSystemDetection> detectSwapFamily(const QByteArray& b
 }
 
 void setProbeError(QString* errorMessage, const QString& message) {
-    if (errorMessage) {
+    if (errorMessage != nullptr) {
         *errorMessage = message;
     }
 }
@@ -2119,7 +2162,8 @@ std::optional<PartitionFileSystemDetection> PartitionFileSystemDetector::detectB
     if (const auto btrfsDetection = detectBtrfsFamily(bytes); btrfsDetection.has_value()) {
         return btrfsDetection;
     }
-    if (const auto apfsDetection = detectApfsFamily(bytes); apfsDetection.has_value()) {
+    if (const auto apfsDetection = detectApfsFamily(bytes, partition_size_bytes);
+        apfsDetection.has_value()) {
         return apfsDetection;
     }
     if (const auto hfsDetection = detectHfsPlusFamily(bytes); hfsDetection.has_value()) {
@@ -2146,7 +2190,7 @@ std::optional<QByteArray> PartitionFileSystemDetector::readProbeBytesFromDeviceP
     uint64_t partition_offset_bytes,
     uint64_t partition_size_bytes,
     QString* error_message) {
-    if (error_message) {
+    if (error_message != nullptr) {
         error_message->clear();
     }
     if (!validateProbeReadRequest(device_path, partition_offset_bytes, error_message)) {
@@ -2170,10 +2214,10 @@ std::optional<PartitionFileSystemDetection> PartitionFileSystemDetector::detectF
     uint64_t partition_offset_bytes,
     uint64_t partition_size_bytes,
     QString* error_message) {
-    if (error_message) {
+    if (error_message != nullptr) {
         error_message->clear();
     }
-    if (!device || !device->isOpen()) {
+    if ((device == nullptr) || !device->isOpen()) {
         setProbeError(error_message, QStringLiteral("Raw probe device is not open"));
         return std::nullopt;
     }
@@ -2195,10 +2239,12 @@ std::optional<PartitionFileSystemDetection> PartitionFileSystemDetector::detectF
         setProbeError(error_message, QStringLiteral("No filesystem signature detected"));
         return std::nullopt;
     }
-    const ApfsSupplementalInput supplementalInput{
-        &*bytes, device, partition_offset_bytes, partition_size_bytes};
+    const ApfsSupplementalInput supplementalInput{.probeBytes = &*bytes,
+                                                  .device = device,
+                                                  .partitionOffsetBytes = partition_offset_bytes,
+                                                  .partitionSizeBytes = partition_size_bytes};
     appendApfsSupplementalSpaceManagerDetails(&*detection, supplementalInput, error_message);
-    if (error_message) {
+    if (error_message != nullptr) {
         error_message->clear();
     }
     return detection;
@@ -2209,7 +2255,7 @@ std::optional<PartitionFileSystemDetection> PartitionFileSystemDetector::detectF
     uint64_t partition_offset_bytes,
     uint64_t partition_size_bytes,
     QString* error_message) {
-    if (error_message) {
+    if (error_message != nullptr) {
         error_message->clear();
     }
     if (!validateProbeReadRequest(device_path, partition_offset_bytes, error_message)) {

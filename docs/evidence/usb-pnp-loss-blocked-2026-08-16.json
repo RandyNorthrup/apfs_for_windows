@@ -10,7 +10,7 @@
   "physical_power_removed": false,
   "pinned_usb": {
     "disk_number": 1,
-    "serial": "067D19C65080",
+    "serial": "redacted",
     "size_bytes": 31042043904,
     "bus_type": "USB",
     "is_boot": false,

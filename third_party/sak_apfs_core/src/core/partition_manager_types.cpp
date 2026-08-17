@@ -1,5 +1,3 @@
-// Copyright (c) 2026 Randy Northrup. All rights reserved.
-
 /// @file partition_manager_types.cpp
 /// @brief Shared type helpers for Partition Manager.
 

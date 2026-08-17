@@ -1,5 +1,3 @@
-// Copyright (c) 2025 Randy Northrup. All rights reserved.
-
 /// @file apfs_crypto.h
 /// @brief APFS FileVault cryptographic primitives (A6 / A-f).
 ///

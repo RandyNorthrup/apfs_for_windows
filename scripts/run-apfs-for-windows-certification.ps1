@@ -15,13 +15,16 @@ param(
     [string]$AppleVmHostKey,
     [int]$UsbDiskNumber = 1,
     [int]$UsbPartitionNumber = 1,
-    [string]$UsbExpectedSerial = "067D19C65080",
+    [string]$UsbExpectedSerial,
     [UInt64]$UsbMinimumDiskBytes = 30000000000,
     [UInt64]$UsbMaximumDiskBytes = 33000000000,
     [string]$UsbMount = "V:"
 )
 
 $ErrorActionPreference = "Stop"
+if ([string]::IsNullOrWhiteSpace($UsbExpectedSerial)) {
+    throw "-UsbExpectedSerial is required because certification includes physical USB identity gates."
+}
 
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string]$Path)

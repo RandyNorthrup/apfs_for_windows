@@ -2,12 +2,14 @@
 
 [CmdletBinding()]
 param(
-    [string]$Version = "0.1.0",
+    [string]$Version = "",
     [string]$PackageRoot = "artifacts\package",
     [string]$OutputPath = "artifacts\package\verify-release-package.json"
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "lib\project-version.ps1")
+$Version = Get-ApfsProjectVersion -ExplicitVersion $Version -CallerRoot $PSScriptRoot
 
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -87,8 +89,16 @@ $requiredFiles = @(
     "uninstall-apfs-for-windows.ps1",
     "README.md",
     "LICENSE",
+    "lib\project-version.ps1",
     "THIRD_PARTY_LICENSES.md",
-    "APFS_CORE_PROVENANCE.md"
+    "APFS_CORE_PROVENANCE.md",
+    "APFS_CORE_IMPORT_MANIFEST.json",
+    "apfs-build-metadata.json",
+    "release-manifest.json",
+    "SHA256SUMS.txt",
+    "SECURITY.md",
+    "VERSION",
+    "WINFSP_PROVENANCE.json"
 )
 
 $fileReports = @()
@@ -105,6 +115,26 @@ foreach ($relative in $requiredFiles) {
 $missing = @($fileReports | Where-Object { -not $_.exists } | ForEach-Object { $_.relative_path })
 $zipExists = Test-Path -LiteralPath $zipPath -PathType Leaf
 $zipHash = if ($zipExists) { (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash } else { $null }
+$releaseManifestPath = Join-Path $stageRoot "release-manifest.json"
+$releaseManifest = if (Test-Path -LiteralPath $releaseManifestPath -PathType Leaf) {
+    Get-Content -LiteralPath $releaseManifestPath -Raw | ConvertFrom-Json
+} else { $null }
+$manifestMismatches = @()
+if ($releaseManifest) {
+    foreach ($entry in @($releaseManifest.files)) {
+        $path = Join-Path $stageRoot ([string]$entry.relative_path).Replace("/", "\")
+        $actualHash = if (Test-Path -LiteralPath $path -PathType Leaf) {
+            (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        } else { $null }
+        if (-not $actualHash -or $actualHash -ne [string]$entry.sha256) {
+            $manifestMismatches += [string]$entry.relative_path
+        }
+    }
+}
+$buildMetadataPath = Join-Path $stageRoot "apfs-build-metadata.json"
+$buildMetadata = if (Test-Path -LiteralPath $buildMetadataPath -PathType Leaf) {
+    Get-Content -LiteralPath $buildMetadataPath -Raw | ConvertFrom-Json
+} else { $null }
 $installPayload = Invoke-PayloadValidation `
     -ScriptPath (Join-Path $stageRoot "install-apfs-for-windows.ps1") `
     -Name "install_payload"
@@ -113,7 +143,9 @@ $repairPayload = Invoke-PayloadValidation `
     -Name "repair_payload"
 $repairLauncher = Invoke-RepairLauncherSelfTest `
     -ScriptPath (Join-Path $stageRoot "start-repair-elevated.ps1")
-$ok = $zipExists -and ($missing.Count -eq 0) -and $installPayload.ok -and
+$ok = $zipExists -and ($missing.Count -eq 0) -and $releaseManifest -and
+    ($manifestMismatches.Count -eq 0) -and $buildMetadata -and
+    ([string]$buildMetadata.version -eq $Version) -and $installPayload.ok -and
     $repairPayload.ok -and $repairLauncher.ok
 
 $result = [ordered]@{
@@ -127,6 +159,9 @@ $result = [ordered]@{
     zip_exists = [bool]$zipExists
     zip_sha256 = $zipHash
     missing_required_files = @($missing)
+    release_manifest_ok = [bool]($releaseManifest -and $manifestMismatches.Count -eq 0)
+    release_manifest_mismatches = @($manifestMismatches)
+    build_metadata = $buildMetadata
     install_payload = $installPayload
     repair_payload = $repairPayload
     repair_launcher = $repairLauncher

@@ -1,4 +1,7 @@
 build*/
+out/
+dist/
+.cache/
 .vs/
 .vscode/
 .agents/
@@ -14,3 +17,9 @@ build*/
 *.log
 artifacts/
 temp/
+.env
+.env.*
+!.env.example
+*.key
+*.p12
+*.pfx

@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "component": "sak_apfs_core",
+  "source_repository": "S.A.K.-Utility author-owned source checkout",
+  "source_commit": "5587736df4d27e0eb5ca6e9f60f3c69614023b13",
+  "file_count": 20,
+  "files": [
+    {
+      "relative_path": "include\\sak\\apfs_compression.h",
+      "source_blob_oid": "ba76b563313c93150ed3d2eed208185c72e0a438",
+      "source_sha256": "2FAE49EB64A6E56A8374A2A6FF103CB0EE09DF59F1370F28C75BB04B8CBE46D4",
+      "vendored_sha256": "1E8AF8885C0E64D0FE2CF90783427FCFBDEC6CC741ABE813C89C30EE912D7160",
+      "locally_modified": true
+    },
+    {
+      "relative_path": "include\\sak\\apfs_crypto.h",
+      "source_blob_oid": "ea99c6881c249cc899936166bcddc7a03b6f44d8",
+      "source_sha256": "1B2E046CF9DCF3AED1B3680711DDCE61EE9CA9FBA50C90E23C500141C204EFDC",
+      "vendored_sha256": "0FD5F6BFBF022B57E5AA2E9BEC94D089AC3F8243AD2E46BD07D46DDC949AFBD5",
+      "locally_modified": true
+    },
+    {
+      "relative_path": "include\\sak\\apfs_keybag.h",
+      "source_blob_oid": "abb870ea18e0b7b68df4c9fe7c9aa1e0cfe3c916",
+      "source_sha256": "3BDE7E0A1227F9DD11CC791D54F50ACFA0335BA08430822290D650EF3CAFACE2",
+      "vendored_sha256": "B7DBD2AA28902268BD540D5396BF1A64FF5B1886366147C0883CDCE403275D37",
+      "locally_modified": true
+    },
+    {
+      "relative_path": "include\\sak\\apfs_lzbitmap.h",
+      "source_blob_oid": "027248be1eb0a01d81b04cda51ae7912376a363e",
+      "source_sha256": "9859C7372A1EA0D516B630A8A42C2D95ABD1457A2A7EC36A34256C1DD9389B2C",
+      "vendored_sha256": "2871A10B4F9778863E4F28EE131639B64C7442A0C19E9BD17C3F7A4C980D81F4",
+      "locally_modified": true
+    },
+    {
+      "relative_path": "include\\sak\\apfs_lzbitmap_codec.h",
+      "source_blob_oid": "1f06f41abc111e0e34b4fd1cbc74bed6cac5fab0",
+      "source_sha256": "8A4B512D26DF864432E942A0A8A7AE30A42591C2A7FFE92736F30E1622D437BA",
+      "vendored_sha256": "61C74643980D6D3072ECE60C23CAA8A6F4873D5767CFD1C6A819BDD01E38F656",
+      "locally_modified": true
+    },
+    {
+      "relative_path": "include\\sak\\apfs_lzbitmap_encode.h",
+      "source_blob_oid": "e442556558442333f74a9fe5cf203b9c8be03b49",
+      "source_sha256": "A11A040CCE487C7C630FC09443F0FFF56F8EEBBAD9FA548280F5F1DF35F62F01",
+      "vendored_sha256": "D8A640EB45439D7C6430B8A856B1E19CBB1715C3D5A0A363856608C396141F18",
+      "locally_modified": true
+    },
+    {
+      "relative_path": "include\\sak\\apfs_resource_fork.h",
+      "source_blob_oid": "f8146cd876e074e17694574e0ffe74b8fc18d443",
+      "source_sha256": "5FC3D89D38C292A981A39631C07E071125374A5874CCEE9F4DC5EA9F4266FE08",
+      "vendored_sha256": "E9BF3B9DECD2F197B36584101D952213E4F158A0E7EF5170992F38BF85EF922E",
+      "locally_modified": true
+    },
+    {
+      "relative_path": "include\\sak\\partition_apfs_file_system_reader.h",
+      "source_blob_oid": "15135eee9fbdc7d0431ca76556d3012fc3e98d78",
+      "source_sha256": "CBBD56599C2A8D2A07066DB4172871A276E3AD1FAC1CD3F4CD782EBA1533DA3F",
+      "vendored_sha256": "C9304F31530FD56BC986DA76CA8C1C9400537ABA434CB4546702FC67B1392997",
+      "locally_modified": true
+    },
+    {
+      "relative_path": "include\\sak\\partition_apfs_writer.h",
+      "source_blob_oid": "707547f346cce0bf01474bbc0fc064ed9f190279",
+      "source_sha256": "7FA7A6D4C6CAAEF44C96221EF96D249132A6490676872E3F74E506C37407AACD",
+      "vendored_sha256": "5A561325175D08C8CB5B1950203C6BCC04900834B6ADE9077DC93376C7E5E056",
+      "locally_modified": true
+    },
+    {
+      "relative_path": "include\\sak\\partition_export_containment.h",
+      "source_blob_oid": "552fb713926d42ca4fc5b32b305abead6e408b5b",
+      "source_sha256": "9A3CFD20FCC3F4E218BC36F9A117561C31A6B4A15D55469CA7A3BBAAB0927E7E",
+      "vendored_sha256": "CE6364B0584A740E172210E30716C74B31A530C02E66B77BD45656740C335F59",
+      "locally_modified": true
+    },
+    {
+      "relative_path": "include\\sak\\partition_file_system_detector.h",
+      "source_blob_oid": "2d1c7548f4120b3a909b4edf5a09382e9bd28642",
+      "source_sha256": "C985C2466DE04B97420991510617F72CA06487E32848311499CB162C7802AE67",
+      "vendored_sha256": "5835A42CC1BFEEDDB66AFFA9AAA56605882DBA7706790D1AF9ED97ADC70B124F",
+      "locally_modified": true
+    },
+    {
+      "relative_path": "include\\sak\\partition_manager_types.h",
+      "source_blob_oid": "bee63ed11c33d595bf101fe5eb18bbd0a4d67f85",
+      "source_sha256": "04248CF3C82645B882B485738F02C02D36EC72F6E7B6C46329BBDE08E15B5E7F",
+      "vendored_sha256": "A61495E296377BCA037577B4AB057A9772579F3E017BDF7FDCA2EEEB4015CE1A",
+      "locally_modified": true
+    },
+    {
+      "relative_path": "include\\sak\\partition_raw_device_io.h",
+      "source_blob_oid": "d01c9201ea94ad45bbdd616a9db7325b062f10ef",
+      "source_sha256": "D1687A3736C0192219225519348D9A58BCF89329E06C8D5155CE31B4B6A21A28",
+      "vendored_sha256": "358620D26A90CF59097402AAF11C42D28D63918AE3FF8B77AD8CA812C3ECD098",
+      "locally_modified": true
+    },
+    {
+      "relative_path": "src\\core\\apfs_crypto.cpp",
+      "source_blob_oid": "5e8999c2f616e14cd22146e12b9090729daa612d",
+      "source_sha256": "A3C3D5593166DC788C56EE2A54560E08C75B6E3F0618588B72994D3E6ABC2D30",
+      "vendored_sha256": "B489F2DBBE5BF4E324A95031E63EFA9CDCC34AEC9CFECEA7D2ED2C5C27B41D99",
+      "locally_modified": true
+    },
+    {
+      "relative_path": "src\\core\\apfs_keybag.cpp",
+      "source_blob_oid": "dc552d3325ff42b92fb9008847ec8ed2bbc65d13",
+      "source_sha256": "C6A1A6DE2C781B6FCE19A16B76B4F71ECB638409EAF27EE32D1D5FA2890294E7",
+      "vendored_sha256": "412D3A52D8B4037EE8ACFA4B449ED68C6F84013FCF281E34F583A43746AF9694",
+      "locally_modified": true
+    },
+    {
+      "relative_path": "src\\core\\partition_apfs_file_system_reader.cpp",
+      "source_blob_oid": "97142cf0ad63e90a890ed4ed6f931437cee48cdf",
+      "source_sha256": "C64D8C4432D7F99E2F3A01C3C1B5FFC8E110E4DA3A6855A53A8017742EFF0092",
+      "vendored_sha256": "53E850CF74390B1A3224BA2065BF482D07D19E7A6B69C4A364384CFB6DC1B8B6",
+      "locally_modified": true
+    },
+    {
+      "relative_path": "src\\core\\partition_apfs_writer.cpp",
+      "source_blob_oid": "aaa04f6e5694d2384a65440c95be057eb0ad8612",
+      "source_sha256": "09565C728F0AF2A1F93E1B5DDC4B127386F6A730DB0D91A92CB691F663873B37",
+      "vendored_sha256": "85E3D4E6F2D53CBB10EBD2FEAD8DC139B3A4FC631F0AAF81BA3C055DD3B995D2",
+      "locally_modified": true
+    },
+    {
+      "relative_path": "src\\core\\partition_file_system_detector.cpp",
+      "source_blob_oid": "d220a10e5dfecd7fb95d09845ca38c1f1599ac54",
+      "source_sha256": "04B5A0081E01991E8CEF5AE6159D763F1DCD167EA9501E207614F57C879F5205",
+      "vendored_sha256": "0523C336C118F941DFD9BAA9314E1A9FDC7E79D1AD82DC784373055C80E562D3",
+      "locally_modified": true
+    },
+    {
+      "relative_path": "src\\core\\partition_manager_types.cpp",
+      "source_blob_oid": "dba980eb26489c054dc24e98b6c3b4fcee614342",
+      "source_sha256": "52DE497E8FE3A980C149509DE0220E593449C9543F367DC673FC82FDE8D579BE",
+      "vendored_sha256": "C6DC9C8FC0718246A4462501B0C596C40CBB5D73862E77CA2CF5A543F96ED905",
+      "locally_modified": true
+    },
+    {
+      "relative_path": "src\\core\\partition_raw_device_io.cpp",
+      "source_blob_oid": "879131ef63d2106a4b55627b62aaa3196ac983ef",
+      "source_sha256": "5D3E598531AB7BA1F9BE38F0AD7DD6022ECD1D8FB97C92E404E4643191F555FF",
+      "vendored_sha256": "E67A1F7DADFEE27FD37D24044E1ABF437C31C124654FB9629C382DFA81383D5D",
+      "locally_modified": true
+    }
+  ]
+}

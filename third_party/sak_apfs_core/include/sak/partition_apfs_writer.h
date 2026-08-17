@@ -1,5 +1,3 @@
-// Copyright (c) 2026 Randy Northrup. All rights reserved.
-
 /// @file partition_apfs_writer.h
 /// @brief Fail-closed APFS write preflight for future Partition Manager mutation support.
 
@@ -9,6 +7,7 @@
 
 #include <QByteArray>
 #include <QPair>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -360,6 +359,19 @@ struct PartitionApfsImageFileInsertCommitRequest {
     // regular file. A non-empty target requires empty file_data, no compression,
     // and no sparse payload; target is stored in com.apple.fs.symlink.
     QString symbolic_link_target;
+    // Import fidelity: when preserve_inode_metadata is true, the inserted file's inode
+    // carries these adopted owner/group/mode/bsd_flags/timestamps (recovered from a foreign
+    // source file) instead of generated defaults. False leaves every generated insert
+    // byte-identical. inode_mode is the full st_mode; the four times are j_inode_val ns.
+    bool preserve_inode_metadata{false};
+    uint32_t inode_owner{0};
+    uint32_t inode_group{0};
+    uint16_t inode_mode{0};
+    uint32_t inode_bsd_flags{0};
+    uint64_t inode_create_time{0};
+    uint64_t inode_mod_time{0};
+    uint64_t inode_change_time{0};
+    uint64_t inode_access_time{0};
     PartitionApfsWriteOptions options;
 };
 
@@ -388,16 +400,17 @@ struct PartitionApfsImageResizeCommitRequest {
     PartitionApfsWriteOptions options;
 };
 
-/// @brief Request to add a hard link (a second name) to one root file in a generated
-///        APFS container with a true in-place copy-on-write checkpoint commit (A7). The
-///        new name resolves to the source file's inode -- no data or inode is copied;
-///        the inode's link count rises to 2 and sibling-link/sibling-map records are
-///        added for both names.
+/// @brief Request to add a hard link to one file in a generated APFS container with a
+///        true in-place copy-on-write checkpoint commit (A7). Source and destination
+///        parents are resolved at arbitrary depth; empty paths select the volume root.
+///        The new name resolves to the source file's inode -- no data or inode is copied.
 struct PartitionApfsImageFileHardlinkCommitRequest {
     QString source_image_path;
     QString written_image_path;
     QString source_file_name;
     QString link_file_name;
+    QString source_parent_directory_path;
+    QString link_parent_directory_path;
     PartitionApfsWriteOptions options;
 };
 
@@ -628,6 +641,13 @@ struct PartitionApfsRawDirectoryChildWriteCommitRequest {
     // the in-memory path unchanged. Mirrors PartitionApfsRawFileInsertCommitRequest.
     QString file_data_path;
     uint64_t file_data_stream_size{0};
+    // A5: store the child transparently compressed. Same flags and precedence as
+    // PartitionApfsRawFileInsertCommitRequest; incompatible with a streamed
+    // payload (fails closed).
+    bool compress_zlib{false};
+    bool compress_lzfse{false};
+    bool compress_lzvn{false};
+    bool compress_lzbitmap{false};
     bool target_mutation_confirmed{false};
     bool allow_raw_device_target{false};
     PartitionApfsWriteOptions options;
@@ -702,14 +722,16 @@ struct PartitionApfsRawFileCloneCommitRequest {
     PartitionApfsWriteOptions options;
 };
 
-/// @brief Request to add a hard link (a second name) to one root file in a generated APFS
-///        container on a raw device with a true in-place copy-on-write checkpoint commit
-///        (A7). Mirrors PartitionApfsImageFileHardlinkCommitRequest applied in place.
+/// @brief Request to add a hard link to one file in a generated APFS container on a raw
+///        device with a true in-place copy-on-write checkpoint commit (A7). Source and
+///        destination parents may be at arbitrary depth. Mirrors the image request in place.
 struct PartitionApfsRawFileHardlinkCommitRequest {
     QString target_path;
     uint64_t target_container_bytes{0};
     QString source_file_name;
     QString link_file_name;
+    QString source_parent_directory_path;
+    QString link_parent_directory_path;
     bool target_mutation_confirmed{false};
     bool allow_raw_device_target{false};
     PartitionApfsWriteOptions options;
@@ -905,6 +927,32 @@ public:
     [[nodiscard]] static QVector<QPair<quint64, quint64>> readExtentRefTreeBlocksForTesting(
         const QVector<QByteArray>& node_blocks, uint32_t block_size);
     [[nodiscard]] static bool verifyObjectChecksum(const QByteArray& object_bytes);
+    /// @brief True when a free-queue run {paddr, length} sits entirely inside a container of
+    ///        @p block_count blocks AND is no longer than one commit can legitimately free
+    ///        contiguously. A corrupt on-disk record would otherwise expand into a
+    ///        multi-exabyte block list (OOM) and wrap paddr+offset past 2^64, and a merely
+    ///        container-sized run is still a multi-GB expansion on large media. Pure seam for
+    ///        the fail-closed bounds guard in the free-queue leaf parser.
+    [[nodiscard]] static bool freeQueueRunInBoundsForTesting(quint64 paddr,
+                                                             quint64 length,
+                                                             quint64 block_count);
+    /// @brief True when a run of @p run_length blocks still fits the free-queue reclaim
+    ///        expansion budget after @p accumulated_blocks have been counted. The budget is a
+    ///        fixed ceiling on the whole queue, not per run and not a function of the container
+    ///        size, because expanding the runs materializes one address per block. Pure seam for
+    ///        the fail-closed budget guard shared by the parser and the reclaim expander.
+    [[nodiscard]] static bool freeQueueExpansionWithinBudgetForTesting(quint64 accumulated_blocks,
+                                                                       quint64 run_length);
+    /// @brief True when the in-place commit's subtree collector may descend into directory
+    ///        @p directory_id at nesting @p depth. False once the depth cap is exceeded or
+    ///        the id was already collected: a drec-level directory cycle in an untrusted
+    ///        source image (A lists B, B lists A) is invisible to the reader's node-level
+    ///        guards and would otherwise recurse until the stack is exhausted. @p visited
+    ///        carries the ids collected so far and gains @p directory_id when admitted.
+    ///        Pure seam for the recursive collector's fail-closed guard.
+    [[nodiscard]] static bool treeCollectAdmitsDirectoryForTesting(quint64 directory_id,
+                                                                   int depth,
+                                                                   QSet<quint64>* visited);
     /// \brief The internal-pool cib/bitmap slot {cib_block, bitmap_block} a
     ///        crash-safe in-place commit writes next, given the live cib block of
     ///        a generated single-chunk container. Round-robins the three IP slots
@@ -1119,6 +1167,12 @@ public:
     ///        the production rule (@c isWindowsRawDevicePath). Never call from production code.
     static void setRawDeviceTargetPredicateForTesting(
         std::function<bool(const QString&)> predicate);
+    /// @brief True when @p path is currently accepted as a raw-device commit target:
+    ///        the production Windows raw-device rule, or whatever the test seam
+    ///        predicate accepts while installed. Callers building @c commitRaw*
+    ///        requests derive @c allow_raw_device_target from this so their opt-in
+    ///        stays consistent with the engine's own classification.
+    [[nodiscard]] static bool acceptsRawDeviceTargetPath(const QString& path);
     [[nodiscard]] static PartitionApfsImageVolumeLabelResult changeImageOnlyVolumeLabel(
         const PartitionApfsImageVolumeLabelRequest& request);
     [[nodiscard]] static PartitionApfsRawVolumeLabelResult changeRawVolumeLabel(

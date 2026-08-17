@@ -22,6 +22,26 @@ this project. Treat the source checkout as read-only until specific files are co
 vendored, subtree-imported, or submodule-pinned into this repository. After import,
 only edit the local copy in `apfs_for_windows`.
 
+## Current Repository Baseline (2026-08-16)
+
+- Repository layout and ownership are documented in `docs/ARCHITECTURE.md`.
+- Strict release status lives in `docs/PRODUCTION_READINESS.md`; current state is
+  development-certified, not production-ready.
+- Copied APFS core is one 20-file local fork with exact provenance in
+  `third_party/sak_apfs_core/IMPORT_MANIFEST.json`.
+- Native hard-link transport is published at
+  `https://github.com/RandyNorthrup/winfsp-apfs`, branch `main`, commit
+  `a95017786229034c5dc62e5f1384bf4303d235e9`. Main repo pins this in
+  `dependencies/winfsp-apfs.json` and one `third_party/winfsp` submodule; no
+  second WinFsp source copy belongs here.
+- Production CMake mode rejects missing, mixed, dirty, or unpinned WinFsp input,
+  requires native hard-link ABI, and compiles project targets with `/W4 /WX`.
+- Release packages carry build metadata, APFS/WinFsp provenance, payload manifest,
+  and SHA-256 list. Strict readiness also requires signatures and evidence tied
+  to exact package hash.
+- Repository gates never reboot a host, operate a VM, install a driver, enable
+  Test Mode, or mutate physical APFS media.
+
 ## Current APFS Assets To Reuse
 
 Use these directly first:
@@ -315,7 +335,7 @@ Exit gate: release checklist passes with artifacts under this repo.
 
 - Repo initialized locally.
 - APFS core copied into `third_party/sak_apfs_core` from source commit
-  `2f1d9844fabb3e6e8190f906e5cf4906e5e5f281`; source checkout remains
+  `5587736df4d27e0eb5ca6e9f60f3c69614023b13`; source checkout remains
   unmodified and off-limits.
 - CMake project builds `sak_apfs_core`, `apfs_probe`, `apfs_mount_service`,
   `apfs_winfs_worker`, `apfs_mount_manager`, and `apfs_core_selftest`.
@@ -797,14 +817,14 @@ Exit gate: release checklist passes with artifacts under this repo.
   write denial on `Y:`.
 - Earlier USB raw RW proof is saved at
   `artifacts\usb-rw\usb-raw-rw-proof.json`. Current USB verifiers pin Disk 1
-  `USB DISK 3.0` serial `067D19C65080`, APFS GPT partition 2, target
+  `USB DISK 3.0` serial redacted, APFS GPT partition 2, target
   `\\?\GLOBALROOT\Device\Harddisk1\Partition2`, temporarily remount `Y:` with
   `--read-write --allow-raw-writes`, mutate one root proof directory plus one
   direct child file, restore read-only config, avoid service restart, and do not
   reboot.
 - Serial-pinned normal-user USB RW proof is current. On
   `2026-07-10T06:51:00Z`, `scripts\verify-usb-normal-user-rw.ps1 -NoDiagnostics`
-  passed against Disk 1 partition 2 at `Y:` as `MINI-DT\Randy` without reboot:
+  passed against Disk 1 partition 2 at `Y:` as a normal user without reboot:
   proof directory create passed, child file write hash matched
   `84430AC23FB71E125BF33F1D9A1DE3E30676F8EE776CB4B790BCDCD4905F2FC1`, rename
   passed, file delete passed, directory delete passed, service PID stayed
@@ -867,13 +887,12 @@ Exit gate: release checklist passes with artifacts under this repo.
   performed no file mutation, left the service process alive, and restored `V:`
   read-only with raw writes disabled. Real physical unplug/replug and raw-media
   power-loss recovery remain unproven.
-- Installed WinFsp 2.1 and the current upstream WinFsp header both mark volume
-  and file-info hard-link fields `unimplemented; set to 0`; the protocol exposes
-  no create-hard-link transaction to a user-mode filesystem. Existing APFS hard
-  links are preserved, and deletion of one name is certified, but Explorer
-  hard-link creation needs a WinFsp protocol/kernel fork or a different kernel
-  filesystem transport. Upstream header:
-  `https://raw.githubusercontent.com/winfsp/winfsp/master/inc/winfsp/fsctl.h`.
+- Stock WinFsp 2.1 lacked a create-hard-link transaction. The pinned
+  `winfsp-apfs` fork now adds `FileLinkInformation`/`FileLinkInformationEx`
+  transport, link-count reporting, and `FILE_SUPPORTS_HARD_LINKS`; APFS worker
+  callback and copied-core hard-link tests compile and pass. Production still
+  requires WDK kernel tests, exact driver/DLL/worker runtime evidence, and
+  Microsoft-compatible signing without Test Mode.
 - `scripts\repair-apfs-for-windows-install.ps1` now packages that admin recovery
   as one auditable command, reaps lingering installed worker processes before
   copying binaries, and proves the result in
@@ -903,7 +922,7 @@ Exit gate: release checklist passes with artifacts under this repo.
 ## 2026-07-09 Current Implementation Update
 
 - Re-imported APFS core from source commit
-  `2f1d9844fabb3e6e8190f906e5cf4906e5e5f281` into
+  `5587736df4d27e0eb5ca6e9f60f3c69614023b13` into
   `third_party\sak_apfs_core`; source checkout was not edited.
 - Vendored Apple LZFSE/LZVN reference code under `third_party\lzfse` and linked
   it through `sak_lzfse` so the newer compression paths build locally.
@@ -987,7 +1006,7 @@ Exit gate: release checklist passes with artifacts under this repo.
 
 - Current SAK recertification media changed from the earlier GPT Partition 2
   layout to a hybrid Windows MBR Partition 1 view. Disk 1 remains pinned by USB
-  bus, non-boot/system status, serial `067D19C65080`, and 31,042,043,904-byte
+  bus, non-boot/system status, redacted serial, and 31,042,043,904-byte
   physical size; exact target `\\?\GLOBALROOT\Device\Harddisk1\Partition1`
   probes as a 536,870,912-byte APFS `RawSignature` container and mounts at `V:`.
 - Service discovery now parses MBR primary partitions in addition to GPT and
