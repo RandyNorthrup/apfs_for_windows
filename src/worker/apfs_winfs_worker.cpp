@@ -1286,6 +1286,12 @@ private:
 
     NTSTATUS resolvePathNoLock(const QString& normalized, ResolvedEntry* resolved) {
         if (normalized == QStringLiteral("/")) {
+            const auto root = readerSession_->debugFile(normalized);
+            if (!root.ok || !root.blockers.isEmpty()) {
+                trace(QStringLiteral("resolve root inode failed: %1")
+                          .arg(root.blockers.join(QStringLiteral("; "))));
+                return STATUS_OBJECT_NAME_NOT_FOUND;
+            }
             if (resolved) {
                 *resolved = ResolvedEntry{.path = QStringLiteral("/"),
                                           .name = QStringLiteral(""),
@@ -1294,7 +1300,16 @@ private:
                                           .symlink = false,
                                           .objectId = kApfsVolumeRootObjectId,
                                           .sizeBytes = 0,
-                                          .inodeMode = 0040755};
+                                          .createdTimeNs = root.inode_created_time_ns,
+                                          .modifiedTimeNs = root.inode_modified_time_ns,
+                                          .changedTimeNs = root.inode_changed_time_ns,
+                                          .accessedTimeNs = root.inode_accessed_time_ns,
+                                          .writeGenerationCounter =
+                                              root.inode_write_generation_counter,
+                                          .bsdFlags = root.inode_bsd_flags,
+                                          .ownerId = root.inode_owner_id,
+                                          .groupId = root.inode_group_id,
+                                          .inodeMode = root.inode_mode};
             }
             return STATUS_SUCCESS;
         }
@@ -1953,7 +1968,7 @@ private:
         QString parentDirectoryPath;
         QString targetName;
         if (normalized == QStringLiteral("/")) {
-            if (!directory || metadata.xattr_mutations.isEmpty()) {
+            if (!directory) {
                 return STATUS_NOT_SUPPORTED;
             }
             targetName = QStringLiteral("/");

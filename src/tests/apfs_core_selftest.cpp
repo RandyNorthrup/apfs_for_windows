@@ -894,6 +894,60 @@ int main(int argc, char* argv[]) {
     }
     appendProof(&proofs, QStringLiteral("commit volume-root embedded xattr"));
 
+    const QString rootMetadataImage = tempDir.filePath(QStringLiteral("root-metadata.apfs"));
+    const auto rootMetadataSet = sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
+        {.source_image_path = rootXattrImage,
+         .written_image_path = rootMetadataImage,
+         .target_name = QStringLiteral("/"),
+         .target_is_directory = true,
+         .metadata = {.update_created_time = true,
+                      .created_time_ns = 1'500'000'000'100'000'000ULL,
+                      .update_modified_time = true,
+                      .modified_time_ns = 1'500'000'000'200'000'000ULL,
+                      .update_changed_time = true,
+                      .changed_time_ns = 1'500'000'000'300'000'000ULL,
+                      .update_accessed_time = true,
+                      .accessed_time_ns = 1'500'000'000'400'000'000ULL,
+                      .update_inode_mode = true,
+                      .inode_mode = 0711,
+                      .update_bsd_flags = true,
+                      .bsd_flags = 0x00018000U,
+                      .update_owner_id = true,
+                      .owner_id = 501,
+                      .update_group_id = true,
+                      .group_id = 20},
+         .options = options});
+    QFile rootMetadataFile(rootMetadataImage);
+    if (!rootMetadataFile.open(QIODevice::ReadOnly)) {
+        return fail(QStringLiteral("verify volume-root inode metadata"),
+                    QStringLiteral("unable to open root metadata image"));
+    }
+    const auto rootMetadata =
+        sak::PartitionApfsFileSystemReader::debugFile(&rootMetadataFile, QStringLiteral("/"));
+    const auto rootXattrAfterMetadata =
+        sak::PartitionApfsFileSystemReader::readXattrsFromImage(
+            rootMetadataImage, QStringLiteral("/"));
+    if (!rootMetadataSet.ok || !rootMetadata.ok || !hasRootXattr(rootXattrAfterMetadata) ||
+        rootMetadata.inode_object_id != 2 ||
+        rootMetadata.inode_created_time_ns != 1'500'000'000'100'000'000ULL ||
+        rootMetadata.inode_modified_time_ns != 1'500'000'000'200'000'000ULL ||
+        rootMetadata.inode_changed_time_ns != 1'500'000'000'300'000'000ULL ||
+        rootMetadata.inode_accessed_time_ns != 1'500'000'000'400'000'000ULL ||
+        (rootMetadata.inode_mode & 0777) != 0711 ||
+        rootMetadata.inode_bsd_flags != 0x00018000U ||
+        rootMetadata.inode_owner_id != 501 || rootMetadata.inode_group_id != 20) {
+        return fail(QStringLiteral("verify volume-root inode metadata"),
+                    QStringLiteral("volume-root inode metadata mismatch"),
+                    rootMetadataSet.blockers + rootMetadata.blockers +
+                        rootXattrAfterMetadata.blockers);
+    }
+    appendProof(&proofs,
+                QStringLiteral("verify volume-root inode metadata"),
+                {{QStringLiteral("mode"), rootMetadata.inode_mode},
+                 {QStringLiteral("bsd_flags"), QString::number(rootMetadata.inode_bsd_flags)},
+                 {QStringLiteral("owner"), QString::number(rootMetadata.inode_owner_id)},
+                 {QStringLiteral("group"), QString::number(rootMetadata.inode_group_id)}});
+
     const QString directoryXattrImage =
         tempDir.filePath(QStringLiteral("directory-xattr.apfs"));
     sak::PartitionApfsInodeMetadataUpdate directoryXattrUpdate;
@@ -901,7 +955,7 @@ int main(int argc, char* argv[]) {
         {.name = QStringLiteral("user.apfswin_directory"),
          .value = QByteArray("directory EA payload")});
     const auto directoryXattrSet = sak::PartitionApfsWriter::commitImageOnlyInodeMetadata(
-        {.source_image_path = rootXattrImage,
+        {.source_image_path = rootMetadataImage,
          .written_image_path = directoryXattrImage,
          .target_name = QStringLiteral("Proof Folder"),
          .target_is_directory = true,

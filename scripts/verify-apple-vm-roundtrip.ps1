@@ -17,6 +17,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "lib\native-ea.ps1")
+. (Join-Path $PSScriptRoot "lib\native-basic-info.ps1")
 
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -231,6 +232,16 @@ function Test-MetadataEqual {
     return $true
 }
 
+function Test-TimeNear {
+    param([datetime]$Actual, [datetime]$Expected)
+    [Math]::Abs(($Actual.ToUniversalTime() - $Expected.ToUniversalTime()).TotalSeconds) -le 1
+}
+
+function ConvertTo-UnixNanoseconds {
+    param([Parameter(Mandatory = $true)][datetime]$TimeUtc)
+    [int64](([DateTimeOffset]$TimeUtc).ToUnixTimeMilliseconds() * 1000000)
+}
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $resolvedBuildDir = Resolve-RepoPath $BuildDir
 $resolvedPasswordFile = Resolve-RepoPath $PasswordFile
@@ -300,6 +311,15 @@ try {
     $windowsHash = $null
     $unicodeHash = $null
     $windowsCreatedLinkHash = $null
+    $rootOriginCreation = [datetime]::SpecifyKind([datetime]"2019-06-07T08:09:10", "Utc")
+    $rootOriginAccess = [datetime]::SpecifyKind([datetime]"2020-07-08T09:10:11", "Utc")
+    $rootOriginWrite = [datetime]::SpecifyKind([datetime]"2021-08-09T10:11:12", "Utc")
+    $rootFinalCreation = [datetime]::SpecifyKind([datetime]"2022-09-10T11:12:13", "Utc")
+    $rootFinalAccess = [datetime]::SpecifyKind([datetime]"2023-10-11T12:13:14", "Utc")
+    $rootFinalWrite = [datetime]::SpecifyKind([datetime]"2024-11-12T13:14:15", "Utc")
+    $rootOriginWindows = $null
+    $rootOriginAclExitCode = $null
+    $normalIdentity = (& whoami.exe).Trim()
     $originWorker = $null
     try {
         $originWorker = Start-ApfsWorker -Target $originImage -Name "windows-origin"
@@ -339,6 +359,27 @@ try {
         $unicodeHash = (Get-FileHash -LiteralPath $unicodeFile -Algorithm SHA256).Hash
         $windowsCreatedLinkHash =
             (Get-FileHash -LiteralPath $windowsCreatedLink -Algorithm SHA256).Hash
+        Set-NativeDirectoryBasicInfo -Path $mountRoot `
+            -CreationTimeUtc $rootOriginCreation `
+            -LastAccessTimeUtc $rootOriginAccess `
+            -LastWriteTimeUtc $rootOriginWrite `
+            -Attributes ([IO.FileAttributes]::Directory -bor `
+                [IO.FileAttributes]::Hidden -bor [IO.FileAttributes]::Archive)
+        & icacls.exe $mountRoot /inheritance:r /grant:r `
+            "$normalIdentity`:(OI)(CI)(M)" | Out-Null
+        $rootOriginAclExitCode = $LASTEXITCODE
+        if ($rootOriginAclExitCode -ne 0) {
+            throw "Windows origin root icacls failed with exit code $rootOriginAclExitCode"
+        }
+        $rootItem = Get-Item -LiteralPath $mountRoot -Force
+        $rootOriginWindows = [ordered]@{
+            creation_utc = $rootItem.CreationTimeUtc.ToString("O")
+            access_utc = $rootItem.LastAccessTimeUtc.ToString("O")
+            write_utc = $rootItem.LastWriteTimeUtc.ToString("O")
+            hidden = [bool](($rootItem.Attributes -band [IO.FileAttributes]::Hidden) -ne 0)
+            archive = [bool](($rootItem.Attributes -band [IO.FileAttributes]::Archive) -ne 0)
+            acl_exit_code = $rootOriginAclExitCode
+        }
     } finally {
         Stop-ApfsWorker -Process $originWorker
     }
@@ -346,6 +387,24 @@ try {
         $unicodeHash -ne "D15C89BA02965E34B5E292AEB8D7B7D0A12B538FB6DC623DD998327D3F118DBC" -or
         $windowsCreatedLinkHash -ne $windowsHash) {
         throw "Windows origin payload hashes are not deterministic."
+    }
+    $rootOriginDebug = Invoke-ProbeDebug -ImagePath $originImage -ApfsPath "/"
+    $rootOriginRaw = Get-InodeMetadataSummary $rootOriginDebug
+    $rootOriginRawValid = [bool](
+        [int64]$rootOriginDebug.inode_object_id -eq 2 -and
+        [int64]$rootOriginDebug.inode_created_time_ns -eq
+            (ConvertTo-UnixNanoseconds $rootOriginCreation) -and
+        [int64]$rootOriginDebug.inode_accessed_time_ns -eq
+            (ConvertTo-UnixNanoseconds $rootOriginAccess) -and
+        [int64]$rootOriginDebug.inode_modified_time_ns -eq
+            (ConvertTo-UnixNanoseconds $rootOriginWrite) -and
+        [int64]$rootOriginDebug.inode_bsd_flags -eq 98304 -and
+        ([int64]$rootOriginDebug.inode_mode -band 0xF000) -eq 0x4000 -and
+        ([int64]$rootOriginDebug.inode_mode -band 0x01FF) -eq 0x01FF -and
+        [int64]$rootOriginDebug.inode_owner_id -eq 544 -and
+        [int64]$rootOriginDebug.inode_group_id -eq 544)
+    if (-not $rootOriginRawValid) {
+        throw "Windows origin root metadata did not persist in copied-core reader."
     }
 
     $mutateScript = Join-Path $runDirectory "mutate-apfs-roundtrip.sh"
@@ -372,11 +431,30 @@ try {
     $metadataBeforeDebug = Invoke-ProbeDebug -ImagePath $macosMutatedImage `
         -ApfsPath "/MacProof/mac-hardlink.txt"
     $metadataBefore = Get-InodeMetadataSummary $metadataBeforeDebug
+    $rootMetadataAfterMacDebug = Invoke-ProbeDebug -ImagePath $macosMutatedImage `
+        -ApfsPath "/"
+    $rootMetadataAfterMac = Get-InodeMetadataSummary $rootMetadataAfterMacDebug
+    $rootMacMutationValid = [bool](
+        [int64]$rootMetadataAfterMacDebug.inode_object_id -eq 2 -and
+        [int64]$rootMetadataAfterMacDebug.inode_created_time_ns -eq
+            (ConvertTo-UnixNanoseconds $rootOriginCreation) -and
+        [int64]$rootMetadataAfterMacDebug.inode_modified_time_ns -eq 1646370367000000000 -and
+        [int64]$rootMetadataAfterMacDebug.inode_bsd_flags -eq 65536 -and
+        ([int64]$rootMetadataAfterMacDebug.inode_mode -band 0xF000) -eq 0x4000 -and
+        ([int64]$rootMetadataAfterMacDebug.inode_mode -band 0x01FF) -eq 0x01E9 -and
+        [int64]$rootMetadataAfterMacDebug.inode_owner_id -eq 544 -and
+        [int64]$rootMetadataAfterMacDebug.inode_group_id -eq 544 -and
+        $remoteMutation.WINDOWS_ROOT_MODE -eq "drwxrwxrwx" -and
+        $remoteMutation.MAC_ROOT_MODE -eq "drwxr-x--x")
+    if (-not $rootMacMutationValid) {
+        throw "macOS root metadata mutation did not persist in copied-core reader."
+    }
 
     $returnImage = Join-Path $runDirectory "windows-return.apfs"
     Copy-Item -LiteralPath $macosMutatedImage -Destination $returnImage
     $returnWorker = $null
     $windowsReturn = $null
+    $rootFinalAclExitCode = $null
     try {
         $returnWorker = Start-ApfsWorker -Target $returnImage -Name "windows-return"
         $macFile = Join-Path $mountRoot "MacProof\Nested\mac.txt"
@@ -388,6 +466,14 @@ try {
         $windowsCreatedLink = Join-Path $mountRoot "WinProof\windows-created-symlink"
         $renamedByMac = Join-Path $mountRoot "WinProof\Nested\windows-renamed-by-macos.txt"
         $renamedByWindows = Join-Path $mountRoot "WinProof\Nested\windows-renamed-back-by-windows.txt"
+        $rootItemFromMac = Get-Item -LiteralPath $mountRoot -Force
+        $rootFromMacWindows = [ordered]@{
+            creation_utc = $rootItemFromMac.CreationTimeUtc.ToString("O")
+            access_utc = $rootItemFromMac.LastAccessTimeUtc.ToString("O")
+            write_utc = $rootItemFromMac.LastWriteTimeUtc.ToString("O")
+            hidden = [bool](($rootItemFromMac.Attributes -band [IO.FileAttributes]::Hidden) -ne 0)
+            archive = [bool](($rootItemFromMac.Attributes -band [IO.FileAttributes]::Archive) -ne 0)
+        }
         $macHash = (Get-FileHash -LiteralPath $macFile -Algorithm SHA256).Hash
         $hardLinkHashBefore = (Get-FileHash -LiteralPath $hardLink -Algorithm SHA256).Hash
         $symlinkItemBefore = Get-Item -LiteralPath $symlink -Force
@@ -447,6 +533,26 @@ try {
         $windowsCreatedLinkItemAfter = Get-Item -LiteralPath $windowsCreatedLink -Force
         $windowsCreatedLinkHashAfter =
             (Get-FileHash -LiteralPath $windowsCreatedLink -Algorithm SHA256).Hash
+        Set-NativeDirectoryBasicInfo -Path $mountRoot `
+            -CreationTimeUtc $rootFinalCreation `
+            -LastAccessTimeUtc $rootFinalAccess `
+            -LastWriteTimeUtc $rootFinalWrite `
+            -Attributes ([IO.FileAttributes]::Directory -bor [IO.FileAttributes]::Hidden)
+        & icacls.exe $mountRoot /inheritance:r /grant:r `
+            "$normalIdentity`:(OI)(CI)(M)" | Out-Null
+        $rootFinalAclExitCode = $LASTEXITCODE
+        if ($rootFinalAclExitCode -ne 0) {
+            throw "Windows return root icacls failed with exit code $rootFinalAclExitCode"
+        }
+        $rootItemFinal = Get-Item -LiteralPath $mountRoot -Force
+        $rootFinalWindows = [ordered]@{
+            creation_utc = $rootItemFinal.CreationTimeUtc.ToString("O")
+            access_utc = $rootItemFinal.LastAccessTimeUtc.ToString("O")
+            write_utc = $rootItemFinal.LastWriteTimeUtc.ToString("O")
+            hidden = [bool](($rootItemFinal.Attributes -band [IO.FileAttributes]::Hidden) -ne 0)
+            archive = [bool](($rootItemFinal.Attributes -band [IO.FileAttributes]::Archive) -ne 0)
+            acl_exit_code = $rootFinalAclExitCode
+        }
         $windowsReturn = [ordered]@{
             mac_sha256 = $macHash
             hardlink_sha256_before = $hardLinkHashBefore
@@ -490,6 +596,8 @@ try {
                 Get-NativeExtendedAttribute -Path $mountRoot -Name "user.apfswin_root_rw"))
             final_windows_root_ea = [Text.Encoding]::UTF8.GetString([byte[]](
                 Get-NativeExtendedAttribute -Path $mountRoot -Name "user.apfswin_windows_root"))
+            root_from_macos = $rootFromMacWindows
+            final_root = $rootFinalWindows
         }
     } finally {
         Stop-ApfsWorker -Process $returnWorker
@@ -500,6 +608,9 @@ try {
     $metadataAfter = Get-InodeMetadataSummary $metadataAfterDebug
     $symlinkDebug = Invoke-ProbeDebug -ImagePath $returnImage `
         -ApfsPath "/MacProof/windows-symlink"
+    $rootMetadataAfterWindowsDebug = Invoke-ProbeDebug -ImagePath $returnImage `
+        -ApfsPath "/"
+    $rootMetadataAfterWindows = Get-InodeMetadataSummary $rootMetadataAfterWindowsDebug
     $metadataPreserved = Test-MetadataEqual -Before $metadataBefore -After $metadataAfter
     $symlinkXattr = @($symlinkDebug.xattrs | Where-Object { $_.name -eq "com.apple.fs.symlink" })
     $symlinkMetadataValid = [bool](
@@ -508,6 +619,36 @@ try {
         [int64]$symlinkDebug.inode_size -eq 0 -and
         @($symlinkDebug.extents).Count -eq 0 -and
         $symlinkXattr.Count -eq 1)
+    $rootOriginWindowsValid = [bool](
+        $rootOriginWindows.hidden -and $rootOriginWindows.archive -and
+        $rootOriginWindows.acl_exit_code -eq 0 -and
+        (Test-TimeNear ([datetime]$rootOriginWindows.creation_utc) $rootOriginCreation) -and
+        (Test-TimeNear ([datetime]$rootOriginWindows.access_utc) $rootOriginAccess) -and
+        (Test-TimeNear ([datetime]$rootOriginWindows.write_utc) $rootOriginWrite))
+    $rootFinalMutationValid = [bool](
+        $windowsReturn.root_from_macos.archive -and
+        -not $windowsReturn.root_from_macos.hidden -and
+        (Test-TimeNear ([datetime]$windowsReturn.root_from_macos.creation_utc) $rootOriginCreation) -and
+        (Test-TimeNear ([datetime]$windowsReturn.root_from_macos.write_utc) `
+            ([datetime]::SpecifyKind([datetime]"2022-03-04T05:06:07", "Utc"))) -and
+        $windowsReturn.final_root.hidden -and
+        -not $windowsReturn.final_root.archive -and
+        $windowsReturn.final_root.acl_exit_code -eq 0 -and
+        (Test-TimeNear ([datetime]$windowsReturn.final_root.creation_utc) $rootFinalCreation) -and
+        (Test-TimeNear ([datetime]$windowsReturn.final_root.access_utc) $rootFinalAccess) -and
+        (Test-TimeNear ([datetime]$windowsReturn.final_root.write_utc) $rootFinalWrite) -and
+        [int64]$rootMetadataAfterWindowsDebug.inode_object_id -eq 2 -and
+        [int64]$rootMetadataAfterWindowsDebug.inode_created_time_ns -eq
+            (ConvertTo-UnixNanoseconds $rootFinalCreation) -and
+        [int64]$rootMetadataAfterWindowsDebug.inode_accessed_time_ns -eq
+            (ConvertTo-UnixNanoseconds $rootFinalAccess) -and
+        [int64]$rootMetadataAfterWindowsDebug.inode_modified_time_ns -eq
+            (ConvertTo-UnixNanoseconds $rootFinalWrite) -and
+        [int64]$rootMetadataAfterWindowsDebug.inode_bsd_flags -eq 32768 -and
+        ([int64]$rootMetadataAfterWindowsDebug.inode_mode -band 0xF000) -eq 0x4000 -and
+        ([int64]$rootMetadataAfterWindowsDebug.inode_mode -band 0x01FF) -eq 0x01FF -and
+        [int64]$rootMetadataAfterWindowsDebug.inode_owner_id -eq 544 -and
+        [int64]$rootMetadataAfterWindowsDebug.inode_group_id -eq 544)
     $windowsMutationValid = [bool](
         $windowsReturn.mac_sha256 -eq "76FD91615F8B856AB498A543707EE1BAC16AD6F56E597584538A0356389281DB" -and
         $windowsReturn.hardlink_sha256_before -eq $windowsReturn.mac_sha256 -and
@@ -540,8 +681,11 @@ try {
         $windowsReturn.delete_root_ea_present_before -and
         $windowsReturn.delete_root_ea_absent_after -and
         $windowsReturn.updated_root_ea -eq "Windows updated root xattr payload" -and
-        $windowsReturn.final_windows_root_ea -eq "Windows final root EA payload")
-    if (-not $metadataPreserved -or -not $symlinkMetadataValid -or -not $windowsMutationValid) {
+        $windowsReturn.final_windows_root_ea -eq "Windows final root EA payload" -and
+        $rootOriginWindowsValid -and $rootOriginRawValid -and
+        $rootMacMutationValid -and $rootFinalMutationValid)
+    if (-not $metadataPreserved -or -not $symlinkMetadataValid -or
+        -not $windowsMutationValid) {
         throw "Windows return mutation or copied-core metadata preservation failed."
     }
 
@@ -581,6 +725,10 @@ try {
             windows_sha256 = $windowsHash
             unicode_sha256 = $unicodeHash
             windows_created_symlink_sha256 = $windowsCreatedLinkHash
+            root_metadata = $rootOriginWindows
+            root_metadata_valid = [bool]$rootOriginWindowsValid
+            root_inode_metadata = $rootOriginRaw
+            root_inode_metadata_valid = [bool]$rootOriginRawValid
         }
         macos_mutation = $remoteMutation
         windows_return = $windowsReturn
@@ -588,6 +736,10 @@ try {
         inode_metadata_after = $metadataAfter
         inode_metadata_preserved = [bool]$metadataPreserved
         symlink_metadata_valid = [bool]$symlinkMetadataValid
+        root_inode_metadata_after_macos = $rootMetadataAfterMac
+        root_macos_mutation_valid = [bool]$rootMacMutationValid
+        root_inode_metadata_after_windows = $rootMetadataAfterWindows
+        root_windows_mutation_valid = [bool]$rootFinalMutationValid
         windows_return_image_sha256 = $returnImageHash
         macos_final = $remoteValidation
         native_fsck_before_and_after_each_macos_mount = $true

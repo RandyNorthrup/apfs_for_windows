@@ -1,0 +1,91 @@
+{
+  "component": "apfs_for_windows",
+  "check": "volume_root_metadata_certification",
+  "ok": true,
+  "no_host_reboot_performed": true,
+  "credential_material_recorded": false,
+  "copied_core": {
+    "root_object_id": 2,
+    "exact_times_verified": true,
+    "bsd_flags_verified": true,
+    "posix_mode_owner_group_verified": true,
+    "existing_root_xattr_preserved": true,
+    "ctest_release": "12/12"
+  },
+  "local_winfs_remount": {
+    "ok": true,
+    "no_admin_required": true,
+    "creation_utc": "2019-06-07T08:09:10Z",
+    "access_utc": "2020-07-08T09:10:11Z",
+    "write_utc": "2021-08-09T10:11:12Z",
+    "hidden": true,
+    "archive": true,
+    "raw_bsd_flags": 98304,
+    "raw_inode_mode": 16895,
+    "raw_owner_id": 544,
+    "raw_group_id": 544,
+    "root_acl_exit_code": 0,
+    "root_ea_survived_metadata_updates": true,
+    "remount_persistence_verified": true
+  },
+  "physical_usb": {
+    "ok": true,
+    "disk_number": 1,
+    "partition_number": 1,
+    "serial": "067D19C65080",
+    "physical_size_bytes": 31042043904,
+    "apfs_container_bytes": 536870912,
+    "target": "\\\\?\\GLOBALROOT\\Device\\Harddisk1\\Partition1",
+    "mount": "V:",
+    "proof_creation_utc": "2018-05-06T07:08:09Z",
+    "proof_access_utc": "2019-06-07T08:09:10Z",
+    "proof_write_utc": "2020-07-08T09:10:11Z",
+    "proof_hidden_archive": true,
+    "restored_within_windows_precision": true,
+    "windows_timestamp_resolution_ns": 100,
+    "physical_root_security_modified": false,
+    "root_ea_create_read_update_delete": true,
+    "proof_tree_removed": true,
+    "final_read_only": true,
+    "final_allow_raw_writes": false,
+    "completed_utc": "2026-08-17T00:26:02.4816371Z"
+  },
+  "native_macos_roundtrip": {
+    "ok": true,
+    "windows_origin_raw": {
+      "created_time_ns": "1559894950000000000",
+      "modified_time_ns": "1628503872000000000",
+      "accessed_time_ns": "1594199411000000000",
+      "bsd_flags": 98304,
+      "inode_mode": 16895,
+      "owner_id": 544,
+      "group_id": 544
+    },
+    "after_macos_raw": {
+      "modified_time_ns": "1646370367000000000",
+      "bsd_flags": 65536,
+      "inode_mode": 16873,
+      "owner_id": 544,
+      "group_id": 544
+    },
+    "after_windows_raw": {
+      "created_time_ns": "1662808333000000000",
+      "modified_time_ns": "1731417255000000000",
+      "accessed_time_ns": "1697026394000000000",
+      "bsd_flags": 32768,
+      "inode_mode": 16895,
+      "owner_id": 544,
+      "group_id": 544
+    },
+    "macos_volume_ownership": "Disabled",
+    "macos_presented_owner_group": "501:20",
+    "native_fsck_before_and_after_each_mount": true,
+    "final_image_sha256": "AE08EFBEA34A951F6E74F2C6ED9993C305DB0C9D0D8C299F1402578974C74D31",
+    "duration_seconds": 35.809,
+    "completed_utc": "2026-08-17T00:25:13.7318473Z"
+  },
+  "claim_boundary": {
+    "physical_usb_restore": "Windows-visible times and flags restored; APFS sub-100 ns timestamp tails, change time, and write generation are not bit-identical after a metadata transaction.",
+    "windows_security": "POSIX mode, owner, group, and change time persist; mounted access still uses the compatibility ACL rather than Apple ACL blob round-trip."
+  }
+}

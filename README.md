@@ -63,9 +63,9 @@ Current state:
   an existing 16 MiB file. It also creates an Apple-compatible symbolic link and
   proves a later copy-on-write mutation preserves its directory type, inode mode,
   and `com.apple.fs.symlink` xattr.
-- Writable mounts commit Windows basic-info changes on files and named
-  directories to APFS create/access/modify/change times and BSD flags. Windows
-  security changes persist APFS POSIX mode, owner, and group while a
+- Writable mounts commit Windows basic-info changes on files, named directories,
+  and the volume root to APFS create/access/modify/change times and BSD flags.
+  Windows security changes on all three persist APFS POSIX mode, owner, and group while a
   compatibility ACL keeps the mounted drive usable by the interactive user and
   service account.
 - WinFsp reparse callbacks expose Apple symbolic links and create, follow,
@@ -183,8 +183,11 @@ parameters. No password, key, or password-file content is copied into source or
 proof JSON. It creates a Windows APFS image, mutates and checks it with the macOS
 kernel plus `fsck_apfs`, mutates it again through WinFsp on Windows, then runs a
 second native macOS mount and `fsck_apfs` pair. File, named-directory, and
-volume-root xattrs are mutated in both directions. The latest sanitized evidence is
-`docs/evidence/apple-vm-roundtrip-2026-08-16.json`.
+volume-root xattrs are mutated in both directions; root basic-info and POSIX
+security metadata are also validated through raw APFS inode state and native
+macOS presentation. Latest sanitized evidence:
+`docs/evidence/apple-vm-roundtrip-2026-08-17.json` and
+`docs/evidence/root-metadata-2026-08-17.json`.
 
 Serial-pinned normal-user USB write/delete proof is current. The verifier keeps
 file actions in the non-admin parent process, uses service IPC only to switch
@@ -328,14 +331,19 @@ Verified USB evidence:
   `sak-mounted-file-actions-proof-*` directory on the selected mount during full
   proof. It verifies file, named-directory, and volume-root EA
   create/read/update/delete in addition to file namespace, metadata, ACL, and
-  symbolic-link operations.
+  symbolic-link operations. It also performs a transient volume-root basic-info
+  proof and restores original Windows-visible times and flags within Windows
+  `FILETIME` precision; it does not modify physical root security.
   Current certification wraps this proof in an explicit temporary writable
   policy window, then restores the selected mount read-only afterward.
-- Current volume-root USB proof completed at `2026-08-16T23:40:04Z` against the
-  serial-pinned Partition 1 target at `V:`. Root, named-directory, and file EA
-  create/read/update/delete passed; the proof tree was removed; `V:` was restored
-  read-only with raw writes disabled. Artifact:
-  `artifacts\usb-rw\usb-mounted-file-actions-proof.json`.
+- Current volume-root USB proof completed at `2026-08-17T00:26:02Z` against the
+  serial-pinned Partition 1 target at `V:`. Root basic-info accepted fixed
+  create/access/write times plus Hidden/Archive flags, then restored original
+  Windows-visible values within 100 ns `FILETIME` precision. Root,
+  named-directory, and file EA create/read/update/delete also passed; proof tree
+  was removed; root security was not changed; `V:` was restored read-only with
+  raw writes disabled. Artifact:
+  `artifacts\certification\root-metadata-certification.json`.
 - Current media layout changed during SAK recertification. On
   `2026-08-16T17:22:33Z`, the same pinned 31,042,043,904-byte USB disk exposed
   Windows MBR Partition 1 at `V:` while the exact target probe identified a
@@ -431,10 +439,13 @@ Verified USB evidence:
   Current local proof includes a 100-iteration Robocopy soak and real APFS
   basic-info/security, symbolic-link, and supported file/named-directory/
   volume-root EA mutation on both disposable images and the serial-pinned
-  physical USB. Remaining public-RW
+  physical USB. Volume-root basic-info and POSIX security persistence also pass
+  copied-core, local remount, and native macOS round-trip lanes; physical USB
+  basic-info is changed and restored within Windows 100 ns timestamp precision,
+  while physical root security is intentionally left unchanged. Remaining public-RW
   gates are physical raw-media power-loss recovery, real surprise-unplug,
-  hard-link creation, volume-root basic-info/security mutation, zero-length EA
-  values, and non-ASCII-name/large stream-backed xattr mutation.
+  hard-link creation, zero-length EA values, and non-ASCII-name/large
+  stream-backed xattr mutation.
   Existing Apple hard links remain preserved across Windows mutations. WinFsp's
   current public protocol still marks hard-link support unimplemented, so native
   hard-link creation requires a WinFsp protocol/kernel fork or another filesystem

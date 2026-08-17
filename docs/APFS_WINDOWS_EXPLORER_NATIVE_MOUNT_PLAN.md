@@ -259,12 +259,12 @@ Exit gate: release checklist passes with artifacts under this repo.
   read-only denial, raw image, and physical APFS partition mounts pass.
 - M2 complete for current file/directory transaction surface: arbitrary nested
   create/write/rename/move/delete, generation refresh, and rollback/crash lanes pass.
-- M3 file-content, namespace, file/named-directory basic-info and POSIX security
-  metadata, symbolic-link, and supported regular-file/named-directory/volume-root
-  EA exit gates pass on disposable image, physical USB, and native macOS
-  round-trip media. Hard-link creation, volume-root basic-info/security mutation,
-  zero-length EA values, non-ASCII-name EAs, and large stream-backed xattr
-  mutation remain outside the current Windows callback surface.
+- M3 file-content, namespace, file/named-directory/volume-root basic-info and
+  POSIX security metadata, symbolic-link, and supported
+  regular-file/named-directory/volume-root EA exit gates pass on disposable
+  image, physical USB where non-destructive, and native macOS round-trip media.
+  Hard-link creation, zero-length EA values, non-ASCII-name EAs, and large
+  stream-backed xattr mutation remain outside the current Windows callback surface.
 - M4 exit gate passes in a clean Windows 11 VM. Package install, Automatic service,
   saved mount restoration across a reboot, Start Menu, Apps & Features, one
   interactive tray process, installed hashes, and complete uninstall cleanup pass.
@@ -821,10 +821,12 @@ Exit gate: release checklist passes with artifacts under this repo.
 - Serial/signature-pinned physical USB RW passes as normal user on the current
   hybrid MBR Partition 1 APFS target at `V:`. Real APFS timestamp/BSD-flag/POSIX
   security metadata writes, read-only enforcement, Windows symbolic-link
-  creation/follow/delete, and supported regular-file/named-directory/volume-root EA
-  create/read/update/delete now pass on that raw target. Remaining work before
-  public RW default: hard-link creation; volume-root basic-info/security
-  mutation; zero-length, non-ASCII-name, and large stream-backed xattr mutation;
+  creation/follow/delete, supported regular-file/named-directory/volume-root EA
+  create/read/update/delete, and reversible volume-root basic-info now pass on
+  that raw target. Physical root security was intentionally not changed; its
+  implementation is covered by local remount and native macOS lanes. Remaining
+  work before public RW default: hard-link creation; zero-length, non-ASCII-name,
+  and large stream-backed xattr mutation;
   physical raw-media crash/power-loss recovery proof; and real surprise-unplug
   behavior. Apple-created xattr/symlink/hardlink preservation and supported EA
   mutation pass a native macOS round trip. Deterministic image worker crash
@@ -1087,3 +1089,46 @@ Exit gate: release checklist passes with artifacts under this repo.
   ignored one-off VM commands with a credential-free reusable harness. Host,
   user, and ignored password file remain runtime inputs; the harness restarts
   only the named VM and cleans its remote validation directory after uninstall.
+
+## 2026-08-17 Current Implementation Update
+
+- Copied reader session `debugFile("/")` now resolves APFS root inode 2 directly.
+  WinFsp root resolution uses its real times, generation, BSD flags, owner/group,
+  and mode instead of synthetic `0755` metadata. Root `SetBasicInfo`,
+  `SetSecurity`, and `SetEa` now share the copied writer's inode-metadata
+  transaction; upstream `S.A.K.-Utility` was not modified.
+- `apfs_core_selftest` writes exact root create/modify/change/access times, mode,
+  BSD flags, owner/group, and preserves an existing root xattr. Release build and
+  CTest pass 12/12.
+- Local non-admin WinFsp proof sets root times, Hidden/Archive flags, and a
+  compatibility ACL, verifies raw inode mode `040777`, owner/group `544:544`,
+  BSD flags `0x18000`, root xattr coexistence, and identical state after remount.
+- Native Windows -> macOS -> Windows -> macOS round trip passed in 35.809 seconds.
+  Apple validated Windows root birth time, flags, mode, and xattrs; macOS changed
+  root mtime, flags, and mode; Windows read and replaced them; final Apple mount
+  validated Windows replacement plus four clean `fsck_apfs -n` runs. Raw APFS
+  owner/group remained `544:544`; macOS presented `501:20` because image
+  ownership was disabled. Final image SHA-256:
+  `AE08EFBEA34A951F6E74F2C6ED9993C305DB0C9D0D8C299F1402578974C74D31`.
+- Serial-pinned physical USB proof transiently set volume-root
+  create/access/write times and Hidden/Archive flags, then restored original
+  Windows-visible values and flags. Windows `FILETIME` resolution is 100 ns, so
+  sub-100 ns APFS timestamp tails, change time, and write generation are not
+  claimed bit-identical. Physical root security was intentionally not changed.
+  Root/file/directory EAs and proof tree were removed; `V:` finished read-only
+  with raw writes disabled.
+- Integrated no-host-reboot certification passed 28 steps from
+  `2026-08-17T00:23:33Z` through `2026-08-17T00:26:53Z`: local gates, installed
+  Automatic service, native Apple round trip, raw-alias deduplication, mounted
+  USB metadata/EA/symbolic-link actions, serial-pinned USB RW, Unicode,
+  394-character path, 1 MiB Robocopy, concurrent readers, cleanup, and final
+  read-only restoration all passed. No host reboot occurred.
+- Fresh release ZIP
+  `C703700C79FD477207D9D99911D253F38B617924D2E5348990A04D4432C6C521`
+  passed exact-archive Windows 11 VM lifecycle from `2026-08-17T00:32:16Z`
+  through `2026-08-17T00:34:38Z`: clean install, Automatic service, saved `R:`
+  APFS mount restoration after VM reboot, expected file hash, read-only denial,
+  one interactive tray with `Open`/`Exit`, and installed binary hashes all
+  passed. Packaged uninstall removed all product residue and remote artifacts.
+  Host PC was not rebooted. Sanitized evidence:
+  `docs\evidence\windows-vm-install-lifecycle-2026-08-17.json`.

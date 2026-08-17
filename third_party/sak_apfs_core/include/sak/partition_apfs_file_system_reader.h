@@ -150,6 +150,9 @@ public:
     /// Read named embedded xattrs without requiring a regular-file data stream.
     /// Works for regular files, directories, and symbolic links.
     [[nodiscard]] PartitionApfsFileReadResult readXattrs(const QString& path);
+    /// Read fixed inode metadata and xattr/extent diagnostics for any path,
+    /// including the APFS volume root.
+    [[nodiscard]] PartitionApfsFileDebugResult debugFile(const QString& path);
 
 private:
     struct Impl;

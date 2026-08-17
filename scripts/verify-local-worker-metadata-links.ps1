@@ -10,6 +10,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "lib\native-ea.ps1")
+. (Join-Path $PSScriptRoot "lib\native-basic-info.ps1")
 
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -184,8 +185,9 @@ $stderr1 = Join-Path $artifactDir "worker-first.err.txt"
 $stdout2 = Join-Path $artifactDir "worker-second.out.txt"
 $stderr2 = Join-Path $artifactDir "worker-second.err.txt"
 $debugPath = Join-Path $artifactDir "target-debug.json"
+$rootDebugPath = Join-Path $artifactDir "root-debug.json"
 Remove-Item -LiteralPath $image, $trace, $stdout1, $stderr1, $stdout2, $stderr2, `
-    $debugPath, $output -Force -ErrorAction SilentlyContinue
+    $debugPath, $rootDebugPath, $output -Force -ErrorAction SilentlyContinue
 
 & $selftest --make-image $image | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Unable to create APFS image." }
@@ -195,6 +197,12 @@ $access = [datetime]::SpecifyKind([datetime]"2022-03-04T05:06:07", "Utc")
 $write = [datetime]::SpecifyKind([datetime]"2023-04-05T06:07:08", "Utc")
 $dirCreation = [datetime]::SpecifyKind([datetime]"2020-01-02T03:04:05", "Utc")
 $dirWrite = [datetime]::SpecifyKind([datetime]"2024-05-06T07:08:09", "Utc")
+$rootCreation = [datetime]::SpecifyKind([datetime]"2019-06-07T08:09:10", "Utc")
+$rootAccess = [datetime]::SpecifyKind([datetime]"2020-07-08T09:10:11", "Utc")
+$rootWrite = [datetime]::SpecifyKind([datetime]"2021-08-09T10:11:12", "Utc")
+$rootCreationNs = [int64](([DateTimeOffset]$rootCreation).ToUnixTimeMilliseconds() * 1000000)
+$rootAccessNs = [int64](([DateTimeOffset]$rootAccess).ToUnixTimeMilliseconds() * 1000000)
+$rootWriteNs = [int64](([DateTimeOffset]$rootWrite).ToUnixTimeMilliseconds() * 1000000)
 $expectedText = "APFS metadata and symbolic-link proof"
 $eaName = "user.apfswin_windows"
 $eaFirstText = "Windows EA first payload"
@@ -215,6 +223,7 @@ $secondDirectoryState = $null
 $linkState = $null
 $absoluteLinkState = $null
 $aclExitCode = $null
+$rootAclExitCode = $null
 $deleteReparseExitCode = $null
 $deleteReparseState = $null
 $readonlyWriteBlocked = $false
@@ -227,6 +236,8 @@ $directoryEaDeleteState = $null
 $rootEaFirstState = $null
 $rootEaSecondState = $null
 $rootEaDeleteState = $null
+$rootFirstState = $null
+$rootSecondState = $null
 try {
     $env:APFS_WORKER_TRACE = $trace
     $first = Start-TestMount -Worker $worker -Image $image -Stdout $stdout1 -Stderr $stderr1
@@ -241,6 +252,26 @@ try {
         name = $rootEaName
         value = [Text.Encoding]::UTF8.GetString([byte[]](
             Get-NativeExtendedAttribute -Path $mountRoot -Name $rootEaName))
+    }
+    Set-NativeDirectoryBasicInfo -Path $mountRoot `
+        -CreationTimeUtc $rootCreation `
+        -LastAccessTimeUtc $rootAccess `
+        -LastWriteTimeUtc $rootWrite `
+        -Attributes ([IO.FileAttributes]::Directory -bor `
+            [IO.FileAttributes]::Hidden -bor [IO.FileAttributes]::Archive)
+    & icacls.exe $mountRoot /inheritance:r /grant:r `
+        "$env:USERDOMAIN\$env:USERNAME`:(OI)(CI)(M)" | Out-Null
+    $rootAclExitCode = $LASTEXITCODE
+    if ($rootAclExitCode -ne 0) {
+        throw "root icacls failed with exit code $rootAclExitCode"
+    }
+    $rootItem = Get-Item -LiteralPath $mountRoot -Force
+    $rootFirstState = [pscustomobject][ordered]@{
+        creation_utc = $rootItem.CreationTimeUtc.ToString("O")
+        access_utc = $rootItem.LastAccessTimeUtc.ToString("O")
+        write_utc = $rootItem.LastWriteTimeUtc.ToString("O")
+        hidden = [bool](($rootItem.Attributes -band [IO.FileAttributes]::Hidden) -ne 0)
+        archive = [bool](($rootItem.Attributes -band [IO.FileAttributes]::Archive) -ne 0)
     }
     New-Item -ItemType Directory -Path $dir | Out-Null
     Set-NativeExtendedAttribute -Path $dir -Name $directoryEaName `
@@ -319,8 +350,21 @@ try {
     $debugRaw = @(& $probe --target $image --debug-file "/MetadataProof/target.txt" 2>&1)
     if ($LASTEXITCODE -ne 0) { throw "APFS metadata probe failed: $($debugRaw -join ' ')" }
     $debugRaw | Set-Content -LiteralPath $debugPath -Encoding UTF8
+    $rootDebugRaw = @(& $probe --target $image --debug-file "/" 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "APFS root metadata probe failed: $($rootDebugRaw -join ' ')"
+    }
+    $rootDebugRaw | Set-Content -LiteralPath $rootDebugPath -Encoding UTF8
 
     $second = Start-TestMount -Worker $worker -Image $image -Stdout $stdout2 -Stderr $stderr2
+    $rootItem = Get-Item -LiteralPath $mountRoot -Force
+    $rootSecondState = [pscustomobject][ordered]@{
+        creation_utc = $rootItem.CreationTimeUtc.ToString("O")
+        access_utc = $rootItem.LastAccessTimeUtc.ToString("O")
+        write_utc = $rootItem.LastWriteTimeUtc.ToString("O")
+        hidden = [bool](($rootItem.Attributes -band [IO.FileAttributes]::Hidden) -ne 0)
+        archive = [bool](($rootItem.Attributes -band [IO.FileAttributes]::Archive) -ne 0)
+    }
     $rootEaPersistentRead = Get-NativeExtendedAttribute -Path $mountRoot -Name $rootEaName
     Set-NativeExtendedAttribute -Path $mountRoot -Name $rootEaName `
         -Value ([Text.Encoding]::UTF8.GetBytes($rootEaUpdatedText))
@@ -413,6 +457,10 @@ $debugJson = if (Test-Path -LiteralPath $debugPath) {
 } else { $null }
 $debugFile = if ($debugJson) { $debugJson.whole_device_debug_file } else { $null }
 $debugEa = @($debugFile.xattrs | Where-Object { $_.name -eq $eaName })
+$rootDebugJson = if (Test-Path -LiteralPath $rootDebugPath) {
+    Get-Content -LiteralPath $rootDebugPath -Raw | ConvertFrom-Json
+} else { $null }
+$rootDebugFile = if ($rootDebugJson) { $rootDebugJson.whole_device_debug_file } else { $null }
 $debugSummary = if ($debugFile) {
     [pscustomobject][ordered]@{
         ok = [bool]$debugFile.ok
@@ -433,6 +481,12 @@ $traceText = if (Test-Path -LiteralPath $trace) { Get-Content -LiteralPath $trac
 
 $ok = -not $errorText -and $firstState.hidden -and $firstState.archive -and
     $secondState.hidden -and $secondState.archive -and
+    $rootFirstState.hidden -and $rootFirstState.archive -and
+    $rootSecondState.hidden -and $rootSecondState.archive -and
+    (Test-TimeNear ([datetime]$rootSecondState.creation_utc) $rootCreation) -and
+    (Test-TimeNear ([datetime]$rootSecondState.access_utc) $rootAccess) -and
+    (Test-TimeNear ([datetime]$rootSecondState.write_utc) $rootWrite) -and
+    ($rootAclExitCode -eq 0) -and
     $firstDirectoryState.hidden -and $secondDirectoryState.hidden -and
     (Test-TimeNear ([datetime]$secondDirectoryState.creation_utc) $dirCreation) -and
     (Test-TimeNear ([datetime]$secondDirectoryState.write_utc) $dirWrite) -and
@@ -466,6 +520,15 @@ $ok = -not $errorText -and $firstState.hidden -and $firstState.archive -and
     ($deleteReparseExitCode -eq 0) -and -not $deleteReparseState.reparse -and
     ($deleteReparseState.length -eq 0) -and
     ($debugFile.inode_bsd_flags -band 0x00018000) -eq 0x00018000 -and
+    $rootDebugFile.ok -and ([uint64]$rootDebugFile.inode_object_id -eq 2) -and
+    ([uint64]$rootDebugFile.inode_created_time_ns -eq [uint64]$rootCreationNs) -and
+    ([uint64]$rootDebugFile.inode_accessed_time_ns -eq [uint64]$rootAccessNs) -and
+    ([uint64]$rootDebugFile.inode_modified_time_ns -eq [uint64]$rootWriteNs) -and
+    (($rootDebugFile.inode_bsd_flags -band 0x00018000) -eq 0x00018000) -and
+    (($rootDebugFile.inode_mode -band 0xF000) -eq 0x4000) -and
+    (($rootDebugFile.inode_mode -band 0x01FF) -eq 0x01FF) -and
+    ([uint32]$rootDebugFile.inode_owner_id -eq 544) -and
+    ([uint32]$rootDebugFile.inode_group_id -eq 544) -and
     -not ($rootNames -contains "MetadataProof")
 
 $result = [pscustomobject][ordered]@{
@@ -491,6 +554,10 @@ $result = [pscustomobject][ordered]@{
     directory_extended_attribute_first_mount = $directoryEaFirstState
     directory_extended_attribute_second_mount = $directoryEaSecondState
     directory_extended_attribute_delete = $directoryEaDeleteState
+    root_basic_info_first_mount = $rootFirstState
+    root_basic_info_second_mount = $rootSecondState
+    root_acl_exit_code = $rootAclExitCode
+    root_apfs_inode = $rootDebugFile
     root_extended_attribute_first_mount = $rootEaFirstState
     root_extended_attribute_second_mount = $rootEaSecondState
     root_extended_attribute_delete = $rootEaDeleteState

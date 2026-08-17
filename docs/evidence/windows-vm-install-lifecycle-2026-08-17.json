@@ -1,0 +1,57 @@
+{
+  "component": "apfs_for_windows",
+  "check": "windows_vm_install_reboot_uninstall_lifecycle",
+  "ok": true,
+  "started_utc": "2026-08-17T00:32:16.062043Z",
+  "completed_utc": "2026-08-17T00:34:38.4202463Z",
+  "no_host_reboot_performed": true,
+  "windows_vm_rebooted": true,
+  "credential_material_recorded": false,
+  "remote_artifacts_cleaned": true,
+  "package": {
+    "version": "0.1.0",
+    "file_count": 17,
+    "sha256": "C703700C79FD477207D9D99911D253F38B617924D2E5348990A04D4432C6C521",
+    "package_verification_ok": true,
+    "install_payload_validation_ok": true,
+    "repair_payload_validation_ok": true
+  },
+  "fixture": {
+    "sha256": "D1715EB62E66B1D61C7136676DA714ADA709BF3CA4302B00388FBBB763FCE0A3",
+    "mount": "R:",
+    "expected_file": "WinProof/Nested/windows.txt",
+    "expected_file_sha256": "B58EE1D8BF6C0FF48A5D0AB28DCC938E941CE9AC9091E9C103D85C3784C1E4FC"
+  },
+  "post_reboot": {
+    "ok": true,
+    "service_state": "Running",
+    "service_start_mode": "Auto",
+    "saved_mount_restored": true,
+    "mount_read_only": true,
+    "write_denied": true,
+    "file_sha256_match": true,
+    "installed_binary_hashes_match_package": true,
+    "tray_process_count": 1,
+    "tray_icon_available": true,
+    "tray_actions": [
+      "Open",
+      "Exit"
+    ],
+    "manager_single_instance": true,
+    "start_menu_entries_present": true,
+    "apps_and_features_registration_present": true
+  },
+  "uninstall": {
+    "ok": true,
+    "service_removed": true,
+    "mount_removed": true,
+    "manager_processes_stopped": true,
+    "startup_task_removed": true,
+    "run_fallback_removed": true,
+    "start_menu_removed": true,
+    "apps_and_features_registration_removed": true,
+    "install_root_removed": true,
+    "winfsp_preserved": true,
+    "fixture_preserved_until_remote_cleanup": true
+  }
+}

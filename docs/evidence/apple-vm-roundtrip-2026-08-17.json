@@ -1,0 +1,52 @@
+{
+  "component": "apfs_for_windows",
+  "check": "apple_vm_roundtrip",
+  "ok": true,
+  "completed_utc": "2026-08-17T00:25:13.7318473Z",
+  "duration_seconds": 35.809,
+  "credential_material_recorded": false,
+  "no_host_reboot_performed": true,
+  "native_macos_operations": {
+    "first_mount_read_write": true,
+    "final_mount_read_write": true,
+    "fsck_before_first_mount": true,
+    "fsck_after_first_mount": true,
+    "fsck_before_final_mount": true,
+    "fsck_after_final_mount": true,
+    "volume_ownership": "Disabled"
+  },
+  "root_metadata": {
+    "windows_origin_raw_valid": true,
+    "macos_mutation_raw_valid": true,
+    "windows_return_raw_valid": true,
+    "windows_origin_mode": "040777",
+    "macos_mutated_mode": "040751",
+    "windows_return_mode": "040777",
+    "raw_owner_group": "544:544",
+    "macos_presented_owner_group": "501:20",
+    "root_ea_mutated_both_directions": true
+  },
+  "content_and_namespace": {
+    "unicode_path": true,
+    "windows_symbolic_link_retargeted": true,
+    "apple_symbolic_link_preserved": true,
+    "apple_hard_link_preserved_after_one_name_delete": true,
+    "file_directory_and_root_xattrs_mutated_both_directions": true,
+    "deleted_xattrs_absent": true
+  },
+  "content_sha256": {
+    "windows_file": "B58EE1D8BF6C0FF48A5D0AB28DCC938E941CE9AC9091E9C103D85C3784C1E4FC",
+    "unicode_file": "D15C89BA02965E34B5E292AEB8D7B7D0A12B538FB6DC623DD998327D3F118DBC",
+    "macos_hardlink_file": "76FD91615F8B856AB498A543707EE1BAC16AD6F56E597584538A0356389281DB",
+    "windows_return_file": "A4DDBF29B458AABD9FA5E69BDDF059C7C61A3E1779E6B1E6954CEFEECF580964",
+    "windows_return_image": "AE08EFBEA34A951F6E74F2C6ED9993C305DB0C9D0D8C299F1402578974C74D31"
+  },
+  "remaining_scope": [
+    "empty Windows EA value as a distinct value because zero length requests deletion",
+    "non-ASCII Windows EA names",
+    "large APFS stream-backed xattr mutation",
+    "content-critical filesystem-owned xattrs through the generic Windows EA callback",
+    "hard-link creation requires a WinFsp protocol/kernel fork or another filesystem driver transport",
+    "physical surprise-unplug and raw-media power-loss recovery"
+  ]
+}

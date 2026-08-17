@@ -17,6 +17,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "lib\native-ea.ps1")
+. (Join-Path $PSScriptRoot "lib\native-basic-info.ps1")
 
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -67,6 +68,20 @@ function Test-TimeNear {
         [Parameter(Mandatory = $true)][datetime]$Expected
     )
     [Math]::Abs(($Actual.ToUniversalTime() - $Expected.ToUniversalTime()).TotalSeconds) -le 1
+}
+
+function Get-DirectoryBasicInfoState {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $item = Get-Item -LiteralPath $Path -Force
+    [ordered]@{
+        creation_utc = $item.CreationTimeUtc.ToString("O")
+        access_utc = $item.LastAccessTimeUtc.ToString("O")
+        write_utc = $item.LastWriteTimeUtc.ToString("O")
+        attributes = [uint32]$item.Attributes
+        readonly = [bool](($item.Attributes -band [IO.FileAttributes]::ReadOnly) -ne 0)
+        hidden = [bool](($item.Attributes -band [IO.FileAttributes]::Hidden) -ne 0)
+        archive = [bool](($item.Attributes -band [IO.FileAttributes]::Archive) -ne 0)
+    }
 }
 
 function New-NativeFileSymbolicLink {
@@ -177,6 +192,25 @@ function Wait-PathPresent {
     return (Test-Path -LiteralPath $Path -PathType Container)
 }
 
+function Wait-MountWritable {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][int]$Timeout
+    )
+    $deadline = (Get-Date).AddSeconds($Timeout)
+    do {
+        try {
+            $attributes = (Get-Item -LiteralPath $Root -Force).Attributes
+            if (($attributes -band [IO.FileAttributes]::ReadOnly) -eq 0) {
+                return $true
+            }
+        } catch {
+        }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+    return $false
+}
+
 function Select-MountPolicy {
     param(
         [Parameter(Mandatory = $true)]$Health,
@@ -229,6 +263,14 @@ $eaState = $null
 $directoryEaState = $null
 $rootEaState = $null
 $rootEaName = "user.apfswin_usb_root"
+$rootBasicOriginal = $null
+$rootBasicProof = $null
+$rootBasicRestored = $null
+$rootBasicRestorePending = $false
+$rootBasicRestoredWithinWindowsPrecision = $false
+$rootProofCreation = [datetime]::SpecifyKind([datetime]"2018-05-06T07:08:09", "Utc")
+$rootProofAccess = [datetime]::SpecifyKind([datetime]"2019-06-07T08:09:10", "Utc")
+$rootProofWrite = [datetime]::SpecifyKind([datetime]"2020-07-08T09:10:11", "Utc")
 
 $normalIdentity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $serviceHealth = $null
@@ -262,6 +304,10 @@ try {
     }
     if ($mountPolicy -and $mountPolicy.read_only -eq $true) {
         throw "Mounted APFS policy is read-only: $Mount"
+    }
+    if ($mountPolicy -and -not $mountPolicy.read_only -and
+        -not (Wait-MountWritable -Root $mountRoot -Timeout $TimeoutSeconds)) {
+        throw "Mounted APFS worker did not become writable at $Mount"
     }
     if (-not $AllowStaleInstalledWorker) {
         if (-not $installedWorkerHash) {
@@ -417,6 +463,35 @@ try {
                 throw "proof directory is still visible after remove"
             }
         }
+        $rootBasicOriginal = Get-DirectoryBasicInfoState -Path $mountRoot
+        $rootBasicRestorePending = $true
+        Set-NativeDirectoryBasicInfo -Path $mountRoot `
+            -CreationTimeUtc $rootProofCreation `
+            -LastAccessTimeUtc $rootProofAccess `
+            -LastWriteTimeUtc $rootProofWrite `
+            -Attributes ([IO.FileAttributes]::Directory -bor `
+                [IO.FileAttributes]::Hidden -bor [IO.FileAttributes]::Archive)
+        $rootBasicProof = Get-DirectoryBasicInfoState -Path $mountRoot
+        Set-NativeDirectoryBasicInfo -Path $mountRoot `
+            -CreationTimeUtc ([datetime]$rootBasicOriginal.creation_utc) `
+            -LastAccessTimeUtc ([datetime]$rootBasicOriginal.access_utc) `
+            -LastWriteTimeUtc ([datetime]$rootBasicOriginal.write_utc) `
+            -Attributes ([IO.FileAttributes]$rootBasicOriginal.attributes)
+        $rootBasicRestored = Get-DirectoryBasicInfoState -Path $mountRoot
+        $rootBasicRestoredWithinWindowsPrecision = [bool](
+            (Test-TimeNear ([datetime]$rootBasicRestored.creation_utc) `
+                ([datetime]$rootBasicOriginal.creation_utc)) -and
+            (Test-TimeNear ([datetime]$rootBasicRestored.access_utc) `
+                ([datetime]$rootBasicOriginal.access_utc)) -and
+            (Test-TimeNear ([datetime]$rootBasicRestored.write_utc) `
+                ([datetime]$rootBasicOriginal.write_utc)) -and
+            $rootBasicRestored.readonly -eq $rootBasicOriginal.readonly -and
+            $rootBasicRestored.hidden -eq $rootBasicOriginal.hidden -and
+            $rootBasicRestored.archive -eq $rootBasicOriginal.archive)
+        if (-not $rootBasicRestoredWithinWindowsPrecision) {
+            throw "USB root basic metadata did not restore within Windows timestamp precision."
+        }
+        $rootBasicRestorePending = $false
     }
 } catch {
     $operationError = $_.Exception.Message
@@ -426,6 +501,19 @@ try {
         }
     } catch {
         $cleanupErrors += "${rootEaName}: $($_.Exception.Message)"
+    }
+    if ($rootBasicRestorePending -and $rootBasicOriginal) {
+        try {
+            Set-NativeDirectoryBasicInfo -Path $mountRoot `
+                -CreationTimeUtc ([datetime]$rootBasicOriginal.creation_utc) `
+                -LastAccessTimeUtc ([datetime]$rootBasicOriginal.access_utc) `
+                -LastWriteTimeUtc ([datetime]$rootBasicOriginal.write_utc) `
+                -Attributes ([IO.FileAttributes]$rootBasicOriginal.attributes)
+            $rootBasicRestored = Get-DirectoryBasicInfoState -Path $mountRoot
+            $rootBasicRestorePending = $false
+        } catch {
+            $cleanupErrors += "root basic metadata restore: $($_.Exception.Message)"
+        }
     }
     if ($proofMutationAttempted -and (Test-Path -LiteralPath $testDir -PathType Container)) {
         try {
@@ -493,6 +581,11 @@ $ok = ($preflightOk -or ($rootReady -and
     ($rootEaState.first_value -eq "USB Windows root EA payload") -and
     ($rootEaState.updated_value -eq "USB updated root EA payload") -and
     $rootEaState.absent_after_delete -and
+    $rootBasicProof.hidden -and $rootBasicProof.archive -and
+    (Test-TimeNear ([datetime]$rootBasicProof.creation_utc) $rootProofCreation) -and
+    (Test-TimeNear ([datetime]$rootBasicProof.access_utc) $rootProofAccess) -and
+    (Test-TimeNear ([datetime]$rootBasicProof.write_utc) $rootProofWrite) -and
+    $rootBasicRestoredWithinWindowsPrecision -and -not $rootBasicRestorePending -and
     $metadataState.hidden -and
     $metadataState.archive -and
     ($metadataState.length -eq $metadataPayload.Length) -and
@@ -551,6 +644,16 @@ $result = [ordered]@{
     extended_attribute = $eaState
     directory_extended_attribute = $directoryEaState
     root_extended_attribute = $rootEaState
+    root_basic_info = [ordered]@{
+        original = $rootBasicOriginal
+        proof = $rootBasicProof
+        restored = $rootBasicRestored
+        restored_within_windows_precision = [bool]$rootBasicRestoredWithinWindowsPrecision
+        windows_timestamp_resolution_ns = 100
+        raw_metadata_note = "APFS nanoseconds below Windows FILETIME precision, change time, and write generation are not restored bit-for-bit."
+        restore_pending = [bool]$rootBasicRestorePending
+        security_not_modified = $true
+    }
     readonly_write_blocked = [bool]$readonlyWriteBlocked
     symbolic_link = $symbolicLinkState
     service_health_error = $serviceHealthError

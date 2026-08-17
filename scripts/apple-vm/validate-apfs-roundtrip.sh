@@ -52,6 +52,8 @@ mount_point=$(diskutil info "$volume" | awk -F: '/Mount Point/ { sub(/^[[:space:
 if [ -z "$mount_point" ] || [ ! -d "$mount_point" ]; then
     fail "mounted APFS volume not found"
 fi
+ownership=$(diskutil info "$volume" | awk -F: '/Owners/ { sub(/^[[:space:]]+/, "", $2); print $2 }')
+assert_equal "$ownership" "Disabled" "macOS volume ownership mode"
 
 unicode_file="$mount_point/WinProof/Unicode-Resume-placeholder/roundtrip.txt"
 unicode_file=${unicode_file/Unicode-Resume-placeholder/Unicode-Résumé-日本語}
@@ -69,6 +71,12 @@ windows_bsd_flags=$(stat -f '%f' "$mount_point/WinProof/Nested/windows-renamed-b
 windows_xattr=$(xattr -p user.apfswin_windows "$mount_point/WinProof/Nested/windows-renamed-back-by-windows.txt")
 windows_directory_xattr=$(xattr -p user.apfswin_windows_directory "$mount_point/WinProof")
 windows_root_xattr=$(xattr -p user.apfswin_windows_root "$mount_point")
+root_birth_epoch=$(stat -f '%B' "$mount_point")
+root_mtime_epoch=$(stat -f '%m' "$mount_point")
+root_bsd_flags=$(stat -f '%f' "$mount_point")
+root_mode=$(stat -f '%Sp' "$mount_point")
+root_uid=$(stat -f '%u' "$mount_point")
+root_gid=$(stat -f '%g' "$mount_point")
 symlink_path="$mount_point/MacProof/windows-symlink"
 [ -L "$symlink_path" ] || fail "symbolic link missing"
 symlink_target=$(readlink "$symlink_path")
@@ -103,6 +111,11 @@ assert_equal "$windows_bsd_flags" "98304" "Windows-created BSD flags"
 assert_equal "$windows_xattr" "Windows final EA payload" "Windows final xattr"
 assert_equal "$windows_directory_xattr" "Windows final directory EA payload" "Windows final directory xattr"
 assert_equal "$windows_root_xattr" "Windows final root EA payload" "Windows final root xattr"
+assert_equal "$root_birth_epoch" "1662808333" "Windows-return root birth time"
+assert_equal "$root_bsd_flags" "32768" "Windows-return root BSD flags"
+assert_equal "$root_mode" "drwxrwxrwx" "Windows-return root mode"
+assert_equal "$root_uid" "501" "macOS-presented return root uid"
+assert_equal "$root_gid" "20" "macOS-presented return root gid"
 assert_equal "$symlink_target" "../WinProof/Nested/windows-renamed-by-macos.txt" "symlink target"
 assert_equal "$xattr_value" "macOS xattr payload" "xattr value"
 assert_equal "$updated_xattr" "Windows updated xattr payload" "updated xattr value"
@@ -132,6 +145,13 @@ WINDOWS_BSD_FLAGS=$windows_bsd_flags
 WINDOWS_XATTR=$windows_xattr
 WINDOWS_DIRECTORY_XATTR=$windows_directory_xattr
 WINDOWS_ROOT_XATTR=$windows_root_xattr
+ROOT_BIRTH_EPOCH=$root_birth_epoch
+ROOT_MTIME_EPOCH=$root_mtime_epoch
+ROOT_BSD_FLAGS=$root_bsd_flags
+ROOT_MODE=$root_mode
+ROOT_UID=$root_uid
+ROOT_GID=$root_gid
+MACOS_VOLUME_OWNERSHIP=$ownership
 HARDLINK_SHA256=$hardlink_hash
 RETURN_SHA256=$return_hash
 SYMLINK_TARGET=$symlink_target

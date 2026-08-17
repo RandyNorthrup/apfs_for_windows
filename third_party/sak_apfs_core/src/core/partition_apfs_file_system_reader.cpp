@@ -148,6 +148,7 @@ constexpr qsizetype kApfsXattrValueXdataOffset = 4;
 constexpr uint16_t kApfsDirTypeDirectory = 4;
 constexpr uint16_t kApfsDirTypeRegularFile = 8;
 constexpr uint16_t kApfsDirTypeSymlink = 10;
+constexpr uint64_t kApfsTreeRootEntityId = 1;
 constexpr uint64_t kApfsRootDirectoryId = 2;
 constexpr uint8_t kApfsInodeDstreamField = 8;
 constexpr qsizetype kApfsInodePrivateIdOffset = 0x08;
@@ -686,21 +687,31 @@ public:
         result.block_size = blockSize_;
         result.block_count = blockCount_;
 
-        const auto record = resolveFile(path, &readResult);
-        if (!record.has_value()) {
-            result.blockers = readResult.blockers;
-            result.warnings = readResult.warnings;
-            return result;
+        const QString normalized = cleanPath(path);
+        uint64_t inodeId = kApfsRootDirectoryId;
+        if (pathParts(normalized).isEmpty()) {
+            result.directory_parent_id = kApfsTreeRootEntityId;
+            result.directory_name = QStringLiteral("root");
+            result.file_id = kApfsRootDirectoryId;
+            result.directory_type = kApfsDirTypeDirectory;
+        } else {
+            const auto record = resolveFile(normalized, &readResult);
+            if (!record.has_value()) {
+                result.blockers = readResult.blockers;
+                result.warnings = readResult.warnings;
+                return result;
+            }
+            result.directory_parent_id = record->parent_id;
+            result.directory_name = record->name;
+            result.file_id = record->file_id;
+            result.directory_type = record->directory_type;
+            inodeId = record->file_id;
         }
-        result.directory_parent_id = record->parent_id;
-        result.directory_name = record->name;
-        result.file_id = record->file_id;
-        result.directory_type = record->directory_type;
 
-        const auto inode = inodeById_.constFind(record->file_id);
+        const auto inode = inodeById_.constFind(inodeId);
         if (inode == inodeById_.cend()) {
             result.blockers.append(
-                QStringLiteral("APFS inode %1 was not found").arg(record->file_id));
+                QStringLiteral("APFS inode %1 was not found").arg(inodeId));
             return result;
         }
 
@@ -718,7 +729,7 @@ public:
         result.inode_group_id = inode->group_id;
         result.inode_sparse = inode->sparse;
 
-        const auto decmpfs = decmpfsByInode_.constFind(record->file_id);
+        const auto decmpfs = decmpfsByInode_.constFind(inodeId);
         if (decmpfs != decmpfsByInode_.cend()) {
             result.has_decmpfs = true;
             result.decmpfs_size_bytes = static_cast<uint64_t>(decmpfs->size());
@@ -730,9 +741,9 @@ public:
             }
         }
 
-        result.resource_fork_object_id = resourceForkObjIdByInode_.value(record->file_id, 0);
+        result.resource_fork_object_id = resourceForkObjIdByInode_.value(inodeId, 0);
 
-        for (const auto& xattr : xattrsByInode_.values(record->file_id)) {
+        for (const auto& xattr : xattrsByInode_.values(inodeId)) {
             result.xattrs.append(PartitionApfsFileXattrDebug{
                 .name = xattr.first,
                 .size_bytes = static_cast<uint64_t>(xattr.second.size()),
@@ -746,7 +757,7 @@ public:
         }
 
         appendDebugExtents(QStringLiteral("inode_private_id"), inode->private_id, &result);
-        appendDebugExtents(QStringLiteral("directory_file_id"), record->file_id, &result);
+        appendDebugExtents(QStringLiteral("directory_file_id"), inodeId, &result);
         if (result.resource_fork_object_id != 0) {
             appendDebugExtents(
                 QStringLiteral("resource_fork"), result.resource_fork_object_id, &result);
@@ -2545,6 +2556,11 @@ PartitionApfsFileReadResult PartitionApfsFileSystemReaderSession::readFileRange(
 PartitionApfsFileReadResult PartitionApfsFileSystemReaderSession::readXattrs(
     const QString& path) {
     return impl_->reader.readXattrs(path);
+}
+
+PartitionApfsFileDebugResult PartitionApfsFileSystemReaderSession::debugFile(
+    const QString& path) {
+    return impl_->reader.debugFile(path);
 }
 
 PartitionApfsFileReadResult PartitionApfsFileSystemReader::listDirectory(
