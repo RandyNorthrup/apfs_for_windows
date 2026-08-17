@@ -3,7 +3,7 @@
   "name": "winfsp-apfs",
   "repository": "https://github.com/RandyNorthrup/winfsp-apfs.git",
   "branch": "main",
-  "commit": "a95017786229034c5dc62e5f1384bf4303d235e9",
+  "commit": "b4650b187f2d0d95a660bb687177f67efc07588f",
   "upstream_repository": "https://github.com/winfsp/winfsp.git",
   "upstream_base_commit": "fde790d8ea41283606d1c56b557608a17e455f59",
   "upstream_tag": "v2.2B4",

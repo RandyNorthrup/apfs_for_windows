@@ -31,7 +31,7 @@ only edit the local copy in `apfs_for_windows`.
   `third_party/sak_apfs_core/IMPORT_MANIFEST.json`.
 - Native hard-link transport is published at
   `https://github.com/RandyNorthrup/winfsp-apfs`, branch `main`, commit
-  `a95017786229034c5dc62e5f1384bf4303d235e9`. Main repo pins this in
+  `b4650b187f2d0d95a660bb687177f67efc07588f`. Main repo pins this in
   `dependencies/winfsp-apfs.json` and one `third_party/winfsp` submodule; no
   second WinFsp source copy belongs here.
 - Production CMake mode rejects missing, mixed, dirty, or unpinned WinFsp input,

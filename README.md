@@ -15,7 +15,7 @@ Current state:
 - Stock WinFsp runtime/SDK is supported for development mounts. Native Windows
   hard-link transport is pinned to public fork
   `RandyNorthrup/winfsp-apfs` commit
-  `a95017786229034c5dc62e5f1384bf4303d235e9` through one submodule on `main`.
+  `b4650b187f2d0d95a660bb687177f67efc07588f` through one submodule on `main`.
 - `apfs_probe` can probe APFS images/raw devices, list the root directory, and
   read files by APFS path with SHA-256 output. It also has `--debug-file` for
   APFS inode/xattr/extent diagnostics on one path.
