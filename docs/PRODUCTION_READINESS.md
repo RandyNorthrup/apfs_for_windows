@@ -33,12 +33,14 @@ Source approval details are in
 `docs/evidence/winfsp-runtime-source-approval-2026-08-17.json`; approval does not
 waive production driver signing or exact-package release gates.
 
-Latest clean-source test package is
-`APFS-for-Windows-0.1.0-test-signed.zip`, SHA-256
-`50EECCD5ECDD4A3393FD26C8DF932E3C13858D35476574DF226681EC8B432FA5`.
-Its 31-file manifest and payload checks pass, but it has not replaced the older
-VM-lifecycle candidate and is not production signed. Clean-candidate evidence is
-tracked in `docs/evidence/clean-candidate-2026-08-17.json`.
+Clean source commit `7ddcb7a` produced two retained test candidates. Package
+SHA-256 `50EECCD5ECDD4A3393FD26C8DF932E3C13858D35476574DF226681EC8B432FA5`
+passed local WinFsp and macOS interoperability. Package SHA-256
+`55A7CEAA0FE3FC975AD9D2B1D282F0CA3AF26080E4EF888CAAE9DB5DA2D677DA`
+passed package verification plus Windows VM install, reboot persistence, tray
+Open/Exit, exact installed hashes, clean uninstall, and remote cleanup. Both are
+test-signed and not production artifacts. See
+`docs/evidence/clean-candidate-2026-08-17.json`.
 
 ## Open production blockers
 
@@ -73,6 +75,11 @@ installed physical-USB worker remains the earlier feature build because its
 Program Files replacement needs administrator approval; no ACL, signing, or
 boot-policy bypass was attempted. Exact clean-candidate USB proof therefore
 remains open.
+
+The clean VM-lifecycle package used worker SHA-256
+`81F8B65AA60C33C57E98DFDFCE81D8E5D2EC0B6D5FF6B8F9B238BC670D38078F`.
+Only the Windows VM rebooted; the host did not. This closes the clean development
+package lifecycle lane, not production signing or exact physical USB proof.
 
 ## Strict check
 

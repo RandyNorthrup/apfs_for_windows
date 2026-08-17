@@ -1286,6 +1286,12 @@ Exit gate: release checklist passes with artifacts under this repo.
   CTest passed 13/13, CI passed, and the exact clean worker passed local WinFsp
   plus macOS root/directory stream proofs. Verified 31-file test package SHA-256
   is `50EECCD5ECDD4A3393FD26C8DF932E3C13858D35476574DF226681EC8B432FA5`.
+- A second clean build from the same source commit produced worker SHA-256
+  `81F8B65AA60C33C57E98DFDFCE81D8E5D2EC0B6D5FF6B8F9B238BC670D38078F`
+  and test package SHA-256
+  `55A7CEAA0FE3FC975AD9D2B1D282F0CA3AF26080E4EF888CAAE9DB5DA2D677DA`.
+  Package verification and the exact Windows VM install/reboot persistence/tray
+  Open/Exit/hash/uninstall lifecycle passed with no residue. Only the VM rebooted.
 - Exact clean-worker physical USB rerun remains open because replacing the
   installed Program Files worker requires administrator approval. The service,
   driver, boot policy, and existing writable `V:` mount were left unchanged;

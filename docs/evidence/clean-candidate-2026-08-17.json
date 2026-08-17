@@ -33,6 +33,24 @@
       "package_proof_sha256": "72E032FE7C3E5DA70D400F33CFACFF58503670C737D4B44E512554414086573A",
       "verification_proof_sha256": "66493E4890990F1672C6A35CEE227FCB848E282277179F9B9E5A406E12072D3F"
     },
+    "vm_lifecycle_candidate": {
+      "ok": true,
+      "source_commit": "7ddcb7a1d0151a7d2221d68f5564c3288f9c97f7",
+      "source_clean": true,
+      "production_build_mode": true,
+      "native_hardlinks": true,
+      "driver_signing_mode": "test",
+      "worker_sha256": "81F8B65AA60C33C57E98DFDFCE81D8E5D2EC0B6D5FF6B8F9B238BC670D38078F",
+      "zip_sha256": "55A7CEAA0FE3FC975AD9D2B1D282F0CA3AF26080E4EF888CAAE9DB5DA2D677DA",
+      "package_verification": true,
+      "windows_vm_install": true,
+      "windows_vm_reboot_persistence": true,
+      "tray_open_exit": true,
+      "exact_installed_hashes": true,
+      "clean_uninstall": true,
+      "remote_artifacts_cleaned": true,
+      "host_rebooted": false
+    },
     "physical_usb": {
       "previous_feature_build_ok": true,
       "previous_worker_sha256": "E94F3E1E642F0C6908F2D730CD6BEA05C1BB476D1591D9D3CF0C07062D6BFCA8",
