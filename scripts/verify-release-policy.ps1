@@ -27,14 +27,21 @@ try {
     $parseError = $_.Exception.Message
 }
 
-$branches = @(& git -C $repoRoot branch --format="%(refname:short)" 2>$null)
+$currentBranch = (@(& git -C $repoRoot branch --show-current 2>$null) -join "").Trim()
+$currentBranchCommandOk = $LASTEXITCODE -eq 0
+$branches = @(& git -C $repoRoot for-each-ref --format="%(refname:short)" refs/heads 2>$null |
+    Where-Object { $_ })
 $branchCommandOk = $LASTEXITCODE -eq 0
-$remoteBranches = @(& git -C $repoRoot branch -r --format="%(refname)" 2>$null |
+$remoteBranches = @(& git -C $repoRoot for-each-ref --format="%(refname)" refs/remotes 2>$null |
     Where-Object { $_ -and $_ -notmatch '/HEAD$' } |
     ForEach-Object { $_ -replace '^refs/remotes/', '' })
 $remoteBranchCommandOk = $LASTEXITCODE -eq 0
-$onlyMain = $branchCommandOk -and $remoteBranchCommandOk -and
-    $branches.Count -eq 1 -and $branches[0] -ceq "main" -and
+$detachedCiCheckout = $env:GITHUB_ACTIONS -eq "true" -and
+    [string]::IsNullOrWhiteSpace($currentBranch)
+$localBranchesOk = @($branches | Where-Object { $_ -cne "main" }).Count -eq 0 -and
+    ($branches -ccontains "main" -or $detachedCiCheckout)
+$onlyMain = $currentBranchCommandOk -and $branchCommandOk -and
+    $remoteBranchCommandOk -and $localBranchesOk -and
     @($remoteBranches | Where-Object { $_ -cne "origin/main" }).Count -eq 0
 
 $checks = [ordered]@{
@@ -90,8 +97,10 @@ $result = [ordered]@{
     parse_error = $parseError
     failures = @($failures)
     checks = $checks
+    current_branch = if ([string]::IsNullOrWhiteSpace($currentBranch)) { $null } else { $currentBranch }
     local_branches = @($branches)
     remote_branches = @($remoteBranches)
+    detached_ci_checkout = [bool]$detachedCiCheckout
     no_admin_required = $true
     no_reboot_performed = $true
     completed_utc = (Get-Date).ToUniversalTime().ToString("o")
