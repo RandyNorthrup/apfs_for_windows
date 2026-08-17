@@ -50,6 +50,8 @@ $requiredFiles = @(
     "VERSION",
     "docs\ARCHITECTURE.md",
     "docs\PRODUCTION_READINESS.md",
+    "scripts\apple-vm\validate-interrupted-apfs.sh",
+    "scripts\verify-apple-vm-interrupted-image.ps1",
     "scripts\verify-reproducible-build.ps1",
     "scripts\verify-windows-vm-disposable-raw-interruption.ps1",
     "scripts\windows-vm\run-disposable-raw-interruption.ps1",

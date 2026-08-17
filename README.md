@@ -534,6 +534,11 @@ Verified USB evidence:
   selected the complete old generation and preserved the invariant file. This
   synthetic lane does not replace physical surprise-unplug proof. Sanitized
   evidence: `docs/evidence/windows-vm-raw-interruption-2026-08-17.json`.
+- `scripts\verify-apple-vm-interrupted-image.ps1` sends the selected interrupted
+  image to macOS for two `fsck_apfs -n` passes and a kernel read-only mount. The
+  current image passed exact transfer, invariant, and complete old-generation
+  hashes, then detached and removed all remote artifacts. Sanitized evidence:
+  `docs/evidence/apple-vm-raw-interruption-2026-08-17.json`.
 - `scripts\verify-installed-service-mode-policy.ps1` is ready for the post-repair
   installed-service proof. It runs without admin or USB mutation, mounts a
   generated APFS image through the installed service, proves read-only write

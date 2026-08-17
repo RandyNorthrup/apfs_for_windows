@@ -120,6 +120,9 @@ Package source `d0e195b6e79381038f1bea2595bee48e38327469`, worker SHA-256
 `F04E290A6F1FB39402A948D5831BC3FCAF4BBBA6E8F762C51322C84589E3BD25`,
 and the sanitized result are retained in
 `docs/evidence/windows-vm-raw-interruption-2026-08-17.json`.
+The selected interrupted image also passed two native macOS `fsck_apfs -n`
+runs and a kernel read-only mount with exact invariant and complete old-generation
+hashes. See `docs/evidence/apple-vm-raw-interruption-2026-08-17.json`.
 
 ## Strict check
 
