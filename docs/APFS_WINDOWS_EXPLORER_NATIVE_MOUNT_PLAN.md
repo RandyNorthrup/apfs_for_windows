@@ -890,6 +890,13 @@ Exit gate: release checklist passes with artifacts under this repo.
   fail closed without mutation. Use this no-driver-swap path for host physical
   certification because full test-package repair would also replace WinFsp
   driver.
+- Windows VM real-apply proof closes deployment and rollback mechanics. Package
+  mode runs without Git, replaced baseline worker `AB68CFF...B12A` with exact
+  `F04E290...BD25`, preserved driver identity, and restored `R:` read-only. An
+  invalid worker forced mount timeout; rollback stopped service, restored exact
+  worker, restarted service, and restored read-only/raw-disabled mount. VM
+  uninstall and remote cleanup passed without reboot. Evidence:
+  `docs/evidence/exact-package-worker-deployment-vm-2026-08-17.json`.
 - Current local state is safe to pause: no USB verifier remains, service is
   Automatic/running, `V:` is read-only with raw writes disabled, mount root is
   empty, and no reboot occurred. Installed worker `E94F3E1...BFCA8` does not

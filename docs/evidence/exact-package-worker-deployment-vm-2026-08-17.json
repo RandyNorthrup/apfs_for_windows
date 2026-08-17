@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "recorded_utc": "2026-08-17T08:43:51.1290827Z",
+  "classification": "test_signed_vm_worker_deployment_not_production_release",
+  "ok": true,
+  "source_commit": "7d23245ee487ab0db833c114d521558442d8208a",
+  "package_sha256": "C2B9A2950AE62EA114BBB3E2F880048D777B87682B673F6CFF7C60B9ABF536F6",
+  "baseline_worker_sha256": "AB68CFF5A5CAE3E35CA04A56336F0DB97DED05B651AD0E758B9A79780D4CB12A",
+  "exact_worker_sha256": "F04E290A6F1FB39402A948D5831BC3FCAF4BBBA6E8F762C51322C84589E3BD25",
+  "started_utc": "2026-08-17T08:42:45.8207579Z",
+  "completed_utc": "2026-08-17T08:43:51.1290827Z",
+  "host_rebooted": false,
+  "windows_vm_rebooted": false,
+  "package_install": {
+    "ok": true,
+    "service_automatic_running": true,
+    "dedicated_driver_running": true,
+    "read_only_fixture_mount": "R:"
+  },
+  "exact_worker_replacement": {
+    "ok": true,
+    "applied": true,
+    "package_zip_hash_match": true,
+    "package_worker_hash_match": true,
+    "staged_worker_hash_match": true,
+    "staged_metadata_hash_match": true,
+    "production_build_metadata": true,
+    "clean_source_metadata": true,
+    "native_hardlink_transport": true,
+    "installed_worker_hash_match": true,
+    "driver_identity_unchanged": true,
+    "read_only_mount_restored": true,
+    "raw_writes_disabled": true
+  },
+  "forced_failure_rollback": {
+    "invalid_worker_injected": true,
+    "deployment_failed_closed": true,
+    "rollback_performed": true,
+    "exact_worker_restored": true,
+    "driver_identity_unchanged": true,
+    "read_only_mount_restored": true,
+    "raw_writes_disabled": true,
+    "service_running_after_rollback": true
+  },
+  "cleanup": {
+    "uninstall_ok": true,
+    "service_removed": true,
+    "dedicated_driver_removed": true,
+    "install_root_removed": true,
+    "remote_artifacts_removed": true,
+    "reboot_required": false
+  },
+  "limitations": [
+    "Package and dedicated driver are test-signed.",
+    "This proves VM worker deployment and rollback; host physical USB rerun still requires interactive administrator approval.",
+    "Physical surprise-unplug and interrupted-write power-loss recovery remain open."
+  ]
+}
