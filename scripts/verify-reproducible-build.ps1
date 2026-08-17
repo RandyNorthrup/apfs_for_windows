@@ -78,6 +78,9 @@ if ([string]::IsNullOrWhiteSpace($WinFspArtifactRoot)) {
     $WinFspArtifactRoot = Join-Path $repoRoot "artifacts\winfsp-runtime\test-signed\$shortCommit\x64"
 }
 $resolvedWinFspArtifacts = Resolve-RepoPath $WinFspArtifactRoot
+$packageShells = @(
+    (Get-Command powershell.exe -ErrorAction Stop).Source,
+    (Get-Command pwsh.exe -ErrorAction Stop).Source)
 foreach ($required in @(
     (Join-Path $resolvedQtPrefix "bin\Qt6Core.dll"),
     (Join-Path $resolvedWinFspRoot "inc\winfsp\winfsp.h"),
@@ -110,7 +113,9 @@ $startedUtc = (Get-Date).ToUniversalTime()
 
 try {
     New-Item -ItemType Directory -Force -Path $workRoot | Out-Null
-    foreach ($worktree in $worktrees) {
+    for ($worktreeIndex = 0; $worktreeIndex -lt $worktrees.Count; $worktreeIndex++) {
+        $worktree = $worktrees[$worktreeIndex]
+        $packageShell = $packageShells[$worktreeIndex]
         Invoke-Checked -FilePath "git" -WorkingDirectory $repoRoot -Arguments @(
             "worktree", "add", "--detach", $worktree, $sourceCommitFull) | Out-Null
         $registered.Add($worktree)
@@ -139,7 +144,7 @@ try {
         $ctestPassed += $true
 
         $packageRoot = Join-Path $worktree "artifacts\reproducible-package"
-        Invoke-Checked -FilePath "powershell.exe" -WorkingDirectory $worktree -Arguments @(
+        Invoke-Checked -FilePath $packageShell -WorkingDirectory $worktree -Arguments @(
             "-NoProfile", "-ExecutionPolicy", "Bypass",
             "-File", (Join-Path $worktree "scripts\build-release-package.ps1"),
             "-BuildDir", (Join-Path $buildDir "Release"),
@@ -148,7 +153,7 @@ try {
             "-WinFspArtifactRoot", $resolvedWinFspArtifacts,
             "-PackageRoot", $packageRoot,
             "-OutputPath", (Join-Path $packageRoot "package-proof.json")) | Out-Null
-        Invoke-Checked -FilePath "powershell.exe" -WorkingDirectory $worktree -Arguments @(
+        Invoke-Checked -FilePath $packageShell -WorkingDirectory $worktree -Arguments @(
             "-NoProfile", "-ExecutionPolicy", "Bypass",
             "-File", (Join-Path $worktree "scripts\verify-release-package.ps1"),
             "-DriverSigningMode", "Test",
@@ -238,6 +243,7 @@ $result = [ordered]@{
     ctest_passes = @($ctestPassed).Count
     metadata_ok = [bool]$metadataOk
     package_verification_ok = [bool]$packageOk
+    package_shells = @($packageShells)
     files = $fileProofs
     error = $errorText
     cleanup_errors = $cleanupErrors
