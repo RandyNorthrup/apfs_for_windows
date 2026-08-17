@@ -40,5 +40,7 @@ The import currently contains 20 source files, including
 Diff policy:
 
 - Re-import deliberately from a known source commit when needed.
+- Manifest SHA-256 values canonicalize UTF-8 text to LF line endings without a
+  byte-order mark, keeping verification stable across Windows and CI checkouts.
 - Keep APFS for Windows changes in this repository only.
 - Run `scripts\verify-sak-source-boundary.ps1` before release/certification.

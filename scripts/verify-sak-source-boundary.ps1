@@ -11,20 +11,21 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$repoRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot "lib\canonical-text-hash.ps1")
 
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string]$Path)
     if ([IO.Path]::IsPathRooted($Path)) {
         return [IO.Path]::GetFullPath($Path)
     }
-    $repoRoot = Split-Path -Parent $PSScriptRoot
     return [IO.Path]::GetFullPath((Join-Path $repoRoot $Path))
 }
 
 function Get-HashOrNull {
     param([Parameter(Mandatory = $true)][string]$Path)
     if (Test-Path -LiteralPath $Path -PathType Leaf) {
-        return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+        return Get-CanonicalTextSha256 -Path $Path
     }
     return $null
 }
@@ -57,7 +58,8 @@ try {
     $manifestError = $_.Exception.Message
 }
 
-$manifestSchemaOk = $manifest -and $manifest.schema_version -eq 1
+$manifestSchemaOk = $manifest -and $manifest.schema_version -eq 2 -and
+    $manifest.hash_canonicalization -eq "utf8_lf_no_bom"
 $manifestCommitMatches = $manifest -and
     ([string]$manifest.source_commit).Equals(
         $ExpectedUpstreamCommit,
@@ -214,6 +216,7 @@ $result = [ordered]@{
     manifest_path = $resolvedManifest
     manifest_error = $manifestError
     manifest_schema_ok = [bool]$manifestSchemaOk
+    hash_canonicalization = if ($manifest) { $manifest.hash_canonicalization } else { $null }
     manifest_integrity_ok = [bool]$manifestIntegrityOk
     manifest_commit_matches_expected = [bool]$manifestCommitMatches
     duplicate_manifest_paths = @($duplicateManifestPaths)

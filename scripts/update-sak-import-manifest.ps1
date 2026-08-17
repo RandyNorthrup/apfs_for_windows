@@ -10,6 +10,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot "lib\canonical-text-hash.ps1")
 
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -81,8 +82,8 @@ $entries = foreach ($relativePath in $files) {
     if (-not (Test-Path -LiteralPath $vendoredPath -PathType Leaf)) {
         throw "Missing vendored file: $relativePath"
     }
-    $sourceHash = (Get-FileHash -LiteralPath $upstreamPath -Algorithm SHA256).Hash
-    $vendoredHash = (Get-FileHash -LiteralPath $vendoredPath -Algorithm SHA256).Hash
+    $sourceHash = Get-CanonicalTextSha256 -Path $upstreamPath
+    $vendoredHash = Get-CanonicalTextSha256 -Path $vendoredPath
     $gitPath = $relativePath.Replace("\", "/")
     [ordered]@{
         relative_path = $relativePath
@@ -94,8 +95,9 @@ $entries = foreach ($relativePath in $files) {
 }
 
 $manifest = [ordered]@{
-    schema_version = 1
+    schema_version = 2
     component = "sak_apfs_core"
+    hash_canonicalization = "utf8_lf_no_bom"
     source_repository = "S.A.K.-Utility author-owned source checkout"
     source_commit = $SourceCommit
     file_count = $entries.Count
