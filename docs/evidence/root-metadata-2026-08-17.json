@@ -50,7 +50,7 @@
     "proof_tree_removed": true,
     "final_read_only": true,
     "final_allow_raw_writes": false,
-    "completed_utc": "2026-08-17T00:58:11.0428266Z"
+    "completed_utc": "2026-08-17T01:42:40.7494653Z"
   },
   "native_macos_roundtrip": {
     "ok": true,
@@ -83,9 +83,9 @@
     "macos_presented_owner_group": "501:20",
     "native_fsck_before_and_after_each_mount": true,
     "empty_and_exact_unicode_root_xattrs_mutated_both_directions": true,
-    "final_image_sha256": "5EE131DEA6ADFA4B68B641298F12DA6EF735CFC098E94F41EC8961622899CDEE",
-    "duration_seconds": 37.596,
-    "completed_utc": "2026-08-17T01:00:28.7996293Z"
+    "final_image_sha256": "E9D0C7FC6A7AF611A592931921108D20785CD5199A48735B4E4017BB75799DE7",
+    "duration_seconds": 44.607,
+    "completed_utc": "2026-08-17T01:41:40.2149254Z"
   },
   "claim_boundary": {
     "physical_usb_restore": "Windows-visible times and flags restored; APFS sub-100 ns timestamp tails, change time, and write generation are not bit-identical after a metadata transaction.",

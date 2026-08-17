@@ -2,17 +2,17 @@
   "component": "apfs_for_windows",
   "check": "certification_orchestrator",
   "ok": true,
-  "started_utc": "2026-08-17T00:58:45.6315365Z",
-  "completed_utc": "2026-08-17T01:02:08.2799224Z",
-  "step_count": 29,
-  "passed_steps": 28,
+  "started_utc": "2026-08-17T01:39:46.9624261Z",
+  "completed_utc": "2026-08-17T01:43:32.7767592Z",
+  "step_count": 28,
+  "passed_steps": 27,
   "skipped_steps": [
-    "repair_install_already_completed_before_run"
+    "repair_install"
   ],
   "failed_steps": [],
   "no_host_reboot_performed": true,
   "gates": {
-    "release_build": true,
+    "release_build_reused_from_immediately_preceding_full_run": true,
     "ctest_12_of_12": true,
     "powershell_and_shell_script_parse": true,
     "winfsp_prerequisite": true,
@@ -72,6 +72,7 @@
     "windows_vm_uninstall_cleanup_ok": true
   },
   "remaining_scope": [
+    "live normal-shell repair proof-file handoff after elevation",
     "physical surprise-unplug and raw-media power-loss recovery",
     "large APFS stream-backed xattr mutation",
     "content-critical filesystem-owned xattrs through the generic Windows EA callback",

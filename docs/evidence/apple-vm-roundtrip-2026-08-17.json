@@ -2,8 +2,8 @@
   "component": "apfs_for_windows",
   "check": "apple_vm_roundtrip",
   "ok": true,
-  "completed_utc": "2026-08-17T01:00:28.7996293Z",
-  "duration_seconds": 37.596,
+  "completed_utc": "2026-08-17T01:41:40.2149254Z",
+  "duration_seconds": 44.607,
   "credential_material_recorded": false,
   "no_host_reboot_performed": true,
   "native_macos_operations": {
@@ -57,7 +57,7 @@
     "unicode_file": "D15C89BA02965E34B5E292AEB8D7B7D0A12B538FB6DC623DD998327D3F118DBC",
     "macos_hardlink_file": "76FD91615F8B856AB498A543707EE1BAC16AD6F56E597584538A0356389281DB",
     "windows_return_file": "A4DDBF29B458AABD9FA5E69BDDF059C7C61A3E1779E6B1E6954CEFEECF580964",
-    "windows_return_image": "5EE131DEA6ADFA4B68B641298F12DA6EF735CFC098E94F41EC8961622899CDEE"
+    "windows_return_image": "E9D0C7FC6A7AF611A592931921108D20785CD5199A48735B4E4017BB75799DE7"
   },
   "remaining_scope": [
     "large APFS stream-backed xattr mutation",

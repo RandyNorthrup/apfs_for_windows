@@ -606,9 +606,10 @@ Exit gate: release checklist passes with artifacts under this repo.
   passes after repair: installed binaries match the build, service is running,
   and generated-image service policy proof can run from a non-admin shell.
 - `scripts\start-repair-elevated.ps1` remains the preferred no-reboot repair
-  entrypoint from a normal shell. The latest repair completed; no UAC prompt is
-  pending, service is Automatic/running, manager tray is running single-instance,
-  and current `V:` was restored read-only.
+  entrypoint from a normal shell. The latest repair updated the installed binaries
+  and restarted the service, but the normal-shell wrapper timed out waiting for its
+  proof-file handoff. No UAC prompt is pending, service is Automatic/running,
+  manager tray is running single-instance, and current `V:` was restored read-only.
 - `scripts\verify-usb-mounted-file-actions.ps1 -CleanupStaleProofEntries` is the
   no-admin file action path for the selected mounted USB volume (`V:` in the
   current media layout). It is
@@ -847,6 +848,9 @@ Exit gate: release checklist passes with artifacts under this repo.
   zero-byte values on files, named directories, and volume root; raw probes
   confirm transport aliases are never stored in APFS. Microsoft protocol:
   `https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/0eb94f48-6aac-41df-a878-79f4dcfd8989`.
+- The encoded repair command has deterministic staged-package coverage, but one
+  live normal-shell run updated the service and then timed out waiting for
+  `install-repair-proof.json`. Live wrapper proof-file completion remains open.
 - Current local state is safe to pause: no UAC prompt is pending, no USB verifier
   process remains, service is Automatic/running, installed binaries match the
   current build, one tray manager is running, and `V:` is read-only with raw
@@ -1119,7 +1123,7 @@ Exit gate: release checklist passes with artifacts under this repo.
 - Local non-admin WinFsp proof sets root times, Hidden/Archive flags, and a
   compatibility ACL, verifies raw inode mode `040777`, owner/group `544:544`,
   BSD flags `0x18000`, root xattr coexistence, and identical state after remount.
-- Native Windows -> macOS -> Windows -> macOS round trip passed in 37.596 seconds.
+- Native Windows -> macOS -> Windows -> macOS round trip passed in 44.607 seconds.
   Apple validated Windows root birth time, flags, mode, and xattrs; macOS changed
   root mtime, flags, and mode; Windows read and replaced them; final Apple mount
   validated Windows replacement plus four clean `fsck_apfs -n` runs. Raw APFS
@@ -1127,7 +1131,7 @@ Exit gate: release checklist passes with artifacts under this repo.
   ownership was disabled. Windows and macOS also exchanged exact UTF-8 xattr
   names and empty values on file, named directory, and root in both directions,
   then verified update/delete behavior. Final image SHA-256:
-  `5EE131DEA6ADFA4B68B641298F12DA6EF735CFC098E94F41EC8961622899CDEE`.
+  `E9D0C7FC6A7AF611A592931921108D20785CD5199A48735B4E4017BB75799DE7`.
 - Serial-pinned physical USB proof transiently set volume-root
   create/access/write times and Hidden/Archive flags, then restored original
   Windows-visible values and flags. Windows `FILETIME` resolution is 100 ns, so
@@ -1135,13 +1139,14 @@ Exit gate: release checklist passes with artifacts under this repo.
   claimed bit-identical. Physical root security was intentionally not changed.
   Root/file/directory direct, empty-value, and exact UTF-8-name EAs plus proof
   tree were removed; `V:` finished read-only with raw writes disabled. Current
-  physical edge proof completed at `2026-08-17T00:58:11Z`.
-- Integrated no-host-reboot certification completed 28 passing steps plus one
+  physical edge proof completed at `2026-08-17T01:42:40Z`.
+- Integrated no-host-reboot certification completed 27 executed steps plus one
   intentionally skipped already-completed repair step from
-  `2026-08-17T00:58:45Z` through `2026-08-17T01:02:08Z`: local gates, installed
+  `2026-08-17T01:39:46Z` through `2026-08-17T01:43:32Z`. The release build had
+  passed immediately before this stable `-SkipBuild` rerun; CTest and script
+  parsing reran successfully. Local gates, installed
   Automatic service, native Apple round trip, raw-alias deduplication, mounted
   USB metadata/EA/symbolic-link actions, serial-pinned USB RW, Unicode,
-  394-character path, 1 MiB Robocopy, concurrent readers, cleanup, and final
   empty/UTF-8 xattrs, 394-character path, 1 MiB Robocopy, concurrent readers,
   cleanup, and final read-only restoration all passed. No host reboot occurred.
 - Fresh release ZIP
@@ -1163,4 +1168,6 @@ Exit gate: release checklist passes with artifacts under this repo.
   `-EncodedCommand`, preventing `\\?\GLOBALROOT` targets from losing a leading
   slash through `Start-Process` argument joining. Release-package verification
   decodes the staged launcher command and requires exact target/mount roundtrip
-  without requesting elevation.
+  without requesting elevation. That deterministic gate passed; a live
+  normal-shell run updated the installed binaries but timed out waiting for the
+  elevated proof artifact, so live proof-file handoff is not yet certified.

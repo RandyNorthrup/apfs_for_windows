@@ -41,7 +41,7 @@
     "windows_final_empty_and_unicode_read_by_macos": true,
     "windows_deleted_old_empty_xattrs_absent_on_macos": true,
     "native_fsck_passes": 4,
-    "completed_utc": "2026-08-17T01:00:28.7996293Z"
+    "completed_utc": "2026-08-17T01:41:40.2149254Z"
   },
   "physical_usb": {
     "ok": true,
@@ -62,7 +62,7 @@
     "proof_tree_removed": true,
     "final_read_only": true,
     "final_allow_raw_writes": false,
-    "completed_utc": "2026-08-17T00:58:11.0428266Z"
+    "completed_utc": "2026-08-17T01:42:40.7494653Z"
   },
   "remaining_scope": [
     "large APFS stream-backed xattr mutation",
