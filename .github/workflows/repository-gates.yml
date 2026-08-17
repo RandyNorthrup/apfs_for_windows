@@ -28,9 +28,9 @@ jobs:
       - name: Verify APFS import manifest offline
         shell: powershell
         run: .\scripts\verify-sak-source-boundary.ps1 -RequireUpstream:$false
-      - name: Verify WinFsp fork manifest offline
+      - name: Verify dedicated WinFsp runtime manifest offline
         shell: powershell
-        run: .\scripts\verify-winfsp-fork-boundary.ps1
+        run: .\scripts\verify-winfsp-runtime-boundary.ps1
       - name: Verify license notices
         shell: powershell
         run: .\scripts\verify-license-notices.ps1
