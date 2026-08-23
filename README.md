@@ -128,3 +128,9 @@ Project license terms are in [LICENSE](LICENSE). Third-party notices are in
 
 Created and maintained by [Randy Northrup](https://randynorthrup.com). See
 [GitHub](https://github.com/RandyNorthrup) for additional projects.
+
+## Support this project
+
+If this project saves you time, you can
+[buy me a coffee](https://www.paypal.com/donate/?hosted_button_id=Q9VC7B42R7K82)
+via PayPal. Thank you!
