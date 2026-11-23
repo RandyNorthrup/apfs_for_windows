@@ -4,6 +4,10 @@ FindWinFsp
 
 Find the WinFsp native API headers and import library.
 
+Release builds point ``WinFsp_ROOT`` at an official WinFsp SDK staged by
+``scripts/lib/winfsp-sdk.ps1`` (``inc``, ``lib``, ``bin``). Without it, the
+module falls back to a system WinFsp install that has the developer files.
+
 Imported targets:
 
 ``WinFsp::WinFsp``
@@ -22,9 +26,12 @@ Variables:
 
 ``WinFsp_RUNTIME_DLL``
   User-mode runtime DLL path.
+
+``WinFsp_RUNTIME_NAME``
+  File name of the user-mode runtime DLL (for ``/DELAYLOAD``).
 #]=======================================================================]
 
-set(WinFsp_ROOT "" CACHE PATH "Root of one coherent WinFsp SDK/runtime tree")
+set(WinFsp_ROOT "" CACHE PATH "Root of a staged official WinFsp SDK (inc, lib, bin)")
 
 set(_winfsp_roots
     "${WinFsp_ROOT}"
@@ -41,9 +48,9 @@ find_path(WinFsp_INCLUDE_DIR
 )
 
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-    set(_winfsp_lib_suffix lib lib\\winfsp-x64 lib\\dll build/VStudio/build/Release)
+    set(_winfsp_lib_suffix lib lib\\winfsp-x64 lib\\dll)
 else()
-    set(_winfsp_lib_suffix lib lib\\winfsp-x86 lib\\dll build/VStudio/build/Release)
+    set(_winfsp_lib_suffix lib lib\\winfsp-x86 lib\\dll)
 endif()
 
 find_library(WinFsp_LIBRARY
@@ -53,14 +60,14 @@ find_library(WinFsp_LIBRARY
 )
 
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-    set(_winfsp_runtime_name winfsp-x64.dll)
+    set(WinFsp_RUNTIME_NAME winfsp-x64.dll)
 else()
-    set(_winfsp_runtime_name winfsp-x86.dll)
+    set(WinFsp_RUNTIME_NAME winfsp-x86.dll)
 endif()
 find_file(WinFsp_RUNTIME_DLL
-    NAMES ${_winfsp_runtime_name}
+    NAMES ${WinFsp_RUNTIME_NAME}
     PATHS ${_winfsp_roots}
-    PATH_SUFFIXES bin build/VStudio/build/Release
+    PATH_SUFFIXES bin
 )
 
 if(WinFsp_ROOT AND WinFsp_INCLUDE_DIR AND WinFsp_LIBRARY AND WinFsp_RUNTIME_DLL)

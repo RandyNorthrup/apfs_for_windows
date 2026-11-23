@@ -3,14 +3,14 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$RunRoot,
-    [string]$PackageName = "package.zip",
+    # The signed MSI. The VM must already have the official WinFsp installed.
+    [string]$PackageName = "package.msi",
     [string]$BaseImageName = "base.apfs",
     [string]$OutputName = "raw-interruption-proof.json",
     [string]$Mount = "W:",
     [int]$PayloadBytes = 16777216,
     [int[]]$KillDelayMilliseconds = @(0, 100, 250, 500),
-    [int]$TimeoutSeconds = 45,
-    [switch]$AllowTestSignedDriver
+    [int]$TimeoutSeconds = 45
 )
 
 $ErrorActionPreference = "Stop"
@@ -251,8 +251,8 @@ $payloadChunk = $null
 $payloadHash = (Get-FileHash -LiteralPath $payloadPath -Algorithm SHA256).Hash
 $invariantHash = "61A497B863F48F5ED9128653D6564E435E3C40612DE1BC58C2E94B95366C4BF9"
 $emptyHash = "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
-$extractRoot = Join-Path $RunRoot "package"
-$packageDir = $null
+$msiexec = Join-Path $env:SystemRoot "System32\msiexec.exe"
+$metadata = $null
 $control = $null
 $attempts = @()
 $selected = $null
@@ -265,30 +265,23 @@ $activeVhd = $null
 $errorText = $null
 
 try {
-    Expand-Archive -LiteralPath $packagePath -DestinationPath $extractRoot -Force
-    $packageDir = if (Test-Path -LiteralPath (Join-Path $extractRoot `
-            "install-apfs-for-windows.ps1") -PathType Leaf) {
-        Get-Item -LiteralPath $extractRoot
-    } else {
-        Get-ChildItem -LiteralPath $extractRoot -Directory | Where-Object {
-            Test-Path -LiteralPath (Join-Path $_.FullName `
-                "install-apfs-for-windows.ps1") -PathType Leaf
-        } | Select-Object -First 1
+    if (-not (Get-Service "WinFsp.Launcher" -ErrorAction SilentlyContinue)) {
+        throw "Official WinFsp is not installed on the VM; install the pinned WinFsp MSI first."
     }
-    if (-not $packageDir) { throw "Package payload root was not found." }
-    $installArgs = @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-        "-File", (Join-Path $packageDir.FullName "install-apfs-for-windows.ps1"))
-    if ($AllowTestSignedDriver) { $installArgs += "-AllowTestSignedDriver" }
-    $installProcess = Start-Process powershell.exe -ArgumentList $installArgs `
+    $installLog = Join-Path $RunRoot "install.log"
+    $installProcess = Start-Process -FilePath $msiexec `
+        -ArgumentList "/i `"$packagePath`" /qn /norestart /l*v `"$installLog`"" `
         -WindowStyle Hidden -PassThru -Wait
-    if ($installProcess.ExitCode -ne 0) { throw "Package install failed with exit code $($installProcess.ExitCode)." }
+    if ($installProcess.ExitCode -notin @(0, 3010)) {
+        throw "MSI install failed with exit code $($installProcess.ExitCode)."
+    }
     $installed = $true
     Stop-Service ApfsForWindowsMountService -Force -ErrorAction Stop
 
     $installRoot = "$env:ProgramFiles\APFS for Windows"
     $worker = Join-Path $installRoot "apfs_winfs_worker.exe"
     $probe = Join-Path $installRoot "apfs_probe.exe"
-    $metadata = Get-Content (Join-Path $packageDir.FullName `
+    $metadata = Get-Content (Join-Path $installRoot `
         "apfs-build-metadata.json") -Raw | ConvertFrom-Json
     $workerHash = (Get-FileHash -LiteralPath $worker -Algorithm SHA256).Hash
 
@@ -556,20 +549,19 @@ try {
     if ($installed -or $mountServicePresent -or
         (Test-Path -LiteralPath $installRoot)) {
         try {
-            $uninstall = Join-Path $installRoot "uninstall-apfs-for-windows.ps1"
-            if (-not (Test-Path -LiteralPath $uninstall -PathType Leaf) -and
-                $packageDir) {
-                $uninstall = Join-Path $packageDir.FullName "uninstall-apfs-for-windows.ps1"
-            }
-            if (-not (Test-Path -LiteralPath $uninstall -PathType Leaf)) {
-                throw "Uninstaller was unavailable during partial-install cleanup."
-            }
-            & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-                -File $uninstall -RemoveFiles -OutputPath $uninstallProof *> $null
-            $uninstalled = $LASTEXITCODE -eq 0 -and
+            $uninstallLog = Join-Path $RunRoot "uninstall.log"
+            $uninstallProcess = Start-Process -FilePath $msiexec `
+                -ArgumentList "/x `"$packagePath`" /qn /norestart /l*v `"$uninstallLog`"" `
+                -WindowStyle Hidden -PassThru -Wait
+            [ordered]@{
+                exit_code = [int]$uninstallProcess.ExitCode
+                log = $uninstallLog
+            } | ConvertTo-Json | Set-Content -LiteralPath $uninstallProof -Encoding UTF8
+            # The system WinFsp is shared and stays installed.
+            $uninstalled = $uninstallProcess.ExitCode -in @(0, 3010) -and
                 -not (Get-Service ApfsForWindowsMountService -ErrorAction SilentlyContinue) -and
-                -not (Get-Service "WinFsp+apfs-main" -ErrorAction SilentlyContinue) -and
-                -not (Test-Path -LiteralPath $installRoot)
+                -not (Test-Path -LiteralPath $installRoot) -and
+                [bool](Get-Service "WinFsp.Launcher" -ErrorAction SilentlyContinue)
         } catch {
             if (-not $errorText) { $errorText = $_.Exception.Message }
         }

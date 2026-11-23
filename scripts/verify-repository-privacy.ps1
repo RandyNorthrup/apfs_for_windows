@@ -78,7 +78,7 @@ $relativeFiles = if ($isRepositoryScan) {
     @(& git -C $repoRoot ls-files --cached --others --exclude-standard 2>$null |
         Where-Object { $_ } |
         Where-Object {
-            $_ -notmatch '^(third_party/(winfsp|lzfse)/|build[^/]*/|artifacts/|temp/)'
+            $_ -notmatch '^(third_party/lzfse/|build[^/]*/|artifacts/|temp/)'
         })
 } else {
     @(Get-ChildItem -LiteralPath $resolvedScanRoot -Recurse -File |

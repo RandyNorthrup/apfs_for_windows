@@ -1,14 +1,22 @@
 #Requires -Version 5.1
+<#
+.SYNOPSIS
+    Stage the deterministic APFS for Windows release payload.
 
+.DESCRIPTION
+    Builds artifacts\package\APFS-for-Windows-<version>\ (the payload that
+    scripts\build-msi.ps1 turns into the MSI and Setup.exe) with
+    release-manifest.json and SHA256SUMS.txt. WinFsp is not part of the
+    payload: the product depends on the official, production-signed WinFsp
+    installed system-wide (dependencies\winfsp.json), which Setup.exe chains.
+    A deterministic ZIP of the stage is also written for the reproducibility
+    gate; it is not a release asset.
+#>
 [CmdletBinding()]
 param(
     [string]$BuildDir = "build\Release",
     [string]$QtBin = "C:\Qt\6.10.3\msvc2022_64\bin",
     [string]$Version = "",
-    [string]$WinFspArtifactRoot = "",
-    [ValidateSet("Production", "Test")]
-    [string]$DriverSigningMode = "Test",
-    [switch]$AllowTestSignedDriver,
     [string]$PackageRoot = "artifacts\package",
     [string]$VcRedistDir = "",
     # Authenticode-sign shipped PE files with Azure Artifact Signing before any
@@ -19,7 +27,6 @@ param(
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "lib\project-version.ps1")
-. (Join-Path $PSScriptRoot "lib\winfsp-runtime.ps1")
 $script:ApfsVcRuntimeDlls = @("msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll", "vcruntime140.dll", "vcruntime140_1.dll")
 $Version = Get-ApfsProjectVersion -ExplicitVersion $Version -CallerRoot $PSScriptRoot
 
@@ -257,48 +264,25 @@ if ($LASTEXITCODE -ne 0) {
 if ($sourceStatus.Count -ne 0) {
     throw "Release packaging requires a clean checkout."
 }
-if ([int]$buildMetadata.schema_version -ne 4 -or
+$winFspDependency = Get-Content `
+    -LiteralPath (Join-Path $repoRoot "dependencies\winfsp.json") -Raw |
+    ConvertFrom-Json
+$winFspVersion = [string]$winFspDependency.version
+if ([int]$buildMetadata.schema_version -ne 5 -or
+    [string]$buildMetadata.version -cne $Version -or
     $buildMetadata.production_build -ne $true -or
     $buildMetadata.reproducible_build -ne $true -or
     $buildMetadata.source_dirty -ne $false -or
     [string]$buildMetadata.source_commit -cne $sourceHead) {
     throw "Release packaging requires clean production build metadata matching checkout HEAD."
 }
-$winFspDependency = Get-Content `
-    -LiteralPath (Join-Path $repoRoot "dependencies\winfsp-apfs.json") -Raw |
-    ConvertFrom-Json
-$runtimeCommit = [string]$winFspDependency.commit
-$runtimeShortCommit = $runtimeCommit.Substring(0, 8)
-if ([string]::IsNullOrWhiteSpace($WinFspArtifactRoot)) {
-    $artifactClass = if ($DriverSigningMode -eq "Test") { "test-signed" } else { "production" }
-    $WinFspArtifactRoot = Join-Path $repoRoot `
-        "artifacts\winfsp-runtime\$artifactClass\$runtimeShortCommit\x64"
+if ([string]$buildMetadata.winfsp_version -cne $winFspVersion -or
+    $buildMetadata.winfsp_native_hardlinks -ne $false) {
+    throw "Release packaging requires a build against the pinned official WinFsp $winFspVersion SDK."
 }
-$resolvedWinFsp = Resolve-RepoPath $WinFspArtifactRoot
-$packageSuffix = if ($DriverSigningMode -eq "Test") { "-test-signed" } else { "" }
-$packageName = "APFS-for-Windows-$Version$packageSuffix"
+$packageName = "APFS-for-Windows-$Version"
 $stageRoot = Join-Path $resolvedPackageRoot $packageName
 $zipPath = Join-Path $resolvedPackageRoot "$packageName.zip"
-
-if ($DriverSigningMode -eq "Test" -and -not $AllowTestSignedDriver) {
-    throw "Building a test-signed package requires explicit -AllowTestSignedDriver."
-}
-$winFspDll = Join-Path $resolvedWinFsp "winfsp-x64.dll"
-$winFspSys = Join-Path $resolvedWinFsp "winfsp-x64.sys"
-foreach ($required in @($winFspDll, $winFspSys)) {
-    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
-        throw "Required dedicated WinFsp runtime artifact is missing: $required"
-    }
-}
-$driverSignature = Get-ApfsWinFspSignatureReport -DriverPath $winFspSys
-if ($DriverSigningMode -eq "Test") {
-    if (-not $driverSignature.test_certificate -or -not $driverSignature.thumbprint) {
-        throw "The test package driver does not carry a WDK test signature."
-    }
-} elseif ([string]$driverSignature.status -cne "Valid" -or
-    $driverSignature.test_certificate) {
-    throw "The production package driver is not validly production signed."
-}
 
 New-Item -ItemType Directory -Force -Path $resolvedPackageRoot | Out-Null
 if (Test-Path -LiteralPath $stageRoot) {
@@ -318,53 +302,10 @@ foreach ($binary in $binaries) {
 Copy-RequiredFile `
     -Source (Join-Path $resolvedBuild "apfs-build-metadata.json") `
     -Destination (Join-Path $stageRoot "apfs-build-metadata.json")
-Copy-RequiredFile -Source $winFspDll -Destination (Join-Path $stageRoot "winfsp-x64.dll")
-Copy-RequiredFile -Source $winFspSys -Destination (Join-Path $stageRoot "winfsp-x64.sys")
-$winFspCertificate = Join-Path $resolvedWinFsp "winfsp-x64.cer"
-if (Test-Path -LiteralPath $winFspCertificate -PathType Leaf) {
-    Copy-RequiredFile -Source $winFspCertificate `
-        -Destination (Join-Path $stageRoot "winfsp-x64.cer")
-}
 if ($Sign) {
     & (Join-Path $PSScriptRoot "sign-files.ps1") -Path @(
-        (Join-Path $stageRoot "*.exe"),
-        (Join-Path $stageRoot "winfsp-x64.dll")) | Out-Host
+        (Join-Path $stageRoot "*.exe")) | Out-Host
 }
-[IO.File]::WriteAllText(
-    (Join-Path $stageRoot "winfsp.sxs"),
-    "apfs-main`r`n",
-    [Text.UTF8Encoding]::new($false))
-
-$driverFiles = @("winfsp-x64.dll", "winfsp-x64.sys", "winfsp.sxs")
-if (Test-Path -LiteralPath (Join-Path $stageRoot "winfsp-x64.cer") -PathType Leaf) {
-    $driverFiles += "winfsp-x64.cer"
-}
-$stableDriverSignature = [ordered]@{
-    subject = [string]$driverSignature.subject
-    thumbprint = [string]$driverSignature.thumbprint
-    test_certificate = [bool]$driverSignature.test_certificate
-}
-$driverManifest = [ordered]@{
-    schema_version = 2
-    product = "APFS for Windows"
-    sxs_id = "apfs-main"
-    service_name = "WinFsp+apfs-main"
-    runtime_repository = [string]$winFspDependency.repository
-    runtime_commit = $runtimeCommit
-    upstream_base_commit = [string]$winFspDependency.upstream_base_commit
-    driver_signing_mode = $DriverSigningMode.ToLowerInvariant()
-    signature = $stableDriverSignature
-    files = @($driverFiles | ForEach-Object {
-        $path = Join-Path $stageRoot $_
-        [ordered]@{
-            name = $_
-            size_bytes = [int64](Get-Item -LiteralPath $path).Length
-            sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
-        }
-    })
-}
-Write-StableJson -Value $driverManifest `
-    -Path (Join-Path $stageRoot "winfsp-driver.json")
 
 $qtDlls = @(
     "Qt6Core.dll",
@@ -412,24 +353,6 @@ if ($Sign) {
         (Join-Path $stageRoot "styles\*.dll")) | Out-Host
 }
 
-$rootScripts = @(
-    "configure-test-signing.ps1",
-    "install-apfs-for-windows.ps1",
-    "repair-apfs-for-windows-install.ps1",
-    "start-repair-elevated.ps1",
-    "uninstall-apfs-for-windows.ps1"
-)
-foreach ($script in $rootScripts) {
-    Copy-RequiredTextFile -Source (Join-Path $PSScriptRoot $script) `
-        -Destination (Join-Path $stageRoot $script)
-}
-Copy-RequiredTextFile `
-    -Source (Join-Path $PSScriptRoot "lib\project-version.ps1") `
-    -Destination (Join-Path $stageRoot "lib\project-version.ps1")
-Copy-RequiredTextFile `
-    -Source (Join-Path $PSScriptRoot "lib\winfsp-runtime.ps1") `
-    -Destination (Join-Path $stageRoot "lib\winfsp-runtime.ps1")
-
 Copy-RequiredTextFile -Source (Join-Path $repoRoot "README.md") `
     -Destination (Join-Path $stageRoot "README.md")
 $packageDocuments = @(
@@ -466,8 +389,19 @@ Copy-RequiredTextFile `
     -Source (Join-Path $repoRoot "third_party\sak_apfs_core\IMPORT_MANIFEST.json") `
     -Destination (Join-Path $stageRoot "APFS_CORE_IMPORT_MANIFEST.json")
 Copy-RequiredTextFile `
-    -Source (Join-Path $repoRoot "dependencies\winfsp-apfs.json") `
+    -Source (Join-Path $repoRoot "dependencies\winfsp.json") `
     -Destination (Join-Path $stageRoot "WINFSP_PROVENANCE.json")
+
+# The stage must never carry WinFsp binaries, a driver manifest, a test
+# certificate, or the retired script-based installer.
+$forbiddenPayload = @(Get-ChildItem -LiteralPath $stageRoot -Recurse -File | Where-Object {
+    $_.Name -like "winfsp*.dll" -or $_.Name -like "*.sys" -or $_.Name -like "*.cer" -or
+        $_.Name -ieq "winfsp.sxs" -or $_.Name -ieq "winfsp-driver.json" -or
+        $_.Extension -ieq ".ps1"
+} | ForEach-Object { $_.FullName.Substring($stageRoot.Length + 1) })
+if ($forbiddenPayload.Count -ne 0) {
+    throw "Release stage contains retired payload: $($forbiddenPayload -join ', ')"
+}
 
 $payloadPaths = @(Get-ChildItem -LiteralPath $stageRoot -Recurse -File | ForEach-Object {
     $_.FullName.Substring($stageRoot.Length + 1).Replace("\", "/")
@@ -483,13 +417,21 @@ $payloadManifest = @($payloadPaths | ForEach-Object {
     }
 })
 $signingStatus = if ($Sign) { "azure_artifact_signing" } else { "unsigned_development_build" }
-$ownerReleaseCandidate = [bool]($DriverSigningMode -eq "Test" -and $Sign)
+$ownerReleaseCandidate = [bool]$Sign
+$winFspManifest = [ordered]@{
+    distribution = "official_winfsp_system_install"
+    version = $winFspVersion
+    msi_sha256 = ([string]$winFspDependency.msi_sha256).ToUpperInvariant()
+    driver_signer = [string]$winFspDependency.driver_signer
+    bundled_in_payload = $false
+}
 $releaseManifest = [ordered]@{
-    schema_version = 2
+    schema_version = 3
     product = "APFS for Windows"
     version = $Version
     source_commit = $sourceHead
-    driver_signing_mode = $DriverSigningMode.ToLowerInvariant()
+    winfsp = $winFspManifest
+    native_hard_link_creation = "unsupported_with_official_winfsp"
     application_signing = $signingStatus
     package_signing = $signingStatus
     physical_fault_recovery = "not_physically_tested_owner_accepted"
@@ -534,19 +476,18 @@ $result = [ordered]@{
     no_admin_required = $true
     version = $Version
     package_name = $packageName
-    driver_signing_mode = $DriverSigningMode.ToLowerInvariant()
     application_signing = $signingStatus
     package_signing = $signingStatus
     physical_fault_recovery = "not_physically_tested_owner_accepted"
     production_ready = $false
     owner_release_candidate = $ownerReleaseCandidate
     source_commit = $sourceHead
-    winfsp_runtime_commit = $runtimeCommit
-    winfsp_driver_signature = $driverSignature
+    winfsp = $winFspManifest
     build_dir = $resolvedBuild
     stage_root = $stageRoot
     zip_path = $zipPath
     zip_sha256 = $zipHash
+    zip_release_asset = $false
     deterministic_archive = $true
     archive_compression_method = "store"
     archive_entry_timestamp = "2000-01-01T00:00:00"

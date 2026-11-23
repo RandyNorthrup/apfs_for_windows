@@ -692,6 +692,25 @@ bool flushDeviceBuffers(QIODevice* device, QString* errorMessage) {
             setError(errorMessage, file->errorString());
             return false;
         }
+        // QFileDevice::flush() only empties Qt's buffer into the OS cache. A
+        // write barrier needs the OS to persist it (APFS for Windows
+        // divergence from the S.A.K. import).
+        const int fd = file->handle();
+        if (fd >= 0) {
+#ifdef Q_OS_WIN
+            const auto osHandle = reinterpret_cast<HANDLE>(_get_osfhandle(fd));
+            if (osHandle != INVALID_HANDLE_VALUE && (file->openMode() & QIODevice::WriteOnly) &&
+                FlushFileBuffers(osHandle) == 0) {
+                setError(errorMessage, win32ErrorMessage(GetLastError()));
+                return false;
+            }
+#else
+            if ((file->openMode() & QIODevice::WriteOnly) && ::fsync(fd) != 0) {
+                setError(errorMessage, QString::fromLocal8Bit(std::strerror(errno)));
+                return false;
+            }
+#endif
+        }
         return true;
     }
     // openFileOrRawDevice* only ever hands back a WindowsRawDevice or a QFile, both handled

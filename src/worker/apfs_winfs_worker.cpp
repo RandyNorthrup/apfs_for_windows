@@ -2219,6 +2219,16 @@ private:
     trace(QStringLiteral("%1 failed: %2")
               .arg(operation, result.blockers.join(QStringLiteral("; "))));
     const QString blockers = result.blockers.join(QLatin1Char(' '));
+    // The current write engine must re-collect the whole volume per commit and
+    // cannot when any directory holds 1,000+ entries or nests deeper than 16
+    // levels. Report that as a write-protected volume, not as a permission
+    // problem on the file the user touched.
+    if (blockers.contains(QStringLiteral("too many entries to preserve safely"),
+                          Qt::CaseInsensitive) ||
+        blockers.contains(QStringLiteral("is nested deeper than"),
+                          Qt::CaseInsensitive)) {
+      return STATUS_MEDIA_WRITE_PROTECTED;
+    }
     if (blockers.contains(QStringLiteral("already exists"),
                           Qt::CaseInsensitive)) {
       return STATUS_OBJECT_NAME_COLLISION;
@@ -4029,6 +4039,42 @@ void printStatus(bool eaPolicyReady, bool volumePolicyReady) {
 
 } // namespace
 
+#if APFS_HAVE_WINFSP
+// The WinFsp DLL is delay-loaded and comes only from the official WinFsp
+// installation (HKLM InstallDir, under Program Files). A plain LoadLibrary
+// search, as FspLoad does first, could pick up a planted DLL from the search
+// path in this LocalSystem process.
+bool loadInstalledWinFsp(QString *error) {
+  static bool loaded = false;
+  if (loaded) {
+    return true;
+  }
+  wchar_t installDir[MAX_PATH]{};
+  DWORD size = sizeof(installDir);
+  if (RegGetValueW(HKEY_LOCAL_MACHINE, L"" FSP_FSCTL_PRODUCT_FULL_REGKEY,
+                   L"InstallDir", RRF_RT_REG_SZ, nullptr, installDir,
+                   &size) != ERROR_SUCCESS) {
+    *error = QStringLiteral(
+        "WinFsp is not installed. Install WinFsp 2.2 or later (APFS for "
+        "Windows Setup installs it automatically).");
+    return false;
+  }
+  std::wstring dll(installDir);
+  if (!dll.empty() && dll.back() != L'\\') {
+    dll.push_back(L'\\');
+  }
+  dll += L"bin\\" FSP_FSCTL_PRODUCT_FILE_NAME "-" FSP_FSCTL_PRODUCT_FILE_ARCH ".dll";
+  if (!LoadLibraryExW(dll.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH)) {
+    *error = QStringLiteral("Unable to load the WinFsp runtime from %1: Win32 error %2")
+                 .arg(QString::fromStdWString(dll))
+                 .arg(GetLastError());
+    return false;
+  }
+  loaded = true;
+  return true;
+}
+#endif
+
 int main(int argc, char *argv[]) {
   QCoreApplication app(argc, argv);
   QCoreApplication::setApplicationName(QStringLiteral("apfs_winfs_worker"));
@@ -4099,6 +4145,11 @@ int main(int argc, char *argv[]) {
                       << Qt::endl;
   return 4;
 #else
+  QString winFspError;
+  if (!loadInstalledWinFsp(&winFspError)) {
+    QTextStream(stderr) << winFspError << Qt::endl;
+    return 7;
+  }
   const QString target = parser.value(targetOption).trimmed();
   const QString mount = parser.value(mountOption).trimmed();
   if (target.isEmpty() || mount.isEmpty()) {

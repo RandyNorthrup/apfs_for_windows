@@ -243,11 +243,15 @@ if ($mountPinComplete -and (Test-Path -LiteralPath $installedServiceExe -PathTyp
     }
 }
 
+$winFspDependency = Get-Content -LiteralPath (Join-Path $repoRoot "dependencies\winfsp.json") -Raw |
+    ConvertFrom-Json
 $checks = [ordered]@{
     source_worker_exists = [bool]$sourceHash
     build_metadata_exists = $null -ne $metadata
     production_build = [bool]($metadata -and $metadata.production_build -eq $true)
-    native_hardlinks = [bool]($metadata -and $metadata.winfsp_native_hardlinks -eq $true)
+    official_winfsp_build = [bool]($metadata -and
+        [string]$metadata.winfsp_version -ceq [string]$winFspDependency.version -and
+        $metadata.winfsp_native_hardlinks -eq $false)
     installed_worker_exists = [bool]$installedHashBefore
     service_exists = $null -ne $service
     service_automatic = [bool]($serviceCim -and $serviceCim.StartMode -eq "Auto")

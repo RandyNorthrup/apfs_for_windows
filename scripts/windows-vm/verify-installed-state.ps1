@@ -8,7 +8,8 @@ param(
     [string]$ExpectedFile = "WinProof\Nested\windows.txt",
     [string]$ExpectedSha256 = "B58EE1D8BF6C0FF48A5D0AB28DCC938E941CE9AC9091E9C103D85C3784C1E4FC",
     [string]$ImagePath = "fixture\windows-origin.apfs",
-    [string]$PackagePath = "package",
+    # release-manifest.json from the release stage the MSI was built from.
+    [string]$ReleaseManifestPath = "release-manifest.json",
     [string]$OutputPath = "installed-state.json",
     [switch]$ConfigureMount,
     [switch]$RequireInteractiveTray
@@ -22,6 +23,35 @@ function Resolve-RunPath {
         return [IO.Path]::GetFullPath($Path)
     }
     return [IO.Path]::GetFullPath((Join-Path $RunRoot $Path))
+}
+
+function Get-WinFspInstallDir {
+    $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+        [Microsoft.Win32.RegistryHive]::LocalMachine,
+        [Microsoft.Win32.RegistryView]::Registry32)
+    try {
+        $key = $baseKey.OpenSubKey("SOFTWARE\WinFsp")
+        if (-not $key) { return $null }
+        try { $value = [string]$key.GetValue("InstallDir", $null) } finally { $key.Dispose() }
+    } finally {
+        $baseKey.Dispose()
+    }
+    if ([string]::IsNullOrWhiteSpace($value)) { return $null }
+    [IO.Path]::GetFullPath($value)
+}
+
+function Get-AppRegistration {
+    # MSI installs register under the product code, so match by display name.
+    foreach ($root in @(
+            "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall",
+            "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall")) {
+        $match = Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue |
+            ForEach-Object { Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue } |
+            Where-Object { [string]$_.DisplayName -ceq "APFS for Windows" } |
+            Select-Object -First 1
+        if ($match) { return $match }
+    }
+    $null
 }
 
 $serviceExe = Join-Path $InstallRoot "apfs_mount_service.exe"
@@ -124,21 +154,17 @@ $interactiveTray = @(Get-CimInstance Win32_Process -Filter "Name='apfs_mount_man
     Where-Object { [int]$_.SessionId -gt 0 } |
     Select-Object ProcessId, SessionId, ExecutablePath, CommandLine)
 $interactiveTrayOk = (-not $RequireInteractiveTray) -or $interactiveTray.Count -eq 1
-$app = Get-ItemProperty `
-    "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\APFS for Windows" `
-    -ErrorAction SilentlyContinue
+$app = Get-AppRegistration
 $startMenu = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\APFS for Windows"
-$packageRoot = Resolve-RunPath $PackagePath
+$releaseManifest = Get-Content -LiteralPath (Resolve-RunPath $ReleaseManifestPath) -Raw | ConvertFrom-Json
 $binaries = @("apfs_mount_service.exe", "apfs_winfs_worker.exe",
-              "apfs_mount_manager.exe", "apfs_probe.exe", "winfsp-x64.dll",
-              "winfsp-x64.sys", "winfsp.sxs", "winfsp-driver.json") | ForEach-Object {
-    $packagePath = Join-Path $packageRoot $_
-    $installedPath = Join-Path $InstallRoot $_
-    $packageHash = if (Test-Path -LiteralPath $packagePath -PathType Leaf) {
-        (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash
-    } else {
-        $null
-    }
+              "apfs_mount_manager.exe", "apfs_probe.exe") | ForEach-Object {
+    $name = $_
+    $installedPath = Join-Path $InstallRoot $name
+    $packageHash = @($releaseManifest.files | Where-Object {
+        [string]$_.relative_path -ceq $name
+    } | ForEach-Object { [string]$_.sha256 } | Select-Object -First 1)
+    $packageHash = if ($packageHash.Count -eq 1) { $packageHash[0] } else { $null }
     $installedHash = if (Test-Path -LiteralPath $installedPath -PathType Leaf) {
         (Get-FileHash -LiteralPath $installedPath -Algorithm SHA256).Hash
     } else {
@@ -152,16 +178,34 @@ $binaries = @("apfs_mount_service.exe", "apfs_winfs_worker.exe",
     }
 }
 $binaryHashesMatch = @($binaries | Where-Object { -not $_.match }).Count -eq 0
-$driver = Get-CimInstance Win32_SystemDriver -Filter "Name='WinFsp+apfs-main'" `
+# The product uses the official WinFsp installed system-wide: its driver
+# service "WinFsp" must run from the WinFsp install directory with a valid
+# Microsoft signature, and the 0.2.0 test-signed driver must be gone.
+$winFspInstallDir = Get-WinFspInstallDir
+$driver = Get-CimInstance Win32_SystemDriver -Filter "Name='WinFsp'" `
     -ErrorAction SilentlyContinue
-$expectedDriverPath = [IO.Path]::GetFullPath((Join-Path $InstallRoot "winfsp-x64.sys"))
+$legacyDriverPresent = $null -ne (Get-CimInstance Win32_SystemDriver `
+    -Filter "Name='WinFsp+apfs-main'" -ErrorAction SilentlyContinue)
+$expectedDriverPath = if ($winFspInstallDir) {
+    [IO.Path]::GetFullPath((Join-Path $winFspInstallDir "bin\winfsp-x64.sys"))
+} else { $null }
 $actualDriverPath = if ($driver) { ([string]$driver.PathName).Trim().Trim('"') } else { "" }
 if ($actualDriverPath.StartsWith("\??\", [StringComparison]::Ordinal)) {
     $actualDriverPath = $actualDriverPath.Substring(4)
 }
-$driverPathMatch = $driver -and
+$driverPathMatch = $driver -and $expectedDriverPath -and
     [IO.Path]::GetFullPath($actualDriverPath).Equals(
         $expectedDriverPath, [StringComparison]::OrdinalIgnoreCase)
+$driverSignature = if ($driverPathMatch) {
+    Get-AuthenticodeSignature -LiteralPath $expectedDriverPath
+} else { $null }
+$driverSigner = if ($driverSignature -and $driverSignature.SignerCertificate) {
+    [string]$driverSignature.SignerCertificate.Subject
+} else { $null }
+$driverProductionSigned = [bool]($driverSignature -and
+    [string]$driverSignature.Status -ceq "Valid" -and $driverSigner -and
+    $driverSigner.StartsWith("CN=Microsoft Windows Hardware Compatibility Publisher",
+        [StringComparison]::OrdinalIgnoreCase))
 $installedWorkers = @(Get-CimInstance Win32_Process -Filter "Name='apfs_winfs_worker.exe'" `
     -ErrorAction SilentlyContinue | Where-Object {
         $_.ExecutablePath -and
@@ -178,8 +222,10 @@ $loadedWinFsp = @($installedWorkers | ForEach-Object {
         $null
     }
 } | Where-Object { $_ })
-$expectedRuntimeDll = [IO.Path]::GetFullPath((Join-Path $InstallRoot "winfsp-x64.dll"))
-$customRuntimeLoaded = @($loadedWinFsp | Where-Object {
+$expectedRuntimeDll = if ($winFspInstallDir) {
+    [IO.Path]::GetFullPath((Join-Path $winFspInstallDir "bin\winfsp-x64.dll"))
+} else { $null }
+$systemRuntimeLoaded = $expectedRuntimeDll -and @($loadedWinFsp | Where-Object {
     [IO.Path]::GetFullPath([string]$_).Equals(
         $expectedRuntimeDll, [StringComparison]::OrdinalIgnoreCase)
 }).Count -gt 0
@@ -189,7 +235,8 @@ $ok = $mountReady -and $actualHash -eq $ExpectedSha256 -and $writeDenied -and
     $service.State -eq "Running" -and $service.StartMode -eq "Auto" -and
     $managerValid -and $runValue -and $startupTaskOk -and $interactiveTrayOk -and
     $app -and $binaryHashesMatch -and $driver -and $driver.State -eq "Running" -and
-    $driverPathMatch -and $customRuntimeLoaded
+    $driverPathMatch -and $driverProductionSigned -and -not $legacyDriverPresent -and
+    $systemRuntimeLoaded
 
 $result = [ordered]@{
     component = "apfs_for_windows"
@@ -221,11 +268,15 @@ $result = [ordered]@{
             start_mode = [string]$driver.StartMode
             path = [string]$driver.PathName
             path_match = [bool]$driverPathMatch
+            signer = $driverSigner
+            production_signed = [bool]$driverProductionSigned
         }
     } else {
         $null
     }
-    winfsp_runtime_loaded = [bool]$customRuntimeLoaded
+    winfsp_install_dir = $winFspInstallDir
+    legacy_test_signed_driver_present = [bool]$legacyDriverPresent
+    winfsp_runtime_loaded = [bool]$systemRuntimeLoaded
     loaded_winfsp_modules = @($loadedWinFsp)
     manager_self_test = $manager
     manager_self_test_valid = [bool]$managerValid

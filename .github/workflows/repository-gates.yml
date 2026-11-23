@@ -20,8 +20,6 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          submodules: recursive
       - name: Verify repository hygiene
         shell: powershell
         run: .\scripts\verify-repository-hygiene.ps1 -RequireCleanWorktree
@@ -31,9 +29,16 @@ jobs:
       - name: Verify APFS import manifest offline
         shell: powershell
         run: .\scripts\verify-sak-source-boundary.ps1 -RequireUpstream:$false
-      - name: Verify dedicated WinFsp runtime manifest offline
+      - name: Verify official WinFsp dependency manifest offline
         shell: powershell
         run: .\scripts\verify-winfsp-runtime-boundary.ps1
+      - name: Stage and verify the pinned official WinFsp SDK
+        shell: powershell
+        run: |
+          . .\scripts\lib\winfsp-sdk.ps1
+          $sdk = Get-ApfsWinFspSdk
+          .\scripts\verify-winfsp-runtime-boundary.ps1 -SdkRoot $sdk.SdkRoot -OutputPath artifacts\source-boundary\winfsp-sdk-boundary.json
+          if ($LASTEXITCODE -ne 0) { throw 'Staged WinFsp SDK failed verification.' }
       - name: Verify license notices
         shell: powershell
         run: .\scripts\verify-license-notices.ps1

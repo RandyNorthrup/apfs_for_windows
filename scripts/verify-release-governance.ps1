@@ -49,7 +49,7 @@ try {
     $policy = $null
 }
 
-$requiredWorkflowNames = @("Release build", "Repository gates", "WinFsp runtime build")
+$requiredWorkflowNames = @("Release build", "Repository gates")
 $workflowNames = @($workflowFiles | ForEach-Object {
     $firstName = Get-Content -LiteralPath $_.FullName |
         Where-Object { $_ -match '^name:\s*(.+)$' } | Select-Object -First 1

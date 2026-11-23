@@ -1,8 +1,8 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "product": "APFS for Windows",
-  "decision_date": "2026-08-17",
-  "release_model": "owner_controlled_signed_test_mode_distribution",
+  "decision_date": "2026-11-22",
+  "release_model": "owner_controlled_signed_distribution",
   "application_signing": {
     "required": true,
     "status": "azure_artifact_signing",
@@ -12,25 +12,26 @@
   "package_signing": {
     "required": true,
     "status": "azure_artifact_signing",
-    "artifact": "msi",
-    "integrity_mechanism": "authenticode_msi_and_sha256_manifest"
+    "artifacts": ["msi", "setup_exe"],
+    "integrity_mechanism": "authenticode_msi_setup_and_sha256sums"
   },
   "installer": {
     "format": "msi",
-    "toolset": "wix_5.0.2"
+    "bundle": "wix_burn_setup_exe",
+    "toolset": "wix_5.0.2",
+    "chains_official_winfsp": true,
+    "winfsp_dependency": "dependencies/winfsp.json"
   },
   "kernel_driver_trust": {
     "required": true,
-    "distribution_mode": "persistent_windows_test_signing",
-    "production_signing_planned": false,
-    "production_signing_required_for_owner_release": false,
-    "test_signed_driver_required": true,
-    "persistent_test_signing_required": true,
-    "owner_test_mode_distribution_permitted": true,
-    "secure_boot_or_integrity_bypass_automation_permitted": false,
+    "distribution_mode": "official_winfsp_system_install",
+    "driver_signer": "Microsoft Windows Hardware Compatibility Publisher",
+    "test_mode_required": false,
+    "secure_boot_compatible": true,
     "integrity_bypass_is_not_permitted": true,
-    "production_signing_blocker": "ev_certificate_and_partner_center_attestation_required"
+    "secure_boot_or_integrity_bypass_automation_permitted": false
   },
+  "native_hard_link_creation": "unsupported_with_official_winfsp",
   "physical_fault_recovery": {
     "status": "not_physically_tested",
     "owner_accepts_residual_risk": true,

@@ -60,7 +60,9 @@ function Get-ModuleOwners {
 function Remove-InstallRootWithRuntimeRelease {
     param([Parameter(Mandatory = $true)][string]$Root)
 
-    $runtimeDll = Join-Path $Root "winfsp-x64.dll"
+    # The system WinFsp runtime is never in the install root; the worker
+    # executable is the file a still-exiting mount process keeps locked.
+    $runtimeDll = Join-Path $Root "apfs_winfs_worker.exe"
     $result = [ordered]@{
         attempted = $true
         removed = $false
@@ -107,7 +109,7 @@ if ($SelfTest) {
     $cleanupError = $null
     try {
         New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
-        Set-Content -LiteralPath (Join-Path $testRoot "winfsp-x64.dll") `
+        Set-Content -LiteralPath (Join-Path $testRoot "apfs_winfs_worker.exe") `
             -Value "self-test" -Encoding ASCII
         $release = Remove-InstallRootWithRuntimeRelease -Root $testRoot
     } finally {
@@ -167,9 +169,11 @@ if (Test-Path -LiteralPath $serviceExe -PathType Leaf) {
 }
 
 $serviceAfter = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'" -ErrorAction SilentlyContinue
-$driverBefore = Get-ApfsWinFspDriverService
-$driverUninstall = Unregister-ApfsWinFspRuntime -RuntimeRoot $InstallRoot
-$driverAfter = Get-ApfsWinFspDriverService
+# Remove only the dedicated test-signed driver service a 0.2.0 install
+# registered. The system WinFsp stays installed: other software may use it.
+$driverBefore = Get-ApfsLegacyWinFspDriverService
+$driverUninstall = Remove-ApfsLegacyWinFspDriver
+$driverAfter = Get-ApfsLegacyWinFspDriverService
 $managerPath = [IO.Path]::GetFullPath((Join-Path $InstallRoot "apfs_mount_manager.exe"))
 $managerProcessesBefore = @(Get-CimInstance Win32_Process -Filter "Name='apfs_mount_manager.exe'" -ErrorAction SilentlyContinue |
     Where-Object {
@@ -257,7 +261,7 @@ if ($RemoveFiles) {
 }
 
 $ok = $null -eq $serviceAfter -and $null -eq $driverAfter -and
-    $driverUninstall.unregistered -and $startMenuRemoved -and $registryRemoved -and
+    $driverUninstall.removed -and $startMenuRemoved -and $registryRemoved -and
     $startupEntryRemoved -and $startupTaskRemoved -and $managerProcessesAfter.Count -eq 0 -and
     $runtimeReleaseOk -and ((-not $RemoveFiles) -or
         ($installRootRemoved -and $dataRootRemoved))
@@ -292,7 +296,7 @@ $result = [ordered]@{
         $null
     }
     service_after_present = $null -ne $serviceAfter
-    winfsp_driver_before = if ($driverBefore) {
+    legacy_winfsp_driver_before = if ($driverBefore) {
         [ordered]@{
             name = [string]$driverBefore.Name
             state = [string]$driverBefore.State

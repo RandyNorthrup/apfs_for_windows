@@ -284,6 +284,8 @@ struct HealthSnapshot {
     bool received{false};
     bool commandOk{false};
     bool serviceInstalled{false};
+    bool winFspKnown{false};
+    bool winFspInstalled{true};
     QString serviceStatus;
     QString errorText;
     QList<MountView> mounts;
@@ -305,7 +307,7 @@ struct HealthSnapshot {
         if (!received) {
             return HealthState::Unknown;
         }
-        if (!serviceInstalled || !serviceRunning()) {
+        if (!serviceInstalled || !serviceRunning() || (winFspKnown && !winFspInstalled)) {
             return HealthState::Error;
         }
         if (anyCollision()) {
@@ -331,6 +333,11 @@ HealthSnapshot snapshotFromJson(const QJsonObject& health) {
     const QJsonObject service = health.value(QStringLiteral("service")).toObject();
     snapshot.serviceInstalled = service.value(QStringLiteral("installed")).toBool(false);
     snapshot.serviceStatus = service.value(QStringLiteral("status")).toString();
+    if (health.contains(QStringLiteral("winfsp"))) {
+        snapshot.winFspKnown = true;
+        snapshot.winFspInstalled =
+            health.value(QStringLiteral("winfsp")).toObject().value(QStringLiteral("installed")).toBool(false);
+    }
     if (!snapshot.commandOk) {
         snapshot.errorText = errorTextFrom(health, QStringLiteral("The APFS service did not respond."));
     }
@@ -371,6 +378,9 @@ QString serviceStatusText(const HealthSnapshot& snapshot) {
     }
     if (!snapshot.serviceInstalled) {
         return QStringLiteral("Service not installed");
+    }
+    if (snapshot.winFspKnown && !snapshot.winFspInstalled) {
+        return QStringLiteral("WinFsp is missing · run APFS for Windows Setup to repair");
     }
     if (!snapshot.serviceRunning()) {
         const QString status = snapshot.serviceStatus.isEmpty() ? QStringLiteral("unavailable")
@@ -751,7 +761,11 @@ public:
             makeWritable
                 ? QStringLiteral("Enable read/write access for %1?\n\nThe service verifies the exact "
                                  "APFS target and its safety policy before enabling writes. Sealed, "
-                                 "encrypted, and unsupported volumes stay read-only.")
+                                 "encrypted, and unsupported volumes stay read-only.\n\n"
+                                 "This version cannot write to a volume that has a folder with 1,000 or "
+                                 "more items, or folders nested more than 16 deep, anywhere on it; such "
+                                 "a volume reports as write-protected.\n\n"
+                                 "Keep a backup of this disk. Eject it from the tray before unplugging.")
                       .arg(displayName(mount))
                 : QStringLiteral("Make %1 read-only?").arg(displayName(mount));
         if (!confirm(parent, QStringLiteral("Change Access Mode"), detail)) {
@@ -902,8 +916,13 @@ private:
             const MountView* old = before.findByTarget(mount.target);
             const bool wasMounted = old && old->mounted();
             if (mount.mounted() && !wasMounted) {
+                const bool firstSeen = old == nullptr;
                 notifier_(QStringLiteral("APFS volume mounted"),
-                          QStringLiteral("%1 is ready (%2).").arg(displayName(mount), modeText(mount).toLower()),
+                          firstSeen && mount.readOnly
+                              ? QStringLiteral("%1 is ready, read-only. To change files on it, open APFS for "
+                                               "Windows and choose Make Read/Write.")
+                                    .arg(displayName(mount))
+                              : QStringLiteral("%1 is ready (%2).").arg(displayName(mount), modeText(mount).toLower()),
                           QSystemTrayIcon::Information);
             } else if (!mount.mounted() && wasMounted && after.serviceRunning() &&
                        !pendingEjects_.contains(mount.target)) {

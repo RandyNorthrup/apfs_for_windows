@@ -47,12 +47,21 @@ $onlyMain = $currentBranchCommandOk -and $branchCommandOk -and
     $remoteBranchCommandOk -and $localBranchesOk -and
     @($remoteBranches | Where-Object { $_ -cne "origin/main" }).Count -eq 0
 
+$winFspDependencyPath = Join-Path $repoRoot "dependencies\winfsp.json"
+$winFspDependency = $null
+try {
+    $winFspDependency = Get-Content -LiteralPath $winFspDependencyPath -Raw | ConvertFrom-Json
+} catch {
+    $winFspDependency = $null
+}
+$packageArtifacts = if ($policy) { @($policy.package_signing.artifacts | ForEach-Object { [string]$_ }) } else { @() }
+
 $checks = [ordered]@{
     policy_parsed = [bool]$policy
-    schema = [bool]($policy -and [int]$policy.schema_version -eq 3)
+    schema = [bool]($policy -and [int]$policy.schema_version -eq 4)
     product = [bool]($policy -and [string]$policy.product -ceq "APFS for Windows")
     release_model = [bool]($policy -and [string]$policy.release_model -ceq
-        "owner_controlled_signed_test_mode_distribution")
+        "owner_controlled_signed_distribution")
     application_signing_required = [bool]($policy -and
         $policy.application_signing.required -eq $true -and
         [string]$policy.application_signing.status -ceq "azure_artifact_signing" -and
@@ -61,26 +70,34 @@ $checks = [ordered]@{
     package_signing_required = [bool]($policy -and
         $policy.package_signing.required -eq $true -and
         [string]$policy.package_signing.status -ceq "azure_artifact_signing" -and
-        [string]$policy.package_signing.artifact -ceq "msi" -and
+        $packageArtifacts.Count -eq 2 -and
+        $packageArtifacts -ccontains "msi" -and $packageArtifacts -ccontains "setup_exe" -and
         [string]$policy.package_signing.integrity_mechanism -ceq
-            "authenticode_msi_and_sha256_manifest")
-    installer_msi = [bool]($policy -and
+            "authenticode_msi_setup_and_sha256sums")
+    installer_msi_and_bundle = [bool]($policy -and
         [string]$policy.installer.format -ceq "msi" -and
-        [string]$policy.installer.toolset -ceq "wix_5.0.2")
-    kernel_driver_test_mode_distribution = [bool]($policy -and
+        [string]$policy.installer.bundle -ceq "wix_burn_setup_exe" -and
+        [string]$policy.installer.toolset -ceq "wix_5.0.2" -and
+        $policy.installer.chains_official_winfsp -eq $true -and
+        [string]$policy.installer.winfsp_dependency -ceq "dependencies/winfsp.json")
+    kernel_driver_official_winfsp = [bool]($policy -and $winFspDependency -and
         $policy.kernel_driver_trust.required -eq $true -and
         [string]$policy.kernel_driver_trust.distribution_mode -ceq
-            "persistent_windows_test_signing" -and
-        $policy.kernel_driver_trust.production_signing_planned -eq $false -and
-        $policy.kernel_driver_trust.production_signing_required_for_owner_release -eq $false -and
-        $policy.kernel_driver_trust.test_signed_driver_required -eq $true -and
-        $policy.kernel_driver_trust.persistent_test_signing_required -eq $true -and
-        $policy.kernel_driver_trust.owner_test_mode_distribution_permitted -eq $true -and
-        [string]$policy.kernel_driver_trust.production_signing_blocker -ceq
-            "ev_certificate_and_partner_center_attestation_required")
+            "official_winfsp_system_install" -and
+        [string]$policy.kernel_driver_trust.driver_signer -ceq
+            "Microsoft Windows Hardware Compatibility Publisher" -and
+        [string]$policy.kernel_driver_trust.driver_signer -ceq
+            [string]$winFspDependency.driver_signer -and
+        [string]$winFspDependency.distribution -ceq "official_winfsp_system_install")
+    no_test_mode_required = [bool]($policy -and
+        $policy.kernel_driver_trust.test_mode_required -eq $false -and
+        $policy.kernel_driver_trust.secure_boot_compatible -eq $true)
     no_integrity_or_platform_bypass_automation = [bool]($policy -and
         $policy.kernel_driver_trust.secure_boot_or_integrity_bypass_automation_permitted -eq $false -and
         $policy.kernel_driver_trust.integrity_bypass_is_not_permitted -eq $true)
+    native_hard_link_creation_disclosed = [bool]($policy -and $winFspDependency -and
+        [string]$policy.native_hard_link_creation -ceq "unsupported_with_official_winfsp" -and
+        [string]$winFspDependency.native_hard_link_creation -ceq "unsupported_with_official_winfsp")
     physical_fault_risk_explicitly_disposed = [bool]($policy -and
         [string]$policy.physical_fault_recovery.status -ceq "not_physically_tested" -and
         $policy.physical_fault_recovery.owner_accepts_residual_risk -eq $true -and

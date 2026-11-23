@@ -4,8 +4,15 @@
 
 The mount service starts automatically with Windows. When supported APFS media
 appears, the service validates the device, chooses the lowest free drive letter
-from `D:` onward, and starts a supervised filesystem worker. Newly discovered
-supported media mounts read/write by default. Explicit saved policy always wins.
+from `D:` onward, and starts a supervised filesystem worker. A device the service
+has not seen before mounts read-only. To change files on it, turn on
+**Read/write access** for that volume in the tray (see
+[Mount Controls](#mount-controls)). The choice is saved per volume, and saved
+policy always wins on later connections.
+
+The filesystem transport is the official WinFsp driver installed system-wide
+(see [Installation](INSTALLATION.md)). If WinFsp is removed, volumes cannot
+mount until it is installed again.
 
 When the service stops or Windows shuts down, every volume is unmounted cleanly
 first. Unmount writable media before unplugging it. Physical surprise-unplug
@@ -105,10 +112,26 @@ read-only for standard users.
 ## Supported File Operations
 
 Explorer access includes regular file and directory operations, timestamps,
-Windows attributes, compatible security metadata, symbolic links, hard links,
-extended attributes, and alternate data streams. Large directories (over 1000
-entries) list completely. APFS content-critical and filesystem-owned metadata
-remains protected.
+Windows attributes, compatible security metadata, symbolic links, extended
+attributes, and alternate data streams. APFS content-critical and
+filesystem-owned metadata remains protected.
+
+Hard links that already exist on the APFS volume open and read normally, and
+their contents can be changed. Creating a new hard link from Windows (for
+example `mklink /H` or `fsutil hardlink create`) is not supported with the
+official WinFsp driver and fails. Create hard links on a Mac if you need them.
+
+Current limits, which remain until the planned new write engine lands:
+
+- Writes are committed one operation at a time, so copying many small files is
+  slow and slows further as a directory grows. Reads, large files, and ordinary
+  edits are not affected the same way.
+- The current write engine re-checks the whole volume on every change. If
+  any folder on the volume holds 1,000 or more items, or folders are nested
+  more than 16 deep, the whole volume is write-protected from Windows: it
+  still lists and reads completely, and changes report "The media is write
+  protected". Many Mac system and user volumes exceed this; simple external
+  drives usually do not.
 
 ## Protected Volumes
 
@@ -132,7 +155,12 @@ reason instead of forcing a writable mount.
   reconnect the device.
 - Drive letter in use (amber badge): choose another free letter with **Change
   drive letter…**.
-- Write denied: check whether the mount or volume policy is read-only.
+- Write denied: check whether the mount or volume policy is read-only. New
+  devices start read-only; turn on **Read/write access** in the tray.
+- "The media is write protected": the volume has a folder with 1,000 or more
+  items, or folders nested more than 16 deep, somewhere on it. This version
+  cannot write to such a volume.
+- New hard link fails: creating hard links from Windows is not supported.
 - Tray missing: launch `APFS for Windows` from the Start menu and check
   **Settings > Start at sign-in**. Its single-instance guard prevents duplicate
   tray icons.

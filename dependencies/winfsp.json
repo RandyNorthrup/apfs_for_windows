@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "name": "winfsp",
+  "version": "2.2.26323",
+  "tag": "v2.2",
+  "repository": "https://github.com/winfsp/winfsp",
+  "source_url": "https://github.com/winfsp/winfsp/tree/v2.2",
+  "msi_name": "winfsp-2.2.26323.msi",
+  "msi_url": "https://github.com/winfsp/winfsp/releases/download/v2.2/winfsp-2.2.26323.msi",
+  "msi_sha256": "36CE01F9EEDBBE6842B7FB4BEDC79D7D4F71983E8ACEB6877B46A07B331C7E19",
+  "msi_signer": "NAVIMATICS LLC",
+  "driver_signer": "Microsoft Windows Hardware Compatibility Publisher",
+  "license": "GPLv3 with FLOSS exception",
+  "distribution": "official_winfsp_system_install",
+  "native_hard_link_creation": "unsupported_with_official_winfsp"
+}

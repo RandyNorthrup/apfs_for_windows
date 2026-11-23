@@ -13,12 +13,12 @@ source remains outside this repository and is never modified by this project.
 
 ## Release Boundary
 
-Current release class is an owner-controlled, test-signed public beta:
+Current release class is an owner-controlled, signed public beta:
 
-- application binaries and the MSI are Authenticode-signed (Azure Artifact Signing);
-- the dedicated filesystem driver is WDK test-signed;
-- persistent Windows Test Signing is required;
-- production driver signing needs an EV certificate and Microsoft attestation, which the owner does not hold;
+- application binaries, the MSI, and `Setup.exe` are Authenticode-signed (Azure Artifact Signing);
+- the filesystem driver is the official WinFsp driver, installed system-wide and signed by Microsoft;
+- Windows Test Mode is not required, and Secure Boot stays on;
+- creating new hard links from Windows is unsupported with official WinFsp;
 - physical surprise-unplug and power-loss recovery are unverified;
 - no production-ready claim is permitted.
 
@@ -57,30 +57,34 @@ Per-user apfs_mount_manager
 - Open and Exit tray actions
 ```
 
-WinFsp transport comes from the pinned `winfsp-apfs` submodule. The dedicated
-runtime carries the native hard-link protocol extension and remains side by side
-with any stock WinFsp installation.
+WinFsp transport comes from the official WinFsp release installed system-wide,
+pinned in `dependencies/winfsp.json` (WinFsp 2.2.26323). `Setup.exe` chains the
+official WinFsp MSI when WinFsp is missing. The worker delay-loads the WinFsp
+DLL and loads it from the WinFsp installation directory at run time. The
+earlier dedicated `winfsp-apfs` fork, which added a native hard-link protocol
+extension, is no longer used; it remains public for a future upstream
+contribution.
 
 ## Implemented Capabilities
 
 | Area | Current state |
 |---|---|
 | Discovery | APFS whole devices plus GPT/MBR partitions detected by on-disk signature |
-| Automatic mounting | Supported new media receives a free drive letter and writable policy |
+| Automatic mounting | Supported new media receives a free drive letter and read-only policy; read/write is switched per volume in the tray |
 | Persistence | Automatic service restores explicit policy and available mounts after Windows starts |
 | File operations | Create, read, write, overwrite, rename, move, truncate, and delete |
 | Directories | Nested create, enumerate, rename, move, empty delete, and recursive Explorer cleanup |
 | Large writes | Raw targets use staged streaming commits; image targets retain bounded buffering |
 | Metadata | APFS timestamps, Windows attributes, POSIX-compatible owner/group/mode, and link counts |
-| Links | Existing and newly created symbolic links and hard links |
+| Links | Existing and newly created symbolic links; existing hard links (new hard-link creation unsupported with official WinFsp) |
 | Extended attributes | File, directory, and volume-root EAs, including encoded UTF-8 names and stream-backed values |
 | Alternate data streams | Transported through protected APFS xattr/data-stream storage |
-| Recovery | Copy-on-write checkpoint selection and deterministic old-or-new interruption behavior |
+| Recovery | Copy-on-write checkpoint selection, write-ordering flush barriers around metadata commits, and deterministic old-or-new interruption behavior |
 | Service | Live configuration sync, target-loss handling, worker restart, device notifications, and bounded logs |
 | Manager | Accessible Qt UI; persistent stacked `AP`/`FS` tray with health badge, per-volume menus (open, read/write, automount, drive letter, unmount), device search, notifications, Start at sign-in; per-session single instance |
-| Installation | Signed per-machine MSI (WiX 5): service, dedicated driver, Start menu, Apps & Features, tray autostart, clean uninstall; Test Signing helper and legacy script installer |
+| Installation | Signed per-machine MSI (WiX 5): service, Start menu, Apps & Features, tray autostart, legacy 0.2.0 driver removal, clean uninstall; signed Burn `Setup.exe` that installs official WinFsp when missing |
 | Privacy | Local paths, private email metadata, networks, credentials, and machine evidence blocked from source and packages |
-| Release | Signed MSI and deterministic ZIP built, signed, and verified by GitHub Actions |
+| Release | Signed `Setup.exe` and MSI built, signed, and verified by GitHub Actions; deterministic stage ZIP kept only for the reproducibility gate |
 
 ## Safety Policy
 
@@ -103,16 +107,17 @@ Writable requests fail closed for:
 - unsupported external symbolic-link targets;
 - protected APFS metadata.
 
-Read-only mode remains available as an explicit saved policy.
+Read-only is the default policy for newly discovered media and remains
+available as an explicit saved policy.
 
 ## User Workflow
 
-1. Install the test-signed package and restart manually when Test Signing needs it.
+1. Run the signed `Setup.exe`; it installs official WinFsp when missing.
 2. Plug in supported APFS media.
-3. Wait for a drive letter to appear in Explorer.
-4. Use files normally or open the tray manager to inspect/change policy.
+3. Wait for a drive letter to appear in Explorer; new media mounts read-only.
+4. Switch the volume to read/write in the tray when you need to change files.
 5. Unmount or eject writable media before disconnecting it.
-6. Uninstall from the retained release package when no longer needed.
+6. Uninstall from Installed apps when no longer needed.
 
 See `docs/INSTALLATION.md` and `docs/USER_GUIDE.md`.
 
@@ -123,7 +128,7 @@ See `docs/INSTALLATION.md` and `docs/USER_GUIDE.md`.
 - privacy scan of files and Git metadata;
 - repository layout and main-only governance;
 - APFS import manifest verification;
-- pinned WinFsp source/runtime verification;
+- pinned official WinFsp dependency verification;
 - license and release-policy verification;
 - PowerShell parse and conflict-marker checks.
 
@@ -139,7 +144,7 @@ See `docs/INSTALLATION.md` and `docs/USER_GUIDE.md`.
 ### External Interoperability Gates
 
 - macOS native mount, mutation, and `fsck_apfs` validation;
-- Windows VM exact-package install, restart persistence, tray, and uninstall;
+- Windows VM exact-MSI install, restart persistence, tray, and uninstall;
 - removable APFS media normal-user namespace and metadata operations.
 
 External hosts, users, credentials, serials, device targets, and raw results are
@@ -149,11 +154,11 @@ runtime-only inputs. Generated evidence remains ignored and private.
 
 - clean source and exact commit identity;
 - logical dependency metadata with no developer paths;
-- deterministic ZIP layout and file hashes;
+- deterministic stage layout, stage ZIP, and file hashes;
 - PowerShell 5.1 and PowerShell 7 verification;
-- required Qt and dedicated WinFsp payloads;
-- test-driver certificate classification;
-- install, repair, and uninstall payload validation;
+- required Qt payloads and no bundled WinFsp files;
+- official WinFsp MSI hash and signer verification before SDK staging and chaining;
+- signed MSI and `Setup.exe`;
 - package privacy scan before upload.
 
 See `docs/TESTING.md` and `docs/RELEASING.md`.
@@ -168,14 +173,16 @@ The owner-controlled public beta is complete when:
 - package is deterministic and tied to sanitized `main`;
 - privacy and repository gates pass;
 - GitHub release assets match generated SHA-256 proof;
-- release is clearly labeled test-signed and not production-ready;
+- release is clearly labeled not production-ready;
 - documented unsupported policies continue to fail closed.
 
 ## Open Boundaries
 
 These are accepted release limitations, not completed production claims:
 
-- production kernel-driver signing and Test Mode removal;
+- native hard-link creation from Windows (needs an upstream WinFsp extension);
+- write throughput and writes into directories with 1000 or more entries
+  (planned new write engine);
 - physical surprise-unplug recovery;
 - physical power-loss recovery;
 - encrypted and sealed writable volume support.

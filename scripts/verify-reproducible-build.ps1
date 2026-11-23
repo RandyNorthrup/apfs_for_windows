@@ -4,13 +4,14 @@
 param(
     [string]$SourceCommit = "HEAD",
     [string]$QtPrefix = "C:\Qt\6.10.3\msvc2022_64",
-    [string]$WinFspRoot = "third_party\winfsp",
-    [string]$WinFspArtifactRoot = "",
+    # Staged official WinFsp SDK; defaults to Get-ApfsWinFspSdk's cache.
+    [string]$WinFspRoot = "",
     [string]$OutputPath = "artifacts\reproducible-build\proof.json"
 )
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot "lib\winfsp-sdk.ps1")
 
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -71,24 +72,20 @@ function Get-FileProof {
 }
 
 $resolvedQtPrefix = Resolve-RepoPath $QtPrefix
-$resolvedWinFspRoot = Resolve-RepoPath $WinFspRoot
-$resolvedOutput = Resolve-RepoPath $OutputPath
-$winFspDependency = Get-Content `
-    -LiteralPath (Join-Path $repoRoot "dependencies\winfsp-apfs.json") -Raw |
-    ConvertFrom-Json
-if ([string]::IsNullOrWhiteSpace($WinFspArtifactRoot)) {
-    $shortCommit = ([string]$winFspDependency.commit).Substring(0, 8)
-    $WinFspArtifactRoot = Join-Path $repoRoot "artifacts\winfsp-runtime\test-signed\$shortCommit\x64"
+$resolvedWinFspRoot = if ([string]::IsNullOrWhiteSpace($WinFspRoot)) {
+    (Get-ApfsWinFspSdk).SdkRoot
+} else {
+    Resolve-RepoPath $WinFspRoot
 }
-$resolvedWinFspArtifacts = Resolve-RepoPath $WinFspArtifactRoot
+$resolvedOutput = Resolve-RepoPath $OutputPath
 $packageShells = @(
     (Get-Command powershell.exe -ErrorAction Stop).Source,
     (Get-Command pwsh.exe -ErrorAction Stop).Source)
 foreach ($required in @(
     (Join-Path $resolvedQtPrefix "bin\Qt6Core.dll"),
     (Join-Path $resolvedWinFspRoot "inc\winfsp\winfsp.h"),
-    (Join-Path $resolvedWinFspArtifacts "winfsp-x64.dll"),
-    (Join-Path $resolvedWinFspArtifacts "winfsp-x64.sys"))) {
+    (Join-Path $resolvedWinFspRoot "bin\winfsp-x64.dll"),
+    (Join-Path $resolvedWinFspRoot "winfsp-sdk.json"))) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Required reproducibility input is missing: $required"
     }
@@ -126,7 +123,7 @@ try {
         $worktreeVersion = (Get-Content -LiteralPath (Join-Path $worktree "VERSION") -Raw).Trim()
         if (-not $version) {
             $version = $worktreeVersion
-            $packageName = "APFS-for-Windows-$version-test-signed"
+            $packageName = "APFS-for-Windows-$version"
         } elseif ($worktreeVersion -cne $version) {
             throw "Source worktrees disagree on project version."
         }
@@ -151,16 +148,12 @@ try {
             "-NoProfile", "-ExecutionPolicy", "Bypass",
             "-File", (Join-Path $worktree "scripts\build-release-package.ps1"),
             "-BuildDir", (Join-Path $buildDir "Release"),
-            "-DriverSigningMode", "Test",
-            "-AllowTestSignedDriver",
-            "-WinFspArtifactRoot", $resolvedWinFspArtifacts,
+            "-QtBin", (Join-Path $resolvedQtPrefix "bin"),
             "-PackageRoot", $packageRoot,
             "-OutputPath", (Join-Path $packageRoot "package-proof.json")) | Out-Null
         Invoke-Checked -FilePath $packageShell -WorkingDirectory $worktree -Arguments @(
             "-NoProfile", "-ExecutionPolicy", "Bypass",
             "-File", (Join-Path $worktree "scripts\verify-release-package.ps1"),
-            "-DriverSigningMode", "Test",
-            "-AllowTestSignedDriver",
             "-PackageRoot", $packageRoot,
             "-OutputPath", (Join-Path $packageRoot "verify-release-package.json")) | Out-Null
 
@@ -220,7 +213,7 @@ try {
 }
 
 $metadataOk = $metadata.Count -eq 2 -and @($metadata | Where-Object {
-    [int]$_.schema_version -eq 4 -and
+    [int]$_.schema_version -eq 5 -and
     $_.production_build -eq $true -and
     $_.reproducible_build -eq $true -and
     [string]$_.reproducible_source_path -ceq "C:/src/apfs_for_windows" -and
@@ -241,6 +234,7 @@ $result = [ordered]@{
     no_admin_required = $true
     no_reboot_performed = $true
     source_commit = $sourceCommitFull
+    winfsp_sdk_root = $resolvedWinFspRoot
     source_paths_distinct = $true
     source_paths_removed_after_test = [bool](-not (Test-Path -LiteralPath $workRoot))
     ctest_passes = @($ctestPassed).Count

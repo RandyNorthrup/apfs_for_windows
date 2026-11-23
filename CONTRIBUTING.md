@@ -28,6 +28,10 @@ ctest --test-dir build -C Release --output-on-failure
 .\scripts\verify-apfs-protected-volume-policy.ps1
 ```
 
+`verify-winfsp-runtime-boundary.ps1` checks the official WinFsp dependency
+manifest. Configure `build` against the staged official WinFsp SDK first; see
+[Development](docs/DEVELOPMENT.md#stage-the-winfsp-sdk).
+
 Filesystem behavior changes require focused image tests. Raw-media behavior
 changes require serial-pinned removable-media evidence and restoration to
 read-only state. VM or host reboot tests are never implied by normal checks.
@@ -43,5 +47,10 @@ read-only state. VM or host reboot tests are never implied by normal checks.
 - Never commit local paths, personal email metadata, private network details,
   credentials, device identifiers, or raw machine evidence.
 - Do not describe a build as production-ready. Current owner policy disables that
-  public claim, signs application binaries and the MSI with Azure Artifact Signing,
-  and accepts physical fault testing as an unverified residual risk. Never imply kernel-driver trust is waived.
+  public claim, signs application binaries, the MSI, and `Setup.exe` with Azure
+  Artifact Signing, and accepts physical fault testing as an unverified residual
+  risk. Kernel-driver trust comes only from the official, Microsoft-signed WinFsp
+  release pinned in `dependencies/winfsp.json`; never ship a modified or
+  test-signed WinFsp build, and never suggest Test Mode or integrity bypasses.
+- WinFsp changes (for example native hard-link creation) belong upstream in
+  [winfsp/winfsp](https://github.com/winfsp/winfsp), not in this repository.
