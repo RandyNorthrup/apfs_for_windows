@@ -46,20 +46,24 @@ $onlyMain = $currentBranchCommandOk -and $branchCommandOk -and
 
 $checks = [ordered]@{
     policy_parsed = [bool]$policy
-    schema = [bool]($policy -and [int]$policy.schema_version -eq 2)
+    schema = [bool]($policy -and [int]$policy.schema_version -eq 3)
     product = [bool]($policy -and [string]$policy.product -ceq "APFS for Windows")
     release_model = [bool]($policy -and [string]$policy.release_model -ceq
-        "owner_controlled_unsigned_test_mode_distribution")
-    application_unsigned_by_owner_decision = [bool]($policy -and
-        $policy.application_signing.required -eq $false -and
-        [string]$policy.application_signing.status -ceq
-            "intentionally_unsigned_by_owner_decision")
-    package_unsigned_by_owner_decision = [bool]($policy -and
-        $policy.package_signing.required -eq $false -and
-        [string]$policy.package_signing.status -ceq
-            "intentionally_unsigned_by_owner_decision" -and
+        "owner_controlled_signed_test_mode_distribution")
+    application_signing_required = [bool]($policy -and
+        $policy.application_signing.required -eq $true -and
+        [string]$policy.application_signing.status -ceq "azure_artifact_signing" -and
+        [string]$policy.application_signing.publisher -ceq "CN=Randy Northrup" -and
+        $policy.application_signing.smart_app_control_reputation_guaranteed -eq $false)
+    package_signing_required = [bool]($policy -and
+        $policy.package_signing.required -eq $true -and
+        [string]$policy.package_signing.status -ceq "azure_artifact_signing" -and
+        [string]$policy.package_signing.artifact -ceq "msi" -and
         [string]$policy.package_signing.integrity_mechanism -ceq
-            "sha256_manifest_and_deterministic_archive")
+            "authenticode_msi_and_sha256_manifest")
+    installer_msi = [bool]($policy -and
+        [string]$policy.installer.format -ceq "msi" -and
+        [string]$policy.installer.toolset -ceq "wix_5.0.2")
     kernel_driver_test_mode_distribution = [bool]($policy -and
         $policy.kernel_driver_trust.required -eq $true -and
         [string]$policy.kernel_driver_trust.distribution_mode -ceq
@@ -68,7 +72,9 @@ $checks = [ordered]@{
         $policy.kernel_driver_trust.production_signing_required_for_owner_release -eq $false -and
         $policy.kernel_driver_trust.test_signed_driver_required -eq $true -and
         $policy.kernel_driver_trust.persistent_test_signing_required -eq $true -and
-        $policy.kernel_driver_trust.owner_test_mode_distribution_permitted -eq $true)
+        $policy.kernel_driver_trust.owner_test_mode_distribution_permitted -eq $true -and
+        [string]$policy.kernel_driver_trust.production_signing_blocker -ceq
+            "ev_certificate_and_partner_center_attestation_required")
     no_integrity_or_platform_bypass_automation = [bool]($policy -and
         $policy.kernel_driver_trust.secure_boot_or_integrity_bypass_automation_permitted -eq $false -and
         $policy.kernel_driver_trust.integrity_bypass_is_not_permitted -eq $true)

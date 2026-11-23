@@ -21,3 +21,4 @@
 *.lib binary
 *.png binary
 *.zip binary
+*.bmp binary

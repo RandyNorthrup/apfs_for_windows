@@ -8,6 +8,8 @@
 #include <QBuffer>
 #include <QDateTime>
 #include <QDir>
+#include <QDirIterator>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QIODevice>
@@ -18,6 +20,9 @@
 #include <QLocalSocket>
 #include <QProcess>
 #include <QProcessEnvironment>
+#include <QRegularExpression>
+#include <QSaveFile>
+#include <QUuid>
 #include <QSet>
 #include <QStringList>
 #include <QTemporaryDir>
@@ -25,7 +30,9 @@
 
 #ifdef Q_OS_WIN
 #include <windows.h>
+#include <aclapi.h>
 #include <dbt.h>
+#include <sddl.h>
 #include <winioctl.h>
 
 #include <algorithm>
@@ -48,12 +55,28 @@ constexpr int kDefaultMaxPhysicalDrives = 32;
 constexpr DWORD kServiceWaitSliceMs = 1000;
 constexpr qint64 kServiceSyncIntervalMs = 5000;
 constexpr int kControlSocketTimeoutMs = 3000;
+// A control command can wait for a sync pass that stops workers (each up to
+// kWorkerStopTimeoutMs), so clients wait much longer than the server reads.
+constexpr int kControlClientResponseTimeoutMs = 60000;
+constexpr qint64 kControlPassBudgetMs = 2000;
 constexpr qint64 kMaxLogBytes = 8LL * 1024LL * 1024LL;
 constexpr quint64 kSectorBytes = 512;
 constexpr quint64 kFallbackProbeBytes = 1024ULL * 1024ULL * 1024ULL;
 constexpr char kGptSignature[] = "EFI PART";
 constexpr char kApfsGptTypeGuid[] = "{7c3457ef-0000-11aa-aa11-00306543ecac}";
 constexpr char kLocalControlServerName[] = "ApfsForWindowsMountService.Control";
+constexpr wchar_t kServiceDescription[] =
+    L"Discovers APFS devices, assigns drive letters, and supervises APFS for Windows "
+    L"file system workers. Stopping this service unmounts all APFS volumes.";
+constexpr qint64 kMaxControlRequestBytes = 64 * 1024;
+constexpr int kWorkerStopTimeoutMs = 15000;
+constexpr qint64 kWorkerRestartBaseDelayMs = 5000;
+constexpr qint64 kWorkerRestartMaxDelayMs = 5 * 60 * 1000;
+constexpr DWORD kServiceStopWaitHintMs = 20000;
+// ProgramData policy: SYSTEM and Administrators own and control the service's
+// trusted configuration; standard users may read it (the tray reads health).
+constexpr wchar_t kProgramDataSddl[] =
+    L"O:BAG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)";
 
 void printJson(const QJsonObject& object) {
     QTextStream(stdout) << QJsonDocument(object).toJson(QJsonDocument::Indented);
@@ -64,6 +87,9 @@ SERVICE_STATUS_HANDLE g_statusHandle = nullptr;
 SERVICE_STATUS g_status{};
 HANDLE g_stopEvent = nullptr;
 HANDLE g_resyncEvent = nullptr;
+HANDLE g_workerJob = nullptr;
+bool g_programDataTrusted = true;
+DWORD g_statusCheckPoint = 0;
 HDEVNOTIFY g_deviceNotification = nullptr;
 std::mutex g_configMutex;
 std::mutex g_logMutex;
@@ -81,14 +107,23 @@ struct MountConfig {
     bool read_only{true};
     bool allow_raw_writes{false};
     bool enabled{true};
+    // Set when a user unmounts an attached volume. The service leaves it
+    // unmounted until the device is disconnected (or automount is turned back
+    // on) instead of re-adding it on the next discovery pass.
+    bool ejected{false};
 };
 
 struct WorkerHandle {
     MountConfig config;
     std::unique_ptr<QProcess> process;
+    QString stop_event_name;
+    HANDLE stop_event{nullptr};
     QDateTime last_start_attempt_utc;
     int start_count{0};
     int failed_start_count{0};
+    int consecutive_failures{0};
+    int last_exit_code{0};
+    QDateTime last_exit_utc;
 };
 
 struct PartitionCandidate {
@@ -117,6 +152,7 @@ struct DiscoveryScan {
 };
 
 void processControlServer(QLocalServer* server);
+QVector<MountConfig> enabledMounts(const QVector<MountConfig>& mounts);
 
 QString winError(DWORD code) {
     LPWSTR buffer = nullptr;
@@ -165,6 +201,169 @@ QString logDir() {
     return QDir(programDataRoot()).filePath(QStringLiteral("logs"));
 }
 
+bool isReparsePoint(const QString& path) {
+    const std::wstring native = QDir::toNativeSeparators(path).toStdWString();
+    const DWORD attributes = GetFileAttributesW(native.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+           (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+}
+
+bool sidIsTrustedOwner(PSID sid) {
+    for (WELL_KNOWN_SID_TYPE type : {WinLocalSystemSid, WinBuiltinAdministratorsSid}) {
+        BYTE buffer[SECURITY_MAX_SID_SIZE]{};
+        DWORD size = sizeof(buffer);
+        if (CreateWellKnownSid(type, nullptr, buffer, &size) && EqualSid(sid, buffer)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool pathOwnerTrusted(const QString& path) {
+    const std::wstring native = QDir::toNativeSeparators(path).toStdWString();
+    PSID owner = nullptr;
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    if (GetNamedSecurityInfoW(native.c_str(), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &owner, nullptr,
+                              nullptr, nullptr, &descriptor) != ERROR_SUCCESS) {
+        return false;
+    }
+    const bool trusted = owner && sidIsTrustedOwner(owner);
+    LocalFree(descriptor);
+    return trusted;
+}
+
+bool removeFileSystemEntry(const QString& path) {
+    const std::wstring native = QDir::toNativeSeparators(path).toStdWString();
+    const DWORD attributes = GetFileAttributesW(native.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        return true;
+    }
+    if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+            return RemoveDirectoryW(native.c_str()) != 0;  // The link only, never its target.
+        }
+        return QDir(path).removeRecursively();
+    }
+    SetFileAttributesW(native.c_str(), FILE_ATTRIBUTE_NORMAL);
+    return DeleteFileW(native.c_str()) != 0;
+}
+
+// The service runs as LocalSystem and trusts mounts.json, so the ProgramData
+// root must be owned by SYSTEM or Administrators and must not be writable by
+// standard users. Security is applied through a handle opened without
+// following reparse points, a root that someone else created is moved aside
+// rather than re-owned, and untrusted children are deleted rather than
+// re-owned. Must not log via appendServiceLog: the log directory is one of the
+// things being repaired.
+bool hardenProgramDataRoot(QString* error) {
+    if (!qEnvironmentVariable("APFS_FOR_WINDOWS_PROGRAMDATA_ROOT").trimmed().isEmpty()) {
+        return true;  // Self-test roots live in the caller's temporary directory.
+    }
+    const auto fail = [error](const QString& message) {
+        if (error) {
+            *error = message;
+        }
+        return false;
+    };
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(kProgramDataSddl, SDDL_REVISION_1, &descriptor,
+                                                              nullptr)) {
+        return fail(QStringLiteral("Invalid ProgramData security descriptor: %1").arg(winError(GetLastError())));
+    }
+    const std::unique_ptr<void, decltype(&LocalFree)> descriptorGuard(descriptor, &LocalFree);
+    BOOL daclPresent = FALSE;
+    BOOL defaulted = FALSE;
+    PACL dacl = nullptr;
+    PSID owner = nullptr;
+    GetSecurityDescriptorDacl(descriptor, &daclPresent, &dacl, &defaulted);
+    GetSecurityDescriptorOwner(descriptor, &owner, &defaulted);
+    SECURITY_ATTRIBUTES attributes{sizeof(SECURITY_ATTRIBUTES), descriptor, FALSE};
+
+    const QString root = QDir::toNativeSeparators(programDataRoot());
+    const std::wstring rootNative = root.toStdWString();
+    const auto createFresh = [&]() {
+        if (!CreateDirectoryW(rootNative.c_str(), &attributes)) {
+            return fail(QStringLiteral("Unable to create %1: %2").arg(root, winError(GetLastError())));
+        }
+        return true;
+    };
+
+    HANDLE handle = CreateFileW(rootNative.c_str(), READ_CONTROL | WRITE_DAC | WRITE_OWNER | DELETE,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        const DWORD openError = GetLastError();
+        if (openError == ERROR_FILE_NOT_FOUND || openError == ERROR_PATH_NOT_FOUND) {
+            return createFresh();
+        }
+        return fail(QStringLiteral("Unable to open %1: %2").arg(root, winError(openError)));
+    }
+    BY_HANDLE_FILE_INFORMATION info{};
+    GetFileInformationByHandle(handle, &info);
+    PSID currentOwner = nullptr;
+    PSECURITY_DESCRIPTOR currentDescriptor = nullptr;
+    const bool ownerKnown = GetSecurityInfo(handle, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &currentOwner,
+                                            nullptr, nullptr, nullptr, &currentDescriptor) == ERROR_SUCCESS;
+    const bool ownerTrusted = ownerKnown && currentOwner && sidIsTrustedOwner(currentOwner);
+    LocalFree(currentDescriptor);
+    const bool isLink = (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+    if (isLink || !ownerTrusted) {
+        // Not ours: a planted junction or a folder pre-created by another
+        // user. Move it aside (by handle) and start clean.
+        const std::wstring aside = QStringLiteral("%1.untrusted-%2")
+                                       .arg(root)
+                                       .arg(QDateTime::currentSecsSinceEpoch())
+                                       .toStdWString();
+        std::vector<BYTE> renameBuffer(sizeof(FILE_RENAME_INFO) + aside.size() * sizeof(wchar_t));
+        auto* rename = reinterpret_cast<FILE_RENAME_INFO*>(renameBuffer.data());
+        rename->ReplaceIfExists = FALSE;
+        rename->RootDirectory = nullptr;
+        rename->FileNameLength = static_cast<DWORD>(aside.size() * sizeof(wchar_t));
+        memcpy(rename->FileName, aside.c_str(), aside.size() * sizeof(wchar_t));
+        const BOOL moved = SetFileInformationByHandle(handle, FileRenameInfo, rename,
+                                                      static_cast<DWORD>(renameBuffer.size()));
+        const DWORD moveError = moved ? NO_ERROR : GetLastError();
+        CloseHandle(handle);
+        if (!moved) {
+            return fail(QStringLiteral("Untrusted %1 could not be moved aside: %2").arg(root, winError(moveError)));
+        }
+        return createFresh();
+    }
+    const DWORD applied =
+        SetSecurityInfo(handle, SE_FILE_OBJECT,
+                        OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                        owner, nullptr, dacl, nullptr);
+    CloseHandle(handle);
+    if (applied != ERROR_SUCCESS) {
+        return fail(QStringLiteral("Unable to secure %1: %2").arg(root, winError(applied)));
+    }
+
+    // The root no longer admits new entries from standard users. Remove links
+    // and anything a non-administrator created, then reset what remains so it
+    // inherits the root's policy.
+    QStringList untrusted;
+    QDirIterator it(root, QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot,
+                    QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        const QString entry = it.next();
+        if (isReparsePoint(entry) || !pathOwnerTrusted(entry)) {
+            untrusted.append(entry);
+        }
+    }
+    for (const QString& entry : untrusted) {
+        removeFileSystemEntry(entry);
+    }
+    std::wstring treeRoot = rootNative;
+    const DWORD reset = TreeResetNamedSecurityInfoW(
+        treeRoot.data(), SE_FILE_OBJECT,
+        OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, owner, nullptr,
+        dacl, nullptr, FALSE, nullptr, ProgressInvokeNever, nullptr);
+    if (reset != ERROR_SUCCESS) {
+        return fail(QStringLiteral("Unable to secure the contents of %1: %2").arg(root, winError(reset)));
+    }
+    return true;
+}
+
 void rotateLogIfNeeded(const QString& path) {
     const QFileInfo info(path);
     if (!info.exists() || info.size() < kMaxLogBytes) {
@@ -183,7 +382,9 @@ void rotateLogIfNeeded(const QString& path) {
 void pruneLegacyOversizedLogs() {
     QDir directory(logDir());
     const QFileInfoList files = directory.entryInfoList(
-        {QStringLiteral("*.log"), QStringLiteral("*.trace.txt")}, QDir::Files);
+        {QStringLiteral("*.log"), QStringLiteral("*.trace.txt"), QStringLiteral("*.stdout.txt"),
+         QStringLiteral("*.stderr.txt")},
+        QDir::Files);
     for (const QFileInfo& info : files) {
         rotateLogIfNeeded(info.absoluteFilePath());
     }
@@ -224,7 +425,14 @@ QVector<MountConfig> readMountConfig(QString* error = nullptr) {
         }
         return mounts;
     }
-    const QJsonArray array = document.object().value(QStringLiteral("mounts")).toArray();
+    const QJsonValue mountsValue = document.object().value(QStringLiteral("mounts"));
+    if (!mountsValue.isArray()) {
+        if (error) {
+            *error = QStringLiteral("Invalid mount config: \"mounts\" array is missing");
+        }
+        return mounts;
+    }
+    const QJsonArray array = mountsValue.toArray();
     for (const auto& value : array) {
         const QJsonObject object = value.toObject();
         MountConfig config{.target = object.value(QStringLiteral("target")).toString().trimmed(),
@@ -232,7 +440,8 @@ QVector<MountConfig> readMountConfig(QString* error = nullptr) {
                            .read_only = object.value(QStringLiteral("read_only")).toBool(true),
                            .allow_raw_writes =
                                object.value(QStringLiteral("allow_raw_writes")).toBool(false),
-                           .enabled = object.value(QStringLiteral("enabled")).toBool(true)};
+                           .enabled = object.value(QStringLiteral("enabled")).toBool(true),
+                           .ejected = object.value(QStringLiteral("ejected")).toBool(false)};
         if (!config.target.isEmpty() && !config.mount.isEmpty()) {
             mounts.append(config);
         }
@@ -245,7 +454,8 @@ QJsonObject mountConfigJson(const MountConfig& mount) {
                        {QStringLiteral("mount"), mount.mount},
                        {QStringLiteral("read_only"), mount.read_only},
                        {QStringLiteral("allow_raw_writes"), mount.allow_raw_writes},
-                       {QStringLiteral("enabled"), mount.enabled}};
+                       {QStringLiteral("enabled"), mount.enabled},
+                       {QStringLiteral("ejected"), mount.ejected}};
 }
 
 bool writeMountConfig(const QVector<MountConfig>& mounts, QString* error = nullptr) {
@@ -255,15 +465,30 @@ bool writeMountConfig(const QVector<MountConfig>& mounts, QString* error = nullp
     for (const auto& mount : mounts) {
         array.append(mountConfigJson(mount));
     }
-    QFile file(configPath());
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        if (error) {
-            *error = QStringLiteral("Unable to write %1").arg(configPath());
+    // Write-to-temp then atomic replace so a crash or power loss never leaves a
+    // truncated config behind. The replace can briefly fail while a reader
+    // (health poll, antivirus) has the file open, so retry a few times.
+    const QByteArray payload =
+        QJsonDocument(QJsonObject{{QStringLiteral("mounts"), array}}).toJson(QJsonDocument::Indented);
+    QString lastError;
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        if (attempt > 0) {
+            Sleep(100 * attempt);
         }
-        return false;
+        QSaveFile file(configPath());
+        if (!file.open(QIODevice::WriteOnly)) {
+            lastError = file.errorString();
+            continue;
+        }
+        if (file.write(payload) == payload.size() && file.commit()) {
+            return true;
+        }
+        lastError = file.errorString();
     }
-    file.write(QJsonDocument(QJsonObject{{QStringLiteral("mounts"), array}}).toJson(QJsonDocument::Indented));
-    return true;
+    if (error) {
+        *error = QStringLiteral("Unable to write %1: %2").arg(configPath(), lastError);
+    }
+    return false;
 }
 
 QString argumentValue(const QStringList& args, const QString& name) {
@@ -934,8 +1159,10 @@ QSet<QChar> usedDriveLetters(const QVector<MountConfig>& mounts) {
 }
 
 QString nextAvailableMount(QSet<QChar>* used) {
-    for (QChar letter = QChar(QLatin1Char('Z')); letter >= QChar(QLatin1Char('D'));
-         letter = QChar(letter.unicode() - 1)) {
+    // Lowest free letter first, like Windows itself. Users commonly map network
+    // shares from Z: downward, and the LocalSystem view cannot see those.
+    for (QChar letter = QChar(QLatin1Char('D')); letter <= QChar(QLatin1Char('Z'));
+         letter = QChar(letter.unicode() + 1)) {
         if (!used->contains(letter)) {
             used->insert(letter);
             return QStringLiteral("%1:").arg(letter);
@@ -1259,7 +1486,33 @@ QVector<MountConfig> readMountConfigWithAutoDiscovery(
     const bool aliasesChanged =
         canonicalizeDiscoveredMountAliases(&mounts, scan.volumes, &aliasActions);
     const bool mountsAdded = mergeDiscoveredMounts(&mounts, scan.volumes, &added, preferredMounts);
-    if (aliasesChanged || mountsAdded) {
+    // An ejected device that is no longer attached mounts normally the next
+    // time it is connected.
+    bool ejectCleared = false;
+    const bool scanSucceeded = std::any_of(scan.disks.begin(), scan.disks.end(), [](const QJsonValue& disk) {
+        return disk.toObject().value(QStringLiteral("open_ok")).toBool(false);
+    });
+    for (auto& mount : mounts) {
+        if (!scanSucceeded || !mount.ejected || !sak::isWindowsRawDevicePath(mount.target)) {
+            continue;
+        }
+        const QString canonical = sak::canonicalRawDevicePath(mount.target);
+        const bool attached = std::any_of(scan.volumes.begin(), scan.volumes.end(),
+                                          [&](const DiscoveredApfsVolume& volume) {
+                                              return targetsReferToSameRawRegion(
+                                                         mount.target, volume.target, scan.volumes) ||
+                                                     (!canonical.isEmpty() &&
+                                                      canonical.compare(sak::canonicalRawDevicePath(volume.target),
+                                                                        Qt::CaseInsensitive) == 0);
+                                          });
+        if (!attached) {
+            mount.ejected = false;
+            ejectCleared = true;
+            appendServiceLog(QStringLiteral("Ejected APFS target %1 was disconnected; automount restored")
+                                 .arg(mount.target));
+        }
+    }
+    if (aliasesChanged || mountsAdded || ejectCleared) {
         QString writeError;
         if (writeMountConfig(mounts, &writeError)) {
             if (!aliasActions.isEmpty()) {
@@ -1308,9 +1561,9 @@ bool driveLetterInUse(const QString& mount) {
 }
 
 bool looksLikeRawDeviceTarget(const QString& target) {
-    return target.contains(QStringLiteral("\\\\.\\PhysicalDrive"), Qt::CaseInsensitive) ||
-           target.contains(QStringLiteral("\\\\?\\GLOBALROOT\\Device\\Harddisk"),
-                           Qt::CaseInsensitive);
+    // Same rule the worker and the APFS core enforce, so the service never
+    // treats a device spelling as an image file.
+    return sak::isWindowsRawDevicePath(target);
 }
 
 bool serviceMayEnableRawWritesForTarget(const QString& target, QString* error = nullptr) {
@@ -1383,6 +1636,7 @@ QJsonObject mountHealthJson(const MountConfig& mount) {
                        {QStringLiteral("read_only"), mount.read_only},
                        {QStringLiteral("allow_raw_writes"), mount.allow_raw_writes},
                        {QStringLiteral("enabled"), mount.enabled},
+                       {QStringLiteral("ejected"), mount.ejected},
                        {QStringLiteral("exists"), exists},
                        {QStringLiteral("root_exists"), rootExists},
                        {QStringLiteral("mount_collision"), rootExists && !exists},
@@ -1656,7 +1910,11 @@ QJsonObject setMountEnabledConfigJson(const QString& target,
     }
 
     const bool oldEnabled = targetIt->enabled;
+    const bool oldEjected = targetIt->ejected;
     targetIt->enabled = enabled.value();
+    if (targetIt->enabled) {
+        targetIt->ejected = false;  // Turning automount on also mounts an ejected volume now.
+    }
     const MountConfig updated = *targetIt;
     if (!writeMountConfig(mounts, &error)) {
         if (exitCode) {
@@ -1673,7 +1931,8 @@ QJsonObject setMountEnabledConfigJson(const QString& target,
     return QJsonObject{{QStringLiteral("component"), QStringLiteral("apfs_mount_service")},
                        {QStringLiteral("ok"), true},
                        {QStringLiteral("config"), configPath()},
-                       {QStringLiteral("changed"), oldEnabled != updated.enabled},
+                       {QStringLiteral("changed"),
+                        oldEnabled != updated.enabled || oldEjected != updated.ejected},
                        {QStringLiteral("target"), target},
                        {QStringLiteral("mount"), updated.mount},
                        {QStringLiteral("old_enabled"), oldEnabled},
@@ -1765,8 +2024,141 @@ QJsonObject setMountPolicyConfigJson(const QString& target,
                        {QStringLiteral("via_service"), viaService}};
 }
 
-QJsonObject applyControlRequest(const QJsonObject& request) {
+QJsonObject ejectMountConfigJson(const QString& target, bool viaService, int* exitCode = nullptr) {
+    if (target.isEmpty()) {
+        if (exitCode) {
+            *exitCode = 2;
+        }
+        return configErrorJson(2, QStringLiteral("--eject requires --target"));
+    }
+    QString error;
+    QVector<MountConfig> mounts = readMountConfig(&error);
+    if (!error.isEmpty()) {
+        if (exitCode) {
+            *exitCode = 3;
+        }
+        return configErrorJson(3, error);
+    }
+    auto targetIt = std::find_if(mounts.begin(), mounts.end(), [&](const MountConfig& existing) {
+        return existing.target.compare(target, Qt::CaseInsensitive) == 0;
+    });
+    if (targetIt == mounts.end()) {
+        if (exitCode) {
+            *exitCode = 5;
+        }
+        return configErrorJson(5, QStringLiteral("Configured target not found: %1").arg(target));
+    }
+    const bool wasEjected = targetIt->ejected;
+    targetIt->ejected = true;
+    const MountConfig updated = *targetIt;
+    if (!wasEjected && !writeMountConfig(mounts, &error)) {
+        if (exitCode) {
+            *exitCode = 4;
+        }
+        return configErrorJson(4, error);
+    }
+    if (viaService && g_resyncEvent) {
+        SetEvent(g_resyncEvent);
+    }
+    if (exitCode) {
+        *exitCode = 0;
+    }
+    return QJsonObject{{QStringLiteral("component"), QStringLiteral("apfs_mount_service")},
+                       {QStringLiteral("ok"), true},
+                       {QStringLiteral("config"), configPath()},
+                       {QStringLiteral("changed"), !wasEjected},
+                       {QStringLiteral("ejected"), true},
+                       {QStringLiteral("target"), target},
+                       {QStringLiteral("mount"), updated.mount},
+                       {QStringLiteral("via_service"), viaService}};
+}
+
+enum class ControlCaller { Denied, Interactive, Administrator };
+
+QString controlCallerName(ControlCaller caller) {
+    switch (caller) {
+    case ControlCaller::Administrator:
+        return QStringLiteral("administrator");
+    case ControlCaller::Interactive:
+        return QStringLiteral("interactive");
+    case ControlCaller::Denied:
+        break;
+    }
+    return QStringLiteral("denied");
+}
+
+bool tokenHasWellKnownSid(HANDLE token, WELL_KNOWN_SID_TYPE type) {
+    BYTE sid[SECURITY_MAX_SID_SIZE]{};
+    DWORD size = sizeof(sid);
+    BOOL member = FALSE;
+    return CreateWellKnownSid(type, nullptr, sid, &size) && CheckTokenMembership(token, sid, &member) &&
+           member;
+}
+
+// Identifies the process on the other end of the control pipe. Elevated
+// administrators and LocalSystem may do anything; locally signed-in users may
+// manage volumes the service already knows about; network logons and other
+// callers are refused.
+ControlCaller classifyControlCaller(QLocalSocket* socket, QString* detail) {
+    const auto pipe = reinterpret_cast<HANDLE>(socket->socketDescriptor());
+    if (pipe == nullptr || pipe == INVALID_HANDLE_VALUE) {
+        *detail = QStringLiteral("control pipe handle unavailable");
+        return ControlCaller::Denied;
+    }
+    if (!ImpersonateNamedPipeClient(pipe)) {
+        *detail = QStringLiteral("caller identity unavailable: %1").arg(winError(GetLastError()));
+        return ControlCaller::Denied;
+    }
+    HANDLE token = nullptr;
+    const BOOL opened = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token);
+    const DWORD openError = opened ? NO_ERROR : GetLastError();
+    if (!RevertToSelf()) {
+        // Continuing to run as the client would be a privilege boundary failure.
+        std::abort();
+    }
+    if (!opened) {
+        *detail = QStringLiteral("caller token unavailable: %1").arg(winError(openError));
+        return ControlCaller::Denied;
+    }
+    ControlCaller caller = ControlCaller::Denied;
+    // Elevated administrators and LocalSystem are trusted from any logon type
+    // (remote management tools sign in as network logons). Everyone else must
+    // be signed in locally.
+    if (tokenHasWellKnownSid(token, WinLocalSystemSid) ||
+        tokenHasWellKnownSid(token, WinBuiltinAdministratorsSid)) {
+        caller = ControlCaller::Administrator;
+    } else if (tokenHasWellKnownSid(token, WinNetworkSid)) {
+        *detail = QStringLiteral("network callers must be administrators");
+    } else if (tokenHasWellKnownSid(token, WinInteractiveSid)) {
+        caller = ControlCaller::Interactive;
+    } else {
+        *detail = QStringLiteral("caller is not an interactive user");
+    }
+    CloseHandle(token);
+    return caller;
+}
+
+QJsonObject applyControlRequest(const QJsonObject& request, ControlCaller caller) {
     const QString command = request.value(QStringLiteral("command")).toString().trimmed();
+    if (caller == ControlCaller::Denied) {
+        return configErrorJson(9, QStringLiteral("Access denied."));
+    }
+    if (command == QStringLiteral("add_mount") && caller != ControlCaller::Administrator) {
+        return configErrorJson(
+            9, QStringLiteral("Adding a mount target requires an elevated administrator."));
+    }
+    if (command == QStringLiteral("rescan")) {
+        if (g_resyncEvent) {
+            SetEvent(g_resyncEvent);
+        }
+        return QJsonObject{{QStringLiteral("component"), QStringLiteral("apfs_mount_service")},
+                           {QStringLiteral("ok"), true},
+                           {QStringLiteral("rescan_requested"), true},
+                           {QStringLiteral("via_service"), true}};
+    }
+    if (command == QStringLiteral("eject")) {
+        return ejectMountConfigJson(request.value(QStringLiteral("target")).toString().trimmed(), true);
+    }
     if (command == QStringLiteral("add_mount")) {
         int exitCode = 0;
         const QJsonObject response = addMountConfigJson(
@@ -1823,6 +2215,26 @@ QJsonObject applyControlRequest(const QJsonObject& request) {
     return configErrorJson(2, QStringLiteral("Unsupported service command: %1").arg(command));
 }
 
+DWORD runningServiceProcessId() {
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm) {
+        return 0;
+    }
+    DWORD pid = 0;
+    if (SC_HANDLE service = OpenServiceW(scm, kServiceName, SERVICE_QUERY_STATUS)) {
+        SERVICE_STATUS_PROCESS status{};
+        DWORD bytes = 0;
+        if (QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, reinterpret_cast<LPBYTE>(&status), sizeof(status),
+                                 &bytes) &&
+            status.dwCurrentState == SERVICE_RUNNING) {
+            pid = status.dwProcessId;
+        }
+        CloseServiceHandle(service);
+    }
+    CloseServiceHandle(scm);
+    return pid;
+}
+
 std::optional<QJsonObject> sendControlRequestToServer(const QJsonObject& request,
                                                       const QString& serverName,
                                                       QString* error = nullptr) {
@@ -1833,6 +2245,19 @@ std::optional<QJsonObject> sendControlRequestToServer(const QJsonObject& request
             *error = QStringLiteral("service IPC connect failed: %1").arg(socket.errorString());
         }
         return std::nullopt;
+    }
+    if (serverName == QString::fromLatin1(kLocalControlServerName)) {
+        // Any process could create an instance of a pipe with this name; only
+        // trust answers from the running service itself.
+        ULONG serverPid = 0;
+        const auto pipe = reinterpret_cast<HANDLE>(socket.socketDescriptor());
+        const DWORD servicePid = runningServiceProcessId();
+        if (!GetNamedPipeServerProcessId(pipe, &serverPid) || servicePid == 0 || serverPid != servicePid) {
+            if (error) {
+                *error = QStringLiteral("service IPC endpoint is not owned by the APFS service");
+            }
+            return std::nullopt;
+        }
     }
 
     QByteArray payload = QJsonDocument(request).toJson(QJsonDocument::Compact);
@@ -1846,7 +2271,7 @@ std::optional<QJsonObject> sendControlRequestToServer(const QJsonObject& request
     }
 
     while (!socket.canReadLine()) {
-        if (!socket.waitForReadyRead(kControlSocketTimeoutMs)) {
+        if (!socket.waitForReadyRead(kControlClientResponseTimeoutMs)) {
             if (error) {
                 *error = QStringLiteral("service IPC response timed out: %1").arg(socket.errorString());
             }
@@ -1871,7 +2296,8 @@ std::optional<QJsonObject> sendControlRequest(const QJsonObject& request, QStrin
 
 bool printServiceFallbackIfOk(const QJsonObject& request,
                               const QString& directError,
-                              QString* fallbackError = nullptr) {
+                              QString* fallbackError = nullptr,
+                              int* serviceExitCode = nullptr) {
     QString ipcError;
     const std::optional<QJsonObject> response = sendControlRequest(request, &ipcError);
     if (!response.has_value()) {
@@ -1881,6 +2307,9 @@ bool printServiceFallbackIfOk(const QJsonObject& request,
         return false;
     }
     if (!response->value(QStringLiteral("ok")).toBool(false)) {
+        if (serviceExitCode) {
+            *serviceExitCode = response->value(QStringLiteral("exit_code")).toInt(0);
+        }
         if (fallbackError) {
             *fallbackError = QStringLiteral("%1\n%2")
                                  .arg(directError,
@@ -1910,7 +2339,8 @@ int addMount(const QStringList& args) {
                                   {QStringLiteral("read_only"), readOnly},
                                   {QStringLiteral("allow_raw_writes"), allowRawWrites}};
         QString fallbackError;
-        if (printServiceFallbackIfOk(request, directError, &fallbackError)) {
+        int serviceCode = 0;
+        if (printServiceFallbackIfOk(request, directError, &fallbackError, &serviceCode)) {
             return 0;
         }
         if (!fallbackError.isEmpty()) {
@@ -1920,7 +2350,7 @@ int addMount(const QStringList& args) {
         } else {
             QTextStream(stderr) << directError << Qt::endl;
         }
-        return exitCode;
+        return serviceCode > 0 ? serviceCode : exitCode;
     }
     printJson(response);
     return 0;
@@ -1938,7 +2368,8 @@ int setMount(const QStringList& args) {
                                   {QStringLiteral("target"), target},
                                   {QStringLiteral("mount"), mount}};
         QString fallbackError;
-        if (printServiceFallbackIfOk(request, directError, &fallbackError)) {
+        int serviceCode = 0;
+        if (printServiceFallbackIfOk(request, directError, &fallbackError, &serviceCode)) {
             return 0;
         }
         if (!fallbackError.isEmpty()) {
@@ -1948,7 +2379,7 @@ int setMount(const QStringList& args) {
         } else {
             QTextStream(stderr) << directError << Qt::endl;
         }
-        return exitCode;
+        return serviceCode > 0 ? serviceCode : exitCode;
     }
     printJson(response);
     return 0;
@@ -1966,7 +2397,8 @@ int setMountEnabled(const QStringList& args) {
                                   {QStringLiteral("target"), target},
                                   {QStringLiteral("enabled"), enabledText}};
         QString fallbackError;
-        if (printServiceFallbackIfOk(request, directError, &fallbackError)) {
+        int serviceCode = 0;
+        if (printServiceFallbackIfOk(request, directError, &fallbackError, &serviceCode)) {
             return 0;
         }
         if (!fallbackError.isEmpty()) {
@@ -1976,7 +2408,7 @@ int setMountEnabled(const QStringList& args) {
         } else {
             QTextStream(stderr) << directError << Qt::endl;
         }
-        return exitCode;
+        return serviceCode > 0 ? serviceCode : exitCode;
     }
     printJson(response);
     return 0;
@@ -1998,7 +2430,8 @@ int setMountPolicy(const QStringList& args) {
                                   {QStringLiteral("read_only"), readOnly},
                                   {QStringLiteral("allow_raw_writes"), allowRawWrites}};
         QString fallbackError;
-        if (printServiceFallbackIfOk(request, directError, &fallbackError)) {
+        int serviceCode = 0;
+        if (printServiceFallbackIfOk(request, directError, &fallbackError, &serviceCode)) {
             return 0;
         }
         if (!fallbackError.isEmpty()) {
@@ -2008,9 +2441,44 @@ int setMountPolicy(const QStringList& args) {
         } else {
             QTextStream(stderr) << directError << Qt::endl;
         }
-        return exitCode;
+        return serviceCode > 0 ? serviceCode : exitCode;
     }
     printJson(response);
+    return 0;
+}
+
+int ejectMount(const QStringList& args) {
+    const QString target = argumentValue(args, QStringLiteral("--target")).trimmed();
+    int exitCode = 0;
+    const QJsonObject response = ejectMountConfigJson(target, false, &exitCode);
+    if (exitCode != 0) {
+        const QString directError = response.value(QStringLiteral("error")).toString();
+        const QJsonObject request{{QStringLiteral("command"), QStringLiteral("eject")},
+                                  {QStringLiteral("target"), target}};
+        QString fallbackError;
+        int serviceCode = 0;
+        if (printServiceFallbackIfOk(request, directError, &fallbackError, &serviceCode)) {
+            return 0;
+        }
+        QTextStream(stderr) << (fallbackError.isEmpty() ? directError : fallbackError) << Qt::endl;
+        return serviceCode > 0 ? serviceCode : exitCode;
+    }
+    printJson(response);
+    return 0;
+}
+
+int requestRescan() {
+    QString error;
+    const std::optional<QJsonObject> response =
+        sendControlRequest(QJsonObject{{QStringLiteral("command"), QStringLiteral("rescan")}}, &error);
+    if (!response.has_value() || !response->value(QStringLiteral("ok")).toBool(false)) {
+        QTextStream(stderr) << (response.has_value()
+                                    ? response->value(QStringLiteral("error")).toString()
+                                    : QStringLiteral("The APFS service is not running. %1").arg(error))
+                            << Qt::endl;
+        return response.has_value() ? response->value(QStringLiteral("exit_code")).toInt(4) : 4;
+    }
+    printJson(response.value());
     return 0;
 }
 
@@ -2037,7 +2505,8 @@ int removeMount(const QStringList& args) {
                                   {QStringLiteral("target"), target},
                                   {QStringLiteral("mount"), mount}};
         QString fallbackError;
-        if (printServiceFallbackIfOk(request, directError, &fallbackError)) {
+        int serviceCode = 0;
+        if (printServiceFallbackIfOk(request, directError, &fallbackError, &serviceCode)) {
             return 0;
         }
         if (!fallbackError.isEmpty()) {
@@ -2047,7 +2516,7 @@ int removeMount(const QStringList& args) {
         } else {
             QTextStream(stderr) << directError << Qt::endl;
         }
-        return exitCode;
+        return serviceCode > 0 ? serviceCode : exitCode;
     }
     printJson(response);
     return 0;
@@ -2079,39 +2548,68 @@ int selfTestControlRequests() {
     qputenv("APFS_FOR_WINDOWS_PROGRAMDATA_ROOT", temp.path().toUtf8());
 
     const QString target = temp.filePath(QStringLiteral("fixture.apfs"));
+    const auto apply = [](const QJsonObject& request) {
+        return applyControlRequest(request, ControlCaller::Administrator);
+    };
     const QJsonObject addResponse =
-        applyControlRequest(QJsonObject{{QStringLiteral("command"), QStringLiteral("add_mount")},
+        apply(QJsonObject{{QStringLiteral("command"), QStringLiteral("add_mount")},
                                         {QStringLiteral("target"), target},
                                         {QStringLiteral("mount"), QStringLiteral("Q:")},
                                         {QStringLiteral("read_only"), true},
                                         {QStringLiteral("allow_raw_writes"), false}});
-    const QJsonObject rawDeniedResponse = applyControlRequest(
+    const QJsonObject rawDeniedResponse = apply(
         QJsonObject{{QStringLiteral("command"), QStringLiteral("add_mount")},
                     {QStringLiteral("target"), QStringLiteral("\\\\.\\PhysicalDrive99")},
                     {QStringLiteral("mount"), QStringLiteral("R:")},
                     {QStringLiteral("read_only"), false},
                     {QStringLiteral("allow_raw_writes"), true}});
     const QJsonObject disableResponse =
-        applyControlRequest(QJsonObject{{QStringLiteral("command"), QStringLiteral("set_enabled")},
+        apply(QJsonObject{{QStringLiteral("command"), QStringLiteral("set_enabled")},
                                         {QStringLiteral("target"), target},
                                         {QStringLiteral("enabled"), false}});
     const QJsonObject writePolicyResponse =
-        applyControlRequest(QJsonObject{{QStringLiteral("command"), QStringLiteral("set_policy")},
+        apply(QJsonObject{{QStringLiteral("command"), QStringLiteral("set_policy")},
                                         {QStringLiteral("target"), target},
                                         {QStringLiteral("read_only"), false},
                                         {QStringLiteral("allow_raw_writes"), false}});
     const QJsonObject readOnlyPolicyResponse =
-        applyControlRequest(QJsonObject{{QStringLiteral("command"), QStringLiteral("set_policy")},
+        apply(QJsonObject{{QStringLiteral("command"), QStringLiteral("set_policy")},
                                         {QStringLiteral("target"), target},
                                         {QStringLiteral("read_only"), true},
                                         {QStringLiteral("allow_raw_writes"), false}});
-    const QJsonObject rawReadWriteDeniedResponse = applyControlRequest(
+    const QJsonObject rawReadWriteDeniedResponse = apply(
         QJsonObject{{QStringLiteral("command"), QStringLiteral("set_policy")},
                     {QStringLiteral("target"), QStringLiteral("\\\\.\\PhysicalDrive99")},
                     {QStringLiteral("read_only"), false},
                     {QStringLiteral("allow_raw_writes"), false}});
+    const QJsonObject interactiveAddResponse = applyControlRequest(
+        QJsonObject{{QStringLiteral("command"), QStringLiteral("add_mount")},
+                    {QStringLiteral("target"), temp.filePath(QStringLiteral("other.apfs"))},
+                    {QStringLiteral("mount"), QStringLiteral("T:")}},
+        ControlCaller::Interactive);
+    const QJsonObject deniedCallerResponse = applyControlRequest(
+        QJsonObject{{QStringLiteral("command"), QStringLiteral("set_enabled")},
+                    {QStringLiteral("target"), target},
+                    {QStringLiteral("enabled"), true}},
+        ControlCaller::Denied);
+    const QJsonObject ejectResponse = applyControlRequest(
+        QJsonObject{{QStringLiteral("command"), QStringLiteral("eject")}, {QStringLiteral("target"), target}},
+        ControlCaller::Interactive);
+    const bool ejectPersisted = [&]() {
+        const QVector<MountConfig> mounts = readMountConfig();
+        return mounts.size() == 1 && mounts.first().ejected && enabledMounts(mounts).isEmpty();
+    }();
+    const QJsonObject reenableResponse = applyControlRequest(
+        QJsonObject{{QStringLiteral("command"), QStringLiteral("set_enabled")},
+                    {QStringLiteral("target"), target},
+                    {QStringLiteral("enabled"), true}},
+        ControlCaller::Interactive);
+    const bool ejectCleared = [&]() {
+        const QVector<MountConfig> mounts = readMountConfig();
+        return mounts.size() == 1 && !mounts.first().ejected && mounts.first().enabled;
+    }();
     const QJsonObject removeResponse =
-        applyControlRequest(QJsonObject{{QStringLiteral("command"), QStringLiteral("remove_mount")},
+        apply(QJsonObject{{QStringLiteral("command"), QStringLiteral("remove_mount")},
                                         {QStringLiteral("target"), target}});
 
     const bool ok = addResponse.value(QStringLiteral("ok")).toBool(false) &&
@@ -2126,7 +2624,11 @@ int selfTestControlRequests() {
                     !rawReadWriteDeniedResponse.value(QStringLiteral("ok")).toBool(true) &&
                     rawReadWriteDeniedResponse.value(QStringLiteral("exit_code")).toInt() == 8 &&
                     removeResponse.value(QStringLiteral("ok")).toBool(false) &&
-                    removeResponse.value(QStringLiteral("removed_count")).toInt() == 1;
+                    removeResponse.value(QStringLiteral("removed_count")).toInt() == 1 &&
+                    interactiveAddResponse.value(QStringLiteral("exit_code")).toInt() == 9 &&
+                    deniedCallerResponse.value(QStringLiteral("exit_code")).toInt() == 9 &&
+                    ejectResponse.value(QStringLiteral("ok")).toBool(false) && ejectPersisted &&
+                    reenableResponse.value(QStringLiteral("ok")).toBool(false) && ejectCleared;
 
     printJson({{QStringLiteral("component"), QStringLiteral("apfs_mount_service")},
                {QStringLiteral("check"), QStringLiteral("service_control_request_self_test")},
@@ -2138,6 +2640,12 @@ int selfTestControlRequests() {
                {QStringLiteral("write_policy_response"), writePolicyResponse},
                {QStringLiteral("read_only_policy_response"), readOnlyPolicyResponse},
                {QStringLiteral("raw_read_write_denied_response"), rawReadWriteDeniedResponse},
+               {QStringLiteral("interactive_add_response"), interactiveAddResponse},
+               {QStringLiteral("denied_caller_response"), deniedCallerResponse},
+               {QStringLiteral("eject_response"), ejectResponse},
+               {QStringLiteral("eject_persisted"), ejectPersisted},
+               {QStringLiteral("reenable_response"), reenableResponse},
+               {QStringLiteral("eject_cleared"), ejectCleared},
                {QStringLiteral("remove_response"), removeResponse}});
     return ok ? 0 : 1;
 }
@@ -2165,19 +2673,26 @@ int selfTestControlIpc() {
     }
 
     const QString target = temp.filePath(QStringLiteral("ipc-fixture.apfs"));
-    const QJsonObject request{{QStringLiteral("command"), QStringLiteral("add_mount")},
+    if (!writeMountConfig({MountConfig{.target = target, .mount = QStringLiteral("S:")}})) {
+        QTextStream(stderr) << "Unable to seed self-test config" << Qt::endl;
+        return 1;
+    }
+    const QJsonObject request{{QStringLiteral("command"), QStringLiteral("set_enabled")},
                               {QStringLiteral("target"), target},
-                              {QStringLiteral("mount"), QStringLiteral("S:")},
-                              {QStringLiteral("read_only"), true},
-                              {QStringLiteral("allow_raw_writes"), false}};
-    auto future = std::async(std::launch::async, [request, serverName]() {
+                              {QStringLiteral("enabled"), false}};
+    const QJsonObject addRequest{{QStringLiteral("command"), QStringLiteral("add_mount")},
+                                 {QStringLiteral("target"), temp.filePath(QStringLiteral("added.apfs"))},
+                                 {QStringLiteral("mount"), QStringLiteral("U:")}};
+    auto future = std::async(std::launch::async, [request, addRequest, serverName]() {
         QString error;
         const std::optional<QJsonObject> response =
             sendControlRequestToServer(request, serverName, &error);
-        if (response.has_value()) {
-            return response.value();
-        }
-        return configErrorJson(125, error);
+        const std::optional<QJsonObject> addResponse =
+            sendControlRequestToServer(addRequest, serverName, &error);
+        QJsonObject combined = response.has_value() ? response.value() : configErrorJson(125, error);
+        combined.insert(QStringLiteral("add_response"),
+                        addResponse.has_value() ? addResponse.value() : configErrorJson(125, error));
+        return combined;
     });
 
     const auto deadline = std::chrono::steady_clock::now() +
@@ -2204,11 +2719,19 @@ int selfTestControlIpc() {
         std::any_of(mounts.begin(), mounts.end(), [&](const MountConfig& mount) {
             return mount.target.compare(target, Qt::CaseInsensitive) == 0 &&
                    mount.mount.compare(QStringLiteral("S:"), Qt::CaseInsensitive) == 0 &&
-                   mount.read_only && !mount.allow_raw_writes && mount.enabled;
+                   mount.read_only && !mount.allow_raw_writes && !mount.enabled;
         });
+    // Adding targets is reserved for elevated administrators; the result must
+    // match the caller class the service reported.
+    const QJsonObject addResponse = response.value(QStringLiteral("add_response")).toObject();
+    const bool callerIsAdmin =
+        addResponse.value(QStringLiteral("caller")).toString() == QStringLiteral("administrator");
+    const bool addAuthorizationOk =
+        callerIsAdmin ? addResponse.value(QStringLiteral("ok")).toBool(false)
+                      : addResponse.value(QStringLiteral("exit_code")).toInt() == 9;
     const bool ok = !timedOut && response.value(QStringLiteral("ok")).toBool(false) &&
                     response.value(QStringLiteral("via_service")).toBool(false) &&
-                    configPersisted;
+                    configPersisted && addAuthorizationOk;
 
     printJson({{QStringLiteral("component"), QStringLiteral("apfs_mount_service")},
                {QStringLiteral("check"), QStringLiteral("service_control_ipc_self_test")},
@@ -2217,6 +2740,7 @@ int selfTestControlIpc() {
                {QStringLiteral("program_data_root"), temp.path()},
                {QStringLiteral("timed_out"), timedOut},
                {QStringLiteral("config_persisted"), configPersisted},
+               {QStringLiteral("add_authorization_ok"), addAuthorizationOk},
                {QStringLiteral("response"), response}});
     return ok ? 0 : 1;
 }
@@ -2423,11 +2947,14 @@ int configureDiscoveredMounts(const QStringList& args) {
     return 0;
 }
 
-QStringList workerArguments(const MountConfig& mount) {
+QStringList workerArguments(const MountConfig& mount, const QString& stopEventName) {
     QStringList args{QStringLiteral("--target"),
                      mount.target,
                      QStringLiteral("--mount"),
                      mount.mount};
+    if (!stopEventName.isEmpty()) {
+        args << QStringLiteral("--stop-event") << stopEventName;
+    }
     if (!mount.read_only) {
         args.append(QStringLiteral("--read-write"));
     }
@@ -2440,7 +2967,7 @@ QStringList workerArguments(const MountConfig& mount) {
 QVector<MountConfig> enabledMounts(const QVector<MountConfig>& mounts) {
     QVector<MountConfig> enabled;
     for (const auto& mount : mounts) {
-        if (mount.enabled) {
+        if (mount.enabled && !mount.ejected) {
             enabled.append(mount);
         }
     }
@@ -2485,26 +3012,61 @@ QVector<MountConfig> runnableMounts(const QVector<MountConfig>& mounts) {
     return runnable;
 }
 
+QString workerLogId(const MountConfig& mount) {
+    QString id = mount.mount.trimmed();
+    if (id.size() == 2 && id.endsWith(QLatin1Char(':'))) {
+        return id.left(1).toUpper();
+    }
+    id.replace(QRegularExpression(QStringLiteral("[^A-Za-z0-9]+")), QStringLiteral("_"));
+    return id.left(48);
+}
+
 std::unique_ptr<QProcess> createWorkerProcess(const MountConfig& mount) {
     const QFileInfo serviceInfo(executablePath());
     const QString serviceDir = serviceInfo.absolutePath();
-    const QString winFspBin = QStringLiteral("C:\\Program Files (x86)\\WinFsp\\bin");
     QDir().mkpath(logDir());
 
     auto process = std::make_unique<QProcess>();
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-    env.insert(QStringLiteral("PATH"),
-               serviceDir + QStringLiteral(";") + winFspBin + QStringLiteral(";") +
-                   env.value(QStringLiteral("PATH")));
+    // Only the dedicated runtime next to the service: never a stock WinFsp.
+    env.insert(QStringLiteral("PATH"), serviceDir + QStringLiteral(";") + env.value(QStringLiteral("PATH")));
+    const QString id = workerLogId(mount);
     env.insert(QStringLiteral("APFS_WORKER_TRACE"),
-               QDir(logDir()).filePath(QStringLiteral("worker-%1.trace.txt")
-                                           .arg(mount.mount.left(1))));
+               QDir(logDir()).filePath(QStringLiteral("worker-%1.trace.txt").arg(id)));
     process->setProcessEnvironment(env);
-    process->setStandardOutputFile(QDir(logDir()).filePath(
-        QStringLiteral("worker-%1.stdout.txt").arg(mount.mount.left(1))));
-    process->setStandardErrorFile(QDir(logDir()).filePath(
-        QStringLiteral("worker-%1.stderr.txt").arg(mount.mount.left(1))));
+    const QString stdoutPath = QDir(logDir()).filePath(QStringLiteral("worker-%1.stdout.txt").arg(id));
+    const QString stderrPath = QDir(logDir()).filePath(QStringLiteral("worker-%1.stderr.txt").arg(id));
+    rotateLogIfNeeded(stdoutPath);
+    rotateLogIfNeeded(stderrPath);
+    // Append so a crash's output survives the supervisor's restart.
+    process->setStandardOutputFile(stdoutPath, QIODevice::Append);
+    process->setStandardErrorFile(stderrPath, QIODevice::Append);
     return process;
+}
+
+void closeWorkerStopEvent(WorkerHandle* worker) {
+    if (worker->stop_event) {
+        CloseHandle(worker->stop_event);
+        worker->stop_event = nullptr;
+    }
+    worker->stop_event_name.clear();
+}
+
+void assignWorkerToJob(QProcess* process) {
+    if (!g_workerJob || !process) {
+        return;
+    }
+    HANDLE handle = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, FALSE,
+                                static_cast<DWORD>(process->processId()));
+    if (!handle) {
+        return;
+    }
+    if (!AssignProcessToJobObject(g_workerJob, handle)) {
+        appendServiceLog(QStringLiteral("Worker pid %1 could not join the service job: %2")
+                             .arg(process->processId())
+                             .arg(winError(GetLastError())));
+    }
+    CloseHandle(handle);
 }
 
 bool startWorker(WorkerHandle* worker, const QString& reason) {
@@ -2514,12 +3076,27 @@ bool startWorker(WorkerHandle* worker, const QString& reason) {
     worker->last_start_attempt_utc = QDateTime::currentDateTimeUtc();
     worker->process = createWorkerProcess(worker->config);
 
+    // Named manual-reset event the worker waits on: signaling it makes the
+    // worker flush, remove its mount point, and exit cleanly.
+    closeWorkerStopEvent(worker);
+    worker->stop_event_name = QStringLiteral("Global\\ApfsForWindowsWorkerStop-%1")
+                                  .arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+    const std::wstring eventName = worker->stop_event_name.toStdWString();
+    worker->stop_event = CreateEventW(nullptr, TRUE, FALSE, eventName.c_str());
+    if (!worker->stop_event) {
+        appendServiceLog(QStringLiteral("Unable to create worker stop event: %1")
+                             .arg(winError(GetLastError())));
+        worker->stop_event_name.clear();
+    }
+
     const QFileInfo serviceInfo(executablePath());
     const QString serviceDir = serviceInfo.absolutePath();
     const QString workerExe = QDir(serviceDir).filePath(QStringLiteral("apfs_winfs_worker.exe"));
-    worker->process->start(workerExe, workerArguments(worker->config));
+    worker->process->start(workerExe, workerArguments(worker->config, worker->stop_event_name));
     if (!worker->process->waitForStarted(10000)) {
         worker->failed_start_count += 1;
+        worker->consecutive_failures += 1;
+        closeWorkerStopEvent(worker);
         appendServiceLog(QStringLiteral("Failed to start worker for %1 -> %2: %3")
                              .arg(worker->config.target,
                                   worker->config.mount,
@@ -2528,6 +3105,7 @@ bool startWorker(WorkerHandle* worker, const QString& reason) {
         return false;
     }
 
+    assignWorkerToJob(worker->process.get());
     worker->start_count += 1;
     worker->failed_start_count = 0;
     appendServiceLog(QStringLiteral("Started worker pid %1 for %2 -> %3 (%4, start %5)")
@@ -2541,6 +3119,9 @@ bool startWorker(WorkerHandle* worker, const QString& reason) {
 
 std::vector<WorkerHandle> startConfiguredWorkers() {
     std::vector<WorkerHandle> workers;
+    if (!g_programDataTrusted) {
+        return workers;  // Never act on a configuration others could have written.
+    }
     QString error;
     const QVector<MountConfig> mounts = readMountConfigWithAutoDiscovery(&error);
     if (!error.isEmpty()) {
@@ -2589,21 +3170,49 @@ bool containsWorker(const std::vector<WorkerHandle>& workers, const MountConfig&
                        });
 }
 
-void stopWorker(WorkerHandle* worker, const QString& reason) {
+void signalWorkerStop(WorkerHandle* worker, const QString& reason) {
     if (!worker || !worker->process || worker->process->state() == QProcess::NotRunning) {
         return;
     }
     appendServiceLog(QStringLiteral("Stopping worker pid %1 for %2 (%3)")
                          .arg(worker->process->processId())
                          .arg(worker->config.mount, reason));
-    worker->process->terminate();
-    if (!worker->process->waitForFinished(3000)) {
-        worker->process->kill();
-        worker->process->waitForFinished(3000);
+    if (worker->stop_event) {
+        SetEvent(worker->stop_event);
+    } else {
+        worker->process->terminate();
     }
 }
 
+void finishWorkerStop(WorkerHandle* worker, int timeoutMs) {
+    if (!worker || !worker->process) {
+        return;
+    }
+    if (worker->process->state() != QProcess::NotRunning &&
+        !worker->process->waitForFinished(std::max(0, timeoutMs))) {
+        appendServiceLog(QStringLiteral("Worker for %1 did not unmount within %2 ms; terminating")
+                             .arg(worker->config.mount)
+                             .arg(timeoutMs));
+        worker->process->kill();
+        worker->process->waitForFinished(3000);
+    }
+    closeWorkerStopEvent(worker);
+}
+
+void stopWorker(WorkerHandle* worker, const QString& reason) {
+    signalWorkerStop(worker, reason);
+    finishWorkerStop(worker, kWorkerStopTimeoutMs);
+}
+
 void syncConfiguredWorkers(std::vector<WorkerHandle>* workers) {
+    if (!g_programDataTrusted) {
+        QString hardenError;
+        g_programDataTrusted = hardenProgramDataRoot(&hardenError);
+        if (!g_programDataTrusted) {
+            return;
+        }
+        appendServiceLog(QStringLiteral("ProgramData secured; resuming mounts"));
+    }
     QString error;
     const QVector<MountConfig> desired =
         runnableMounts(readMountConfigWithAutoDiscovery(&error, activeWorkerConfigs(*workers)));
@@ -2634,6 +3243,14 @@ void syncConfiguredWorkers(std::vector<WorkerHandle>* workers) {
     }
 }
 
+qint64 workerRestartDelayMs(const WorkerHandle& worker) {
+    qint64 delay = kWorkerRestartBaseDelayMs;
+    for (int i = 1; i < worker.consecutive_failures && delay < kWorkerRestartMaxDelayMs; ++i) {
+        delay *= 2;
+    }
+    return std::min(delay, kWorkerRestartMaxDelayMs);
+}
+
 void superviseWorkers(std::vector<WorkerHandle>* workers) {
     const QDateTime now = QDateTime::currentDateTimeUtc();
     for (auto& worker : *workers) {
@@ -2641,9 +3258,17 @@ void superviseWorkers(std::vector<WorkerHandle>* workers) {
             worker.process->waitForFinished(0);
         }
         if (worker.process && worker.process->state() != QProcess::NotRunning) {
+            // A worker that stays up for a minute is healthy again.
+            if (worker.consecutive_failures > 0 && worker.last_start_attempt_utc.isValid() &&
+                worker.last_start_attempt_utc.msecsTo(now) > 60000) {
+                worker.consecutive_failures = 0;
+            }
             continue;
         }
         if (worker.process) {
+            worker.last_exit_code = worker.process->exitCode();
+            worker.last_exit_utc = now;
+            worker.consecutive_failures += 1;
             appendServiceLog(QStringLiteral("Worker exited for %1 -> %2: exit_code=%3 exit_status=%4 error=%5")
                                  .arg(worker.config.target,
                                       worker.config.mount,
@@ -2651,29 +3276,44 @@ void superviseWorkers(std::vector<WorkerHandle>* workers) {
                                       QString::number(static_cast<int>(worker.process->exitStatus())),
                                       worker.process->errorString()));
             worker.process.reset();
+            closeWorkerStopEvent(&worker);
         }
         if (worker.last_start_attempt_utc.isValid() &&
-            worker.last_start_attempt_utc.msecsTo(now) < 5000) {
+            worker.last_start_attempt_utc.msecsTo(now) < workerRestartDelayMs(worker)) {
             continue;
         }
         startWorker(&worker, QStringLiteral("supervisor"));
     }
 }
 
-void stopWorkers(std::vector<WorkerHandle>* workers) {
-    for (auto& worker : *workers) {
-        stopWorker(&worker, QStringLiteral("service-stop"));
-    }
-    workers->clear();
-}
-
 void setServiceStatus(DWORD state, DWORD win32ExitCode = NO_ERROR, DWORD waitHintMs = 0) {
+    if (!g_statusHandle) {
+        return;  // Console mode.
+    }
     g_status.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
     g_status.dwCurrentState = state;
-    g_status.dwControlsAccepted = state == SERVICE_RUNNING ? SERVICE_ACCEPT_STOP : 0;
+    g_status.dwControlsAccepted =
+        state == SERVICE_RUNNING ? SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_PRESHUTDOWN : 0;
     g_status.dwWin32ExitCode = win32ExitCode;
     g_status.dwWaitHint = waitHintMs;
+    const bool pending = state == SERVICE_START_PENDING || state == SERVICE_STOP_PENDING;
+    g_status.dwCheckPoint = pending ? ++g_statusCheckPoint : 0;
     SetServiceStatus(g_statusHandle, &g_status);
+}
+
+// Signals every worker first so they unmount in parallel, then waits with a
+// shared deadline while keeping the SCM informed.
+void stopWorkers(std::vector<WorkerHandle>* workers) {
+    for (auto& worker : *workers) {
+        signalWorkerStop(&worker, QStringLiteral("service-stop"));
+    }
+    QElapsedTimer elapsed;
+    elapsed.start();
+    for (auto& worker : *workers) {
+        setServiceStatus(SERVICE_STOP_PENDING, NO_ERROR, kServiceStopWaitHintMs);
+        finishWorkerStop(&worker, kWorkerStopTimeoutMs - static_cast<int>(elapsed.elapsed()));
+    }
+    workers->clear();
 }
 
 bool isStorageDeviceEvent(DWORD eventType) {
@@ -2733,8 +3373,22 @@ void processControlConnection(QLocalSocket* socket) {
     if (!socket) {
         return;
     }
-    while (!socket->canReadLine()) {
-        if (!socket->waitForReadyRead(kControlSocketTimeoutMs)) {
+    // One newline-terminated JSON request, bounded in size and time per
+    // connection (and per loop pass in processControlServer).
+    QByteArray buffer;
+    QElapsedTimer elapsed;
+    elapsed.start();
+    for (;;) {
+        buffer.append(socket->read(kMaxControlRequestBytes + 1 - buffer.size()));
+        if (buffer.contains('\n')) {
+            break;
+        }
+        if (buffer.size() > kMaxControlRequestBytes) {
+            writeControlResponse(socket, configErrorJson(2, QStringLiteral("Service command is too large.")));
+            return;
+        }
+        const qint64 remaining = kControlSocketTimeoutMs - elapsed.elapsed();
+        if (remaining <= 0 || !socket->waitForReadyRead(static_cast<int>(remaining))) {
             writeControlResponse(
                 socket,
                 configErrorJson(124,
@@ -2743,9 +3397,11 @@ void processControlConnection(QLocalSocket* socket) {
         }
     }
 
+    QString callerDetail;
+    const ControlCaller caller = classifyControlCaller(socket, &callerDetail);
     QJsonParseError parseError{};
     const QJsonDocument request =
-        QJsonDocument::fromJson(socket->readLine().trimmed(), &parseError);
+        QJsonDocument::fromJson(buffer.left(buffer.indexOf('\n')).trimmed(), &parseError);
     if (parseError.error != QJsonParseError::NoError || !request.isObject()) {
         writeControlResponse(socket,
                              configErrorJson(2,
@@ -2753,7 +3409,16 @@ void processControlConnection(QLocalSocket* socket) {
                                                  .arg(parseError.errorString())));
         return;
     }
-    writeControlResponse(socket, applyControlRequest(request.object()));
+    const QString command = request.object().value(QStringLiteral("command")).toString();
+    QJsonObject response = applyControlRequest(request.object(), caller);
+    if (!response.value(QStringLiteral("ok")).toBool(false) &&
+        response.value(QStringLiteral("exit_code")).toInt() == 9) {
+        appendServiceLog(QStringLiteral("Refused control command %1 from %2 caller%3")
+                             .arg(command, controlCallerName(caller),
+                                  callerDetail.isEmpty() ? QString() : QStringLiteral(" (%1)").arg(callerDetail)));
+    }
+    response.insert(QStringLiteral("caller"), controlCallerName(caller));
+    writeControlResponse(socket, response);
 }
 
 void processControlServer(QLocalServer* server) {
@@ -2762,15 +3427,20 @@ void processControlServer(QLocalServer* server) {
     }
     bool timedOut = false;
     server->waitForNewConnection(0, &timedOut);
-    for (int handled = 0; handled < 8 && server->hasPendingConnections(); ++handled) {
+    // Bounded per pass so callers cannot starve supervision or stop requests.
+    QElapsedTimer budget;
+    budget.start();
+    for (int handled = 0; handled < 8 && server->hasPendingConnections() &&
+                          budget.elapsed() < kControlPassBudgetMs;
+         ++handled) {
         std::unique_ptr<QLocalSocket> socket(server->nextPendingConnection());
         processControlConnection(socket.get());
     }
 }
 
 DWORD WINAPI serviceControlHandler(DWORD control, DWORD eventType, LPVOID, LPVOID) {
-    if (control == SERVICE_CONTROL_STOP && g_stopEvent) {
-        setServiceStatus(SERVICE_STOP_PENDING, NO_ERROR, 2000);
+    if ((control == SERVICE_CONTROL_STOP || control == SERVICE_CONTROL_PRESHUTDOWN) && g_stopEvent) {
+        setServiceStatus(SERVICE_STOP_PENDING, NO_ERROR, kServiceStopWaitHintMs);
         SetEvent(g_stopEvent);
         return NO_ERROR;
     }
@@ -2790,7 +3460,9 @@ void WINAPI serviceMain(DWORD, LPWSTR*) {
     if (!g_statusHandle) {
         return;
     }
-    setServiceStatus(SERVICE_START_PENDING, NO_ERROR, 2000);
+    setServiceStatus(SERVICE_START_PENDING, NO_ERROR, 5000);
+    QString hardenError;
+    const bool programDataSecured = hardenProgramDataRoot(&hardenError);
     g_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!g_stopEvent) {
         setServiceStatus(SERVICE_STOPPED, GetLastError());
@@ -2803,6 +3475,19 @@ void WINAPI serviceMain(DWORD, LPWSTR*) {
         g_stopEvent = nullptr;
         setServiceStatus(SERVICE_STOPPED, error);
         return;
+    }
+    g_programDataTrusted = programDataSecured;
+    if (!programDataSecured) {
+        appendServiceLog(QStringLiteral("ProgramData hardening failed; mounts stay offline until it succeeds: %1")
+                             .arg(hardenError));
+    }
+    // Workers die with the service: an orphaned read/write worker would keep
+    // its drive letter and raw handle with nobody supervising it.
+    g_workerJob = CreateJobObjectW(nullptr, nullptr);
+    if (g_workerJob) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(g_workerJob, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
     }
     registerDiskDeviceNotifications();
 
@@ -2819,8 +3504,10 @@ void WINAPI serviceMain(DWORD, LPWSTR*) {
                              .arg(controlServer.errorString()));
     }
 
-    std::vector<WorkerHandle> workers = startConfiguredWorkers();
+    // Report RUNNING before discovery and worker start so slow disks at boot
+    // cannot trip the SCM start timeout.
     setServiceStatus(SERVICE_RUNNING);
+    std::vector<WorkerHandle> workers = startConfiguredWorkers();
     QDateTime lastSync = QDateTime::currentDateTimeUtc();
     HANDLE waitHandles[] = {g_stopEvent, g_resyncEvent};
     for (;;) {
@@ -2845,16 +3532,278 @@ void WINAPI serviceMain(DWORD, LPWSTR*) {
         superviseWorkers(&workers);
     }
 
-    setServiceStatus(SERVICE_STOP_PENDING, NO_ERROR, 1000);
+    setServiceStatus(SERVICE_STOP_PENDING, NO_ERROR, kServiceStopWaitHintMs);
     controlServer.close();
     QLocalServer::removeServer(QString::fromLatin1(kLocalControlServerName));
     stopWorkers(&workers);
     unregisterDiskDeviceNotifications();
+    if (g_workerJob) {
+        CloseHandle(g_workerJob);
+        g_workerJob = nullptr;
+    }
     CloseHandle(g_resyncEvent);
     g_resyncEvent = nullptr;
     CloseHandle(g_stopEvent);
     g_stopEvent = nullptr;
     setServiceStatus(SERVICE_STOPPED);
+}
+
+// ---------------------------------------------------------------------------
+// Dedicated WinFsp driver registration.
+//
+// regsvr32 on the WinFsp DLL also rewrites machine-wide keys shared with a
+// stock WinFsp install (the WinFsp.Np network provider and the WinFsp event
+// log source). APFS for Windows mounts drive letters only and needs neither,
+// so it registers just its side-by-side file system driver service.
+// ---------------------------------------------------------------------------
+
+QString installDirectory() {
+    return QFileInfo(executablePath()).absolutePath();
+}
+
+std::optional<QString> dedicatedDriverServiceName(QString* error) {
+    QFile marker(QDir(installDirectory()).filePath(QStringLiteral("winfsp.sxs")));
+    if (!marker.open(QIODevice::ReadOnly)) {
+        *error = QStringLiteral("WinFsp side-by-side marker is missing: %1").arg(marker.fileName());
+        return std::nullopt;
+    }
+    const QString id = QString::fromUtf8(marker.readLine()).trimmed();
+    static const QRegularExpression valid(QStringLiteral("^[A-Za-z0-9._-]{1,64}$"));
+    if (!valid.match(id).hasMatch()) {
+        *error = QStringLiteral("WinFsp side-by-side marker is invalid.");
+        return std::nullopt;
+    }
+    return QStringLiteral("WinFsp+%1").arg(id);
+}
+
+bool pathIsInside(const QString& path, const QString& directory) {
+    const QString cleanPath = QDir::cleanPath(QDir::fromNativeSeparators(path.trimmed().remove(QLatin1Char('"'))));
+    const QString cleanDir = QDir::cleanPath(QDir::fromNativeSeparators(directory)) + QLatin1Char('/');
+    QString candidate = cleanPath;
+    if (candidate.startsWith(QStringLiteral("/??/"))) {
+        candidate = candidate.mid(4);
+    }
+    return candidate.startsWith(cleanDir, Qt::CaseInsensitive);
+}
+
+QString readRegistryString(HKEY root, const wchar_t* subKey, const wchar_t* value) {
+    wchar_t buffer[2048]{};
+    DWORD size = sizeof(buffer);
+    if (RegGetValueW(root, subKey, value, RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND, nullptr,
+                     buffer, &size) != ERROR_SUCCESS) {
+        return {};
+    }
+    return QString::fromWCharArray(buffer);
+}
+
+// Repairs keys that a pre-0.2 install (regsvr32-based) pointed at this
+// product's DLL. When a stock WinFsp is installed its keys are pointed back at
+// it; otherwise they are removed.
+QJsonArray repairSharedWinFspKeys() {
+    QJsonArray actions;
+    const QString ourDir = installDirectory();
+    const QString stockDir =
+        readRegistryString(HKEY_LOCAL_MACHINE, L"SOFTWARE\\WOW6432Node\\WinFsp", L"InstallDir");
+    const QString stockDll = stockDir.isEmpty()
+                                 ? QString()
+                                 : QDir(stockDir).filePath(QStringLiteral("bin/winfsp-x64.dll"));
+    const bool stockPresent = !stockDll.isEmpty() && QFileInfo::exists(stockDll) &&
+                              !pathIsInside(stockDll, ourDir);
+    const std::wstring stockNative = QDir::toNativeSeparators(stockDll).toStdWString();
+
+    constexpr wchar_t kNpKey[] = L"SYSTEM\\CurrentControlSet\\Services\\WinFsp.Np";
+    constexpr wchar_t kNpProviderKey[] = L"SYSTEM\\CurrentControlSet\\Services\\WinFsp.Np\\NetworkProvider";
+    const QString providerPath = readRegistryString(HKEY_LOCAL_MACHINE, kNpProviderKey, L"ProviderPath");
+    if (!providerPath.isEmpty() && pathIsInside(providerPath, ourDir)) {
+        if (stockPresent) {
+            RegSetKeyValueW(HKEY_LOCAL_MACHINE, kNpProviderKey, L"ProviderPath", REG_SZ, stockNative.c_str(),
+                            static_cast<DWORD>((stockNative.size() + 1) * sizeof(wchar_t)));
+            actions.append(QStringLiteral("WinFsp.Np provider restored to stock WinFsp"));
+        } else {
+            RegDeleteTreeW(HKEY_LOCAL_MACHINE, kNpKey);
+            RegDeleteKeyW(HKEY_LOCAL_MACHINE, kNpKey);
+            constexpr wchar_t kOrderKey[] = L"SYSTEM\\CurrentControlSet\\Control\\NetworkProvider\\Order";
+            const QString order = readRegistryString(HKEY_LOCAL_MACHINE, kOrderKey, L"ProviderOrder");
+            QStringList providers = order.split(QLatin1Char(','), Qt::SkipEmptyParts);
+            if (providers.removeAll(QStringLiteral("WinFsp.Np")) > 0) {
+                const std::wstring updated = providers.join(QLatin1Char(',')).toStdWString();
+                RegSetKeyValueW(HKEY_LOCAL_MACHINE, kOrderKey, L"ProviderOrder", REG_SZ, updated.c_str(),
+                                static_cast<DWORD>((updated.size() + 1) * sizeof(wchar_t)));
+            }
+            actions.append(QStringLiteral("WinFsp.Np provider registered by an earlier install removed"));
+        }
+    }
+
+    constexpr wchar_t kEventKey[] = L"SYSTEM\\CurrentControlSet\\Services\\EventLog\\Application\\WinFsp";
+    const QString messageFile = readRegistryString(HKEY_LOCAL_MACHINE, kEventKey, L"EventMessageFile");
+    if (!messageFile.isEmpty() && pathIsInside(messageFile, ourDir)) {
+        if (stockPresent) {
+            RegSetKeyValueW(HKEY_LOCAL_MACHINE, kEventKey, L"EventMessageFile", REG_SZ, stockNative.c_str(),
+                            static_cast<DWORD>((stockNative.size() + 1) * sizeof(wchar_t)));
+            actions.append(QStringLiteral("WinFsp event source restored to stock WinFsp"));
+        } else {
+            RegDeleteTreeW(HKEY_LOCAL_MACHINE, kEventKey);
+            RegDeleteKeyW(HKEY_LOCAL_MACHINE, kEventKey);
+            actions.append(QStringLiteral("WinFsp event source registered by an earlier install removed"));
+        }
+    }
+    return actions;
+}
+
+int registerDriver() {
+    QString error;
+    const std::optional<QString> name = dedicatedDriverServiceName(&error);
+    if (!name.has_value()) {
+        QTextStream(stderr) << error << Qt::endl;
+        return 2;
+    }
+    const QString driverPath =
+        QDir::toNativeSeparators(QDir(installDirectory()).filePath(QStringLiteral("winfsp-x64.sys")));
+    if (!QFileInfo::exists(driverPath)) {
+        QTextStream(stderr) << "Driver image is missing: " << driverPath << Qt::endl;
+        return 2;
+    }
+    const std::wstring serviceName = name->toStdWString();
+    const std::wstring imagePath = driverPath.toStdWString();
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE);
+    if (!scm) {
+        QTextStream(stderr) << "OpenSCManager failed: " << winError(GetLastError()) << Qt::endl;
+        return 3;
+    }
+    bool created = false;
+    SC_HANDLE service = OpenServiceW(scm, serviceName.c_str(), SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG);
+    if (service) {
+        if (!ChangeServiceConfigW(service, SERVICE_FILE_SYSTEM_DRIVER, SERVICE_DEMAND_START,
+                                  SERVICE_ERROR_NORMAL, imagePath.c_str(), nullptr, nullptr, nullptr,
+                                  nullptr, nullptr, serviceName.c_str())) {
+            const DWORD changeError = GetLastError();
+            CloseServiceHandle(service);
+            CloseServiceHandle(scm);
+            if (changeError == ERROR_SERVICE_MARKED_FOR_DELETE) {
+                QTextStream(stderr) << "The previous APFS file system driver is still loaded. Restart Windows, "
+                                       "then run setup again."
+                                    << Qt::endl;
+                return 3010;
+            }
+            QTextStream(stderr) << "ChangeServiceConfig failed: " << winError(changeError) << Qt::endl;
+            return 4;
+        }
+    } else {
+        service = CreateServiceW(scm, serviceName.c_str(), serviceName.c_str(),
+                                 SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG, SERVICE_FILE_SYSTEM_DRIVER,
+                                 SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL, imagePath.c_str(), nullptr,
+                                 nullptr, nullptr, nullptr, nullptr);
+        if (!service) {
+            const DWORD createError = GetLastError();
+            CloseServiceHandle(scm);
+            if (createError == ERROR_SERVICE_MARKED_FOR_DELETE) {
+                QTextStream(stderr) << "The previous APFS file system driver is still loaded. Restart Windows, "
+                                       "then run setup again."
+                                    << Qt::endl;
+                return 3010;
+            }
+            QTextStream(stderr) << "CreateService failed: " << winError(createError) << Qt::endl;
+            return 4;
+        }
+        created = true;
+    }
+    wchar_t description[] = L"APFS for Windows dedicated WinFsp file system driver.";
+    SERVICE_DESCRIPTIONW serviceDescription{description};
+    ChangeServiceConfig2W(service, SERVICE_CONFIG_DESCRIPTION, &serviceDescription);
+    CloseServiceHandle(service);
+    CloseServiceHandle(scm);
+    printJson({{QStringLiteral("component"), QStringLiteral("apfs_mount_service")},
+               {QStringLiteral("driver_registered"), true},
+               {QStringLiteral("created"), created},
+               {QStringLiteral("service_name"), *name},
+               {QStringLiteral("image_path"), driverPath},
+               {QStringLiteral("shared_key_repairs"), repairSharedWinFspKeys()}});
+    return 0;
+}
+
+int unregisterDriver() {
+    QString error;
+    const std::optional<QString> name = dedicatedDriverServiceName(&error);
+    if (!name.has_value()) {
+        QTextStream(stderr) << error << Qt::endl;
+        return 2;
+    }
+    const QJsonArray repairs = repairSharedWinFspKeys();
+    const std::wstring serviceName = name->toStdWString();
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm) {
+        QTextStream(stderr) << "OpenSCManager failed: " << winError(GetLastError()) << Qt::endl;
+        return 3;
+    }
+    SC_HANDLE service =
+        OpenServiceW(scm, serviceName.c_str(), SERVICE_STOP | DELETE | SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG);
+    if (!service) {
+        const DWORD openError = GetLastError();
+        CloseServiceHandle(scm);
+        if (openError == ERROR_SERVICE_DOES_NOT_EXIST) {
+            printJson({{QStringLiteral("component"), QStringLiteral("apfs_mount_service")},
+                       {QStringLiteral("driver_unregistered"), true},
+                       {QStringLiteral("service_was_present"), false},
+                       {QStringLiteral("shared_key_repairs"), repairs}});
+            return 0;
+        }
+        QTextStream(stderr) << "OpenService failed: " << winError(openError) << Qt::endl;
+        return 4;
+    }
+    // Only remove the driver this install registered.
+    DWORD needed = 0;
+    QueryServiceConfigW(service, nullptr, 0, &needed);
+    std::vector<BYTE> configBuffer(std::max<DWORD>(needed, sizeof(QUERY_SERVICE_CONFIGW)));
+    auto* config = reinterpret_cast<QUERY_SERVICE_CONFIGW*>(configBuffer.data());
+    if (QueryServiceConfigW(service, config, static_cast<DWORD>(configBuffer.size()), &needed) &&
+        config->lpBinaryPathName &&
+        !pathIsInside(QString::fromWCharArray(config->lpBinaryPathName), installDirectory())) {
+        const QString registered = QString::fromWCharArray(config->lpBinaryPathName);
+        CloseServiceHandle(service);
+        CloseServiceHandle(scm);
+        QTextStream(stderr) << "Refusing to remove " << *name << " registered from " << registered << Qt::endl;
+        return 5;
+    }
+    SERVICE_STATUS status{};
+    ControlService(service, SERVICE_CONTROL_STOP, &status);
+    bool markedForDelete = false;
+    if (!DeleteService(service)) {
+        const DWORD deleteError = GetLastError();
+        if (deleteError != ERROR_SERVICE_MARKED_FOR_DELETE) {
+            CloseServiceHandle(service);
+            CloseServiceHandle(scm);
+            QTextStream(stderr) << "DeleteService failed: " << winError(deleteError) << Qt::endl;
+            return 6;
+        }
+        markedForDelete = true;
+    }
+    SERVICE_STATUS_PROCESS process{};
+    DWORD bytes = 0;
+    const bool stillRunning =
+        QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, reinterpret_cast<LPBYTE>(&process),
+                             sizeof(process), &bytes) &&
+        process.dwCurrentState != SERVICE_STOPPED;
+    CloseServiceHandle(service);
+    CloseServiceHandle(scm);
+    printJson({{QStringLiteral("component"), QStringLiteral("apfs_mount_service")},
+               {QStringLiteral("driver_unregistered"), true},
+               {QStringLiteral("service_was_present"), true},
+               {QStringLiteral("already_marked_for_delete"), markedForDelete},
+               {QStringLiteral("reboot_required"), stillRunning},
+               {QStringLiteral("shared_key_repairs"), repairs}});
+    return 0;
+}
+
+int hardenProgramDataCommand() {
+    QString error;
+    if (!hardenProgramDataRoot(&error)) {
+        QTextStream(stderr) << error << Qt::endl;
+        return 4;
+    }
+    printJson({{QStringLiteral("component"), QStringLiteral("apfs_mount_service")},
+               {QStringLiteral("program_data_root"), programDataRoot()},
+               {QStringLiteral("secured"), true}});
+    return 0;
 }
 
 int installService() {
@@ -2891,7 +3840,8 @@ int installService() {
             return 4;
         }
         created = false;
-        service = OpenServiceW(scm, kServiceName, SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG);
+        // SERVICE_START is required to set restart failure actions.
+        service = OpenServiceW(scm, kServiceName, SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG | SERVICE_START);
         if (!service) {
             const DWORD openError = GetLastError();
             CloseServiceHandle(scm);
@@ -2917,6 +3867,14 @@ int installService() {
                                 << Qt::endl;
             return 6;
         }
+    }
+    wchar_t description[std::size(kServiceDescription)]{};
+    std::copy(std::begin(kServiceDescription), std::end(kServiceDescription), description);
+    SERVICE_DESCRIPTIONW serviceDescription{description};
+    ChangeServiceConfig2W(service, SERVICE_CONFIG_DESCRIPTION, &serviceDescription);
+    QString hardenError;
+    if (!hardenProgramDataRoot(&hardenError)) {
+        QTextStream(stderr) << "Warning: " << hardenError << Qt::endl;
     }
     QString recoveryError;
     if (!configureServiceRecoveryPolicy(service, &recoveryError)) {
@@ -3052,6 +4010,21 @@ int main(int argc, char* argv[]) {
     }
     if (args.contains(QStringLiteral("--uninstall"), Qt::CaseInsensitive)) {
         return uninstallService();
+    }
+    if (args.contains(QStringLiteral("--register-driver"), Qt::CaseInsensitive)) {
+        return registerDriver();
+    }
+    if (args.contains(QStringLiteral("--unregister-driver"), Qt::CaseInsensitive)) {
+        return unregisterDriver();
+    }
+    if (args.contains(QStringLiteral("--harden-programdata"), Qt::CaseInsensitive)) {
+        return hardenProgramDataCommand();
+    }
+    if (args.contains(QStringLiteral("--eject"), Qt::CaseInsensitive)) {
+        return ejectMount(args);
+    }
+    if (args.contains(QStringLiteral("--rescan"), Qt::CaseInsensitive)) {
+        return requestRescan();
     }
     if (args.contains(QStringLiteral("--add-mount"), Qt::CaseInsensitive)) {
         return addMount(args);

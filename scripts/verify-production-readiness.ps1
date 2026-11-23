@@ -11,7 +11,8 @@ param(
     [switch]$AllowTestSignedDriver,
     [bool]$RequireCleanGit = $true,
     [switch]$SkipTests,
-    [string]$OutputPath = "artifacts\production\production-readiness.json"
+    [string]$OutputPath = "artifacts\production\production-readiness.json",
+    [string]$ExpectedPublisher = "CN=Randy Northrup"
 )
 
 $ErrorActionPreference = "Stop"
@@ -205,16 +206,19 @@ $signatureReports = @($productBinaries | ForEach-Object {
         exists = Test-Path -LiteralPath $path -PathType Leaf
         status = if ($signature) { [string]$signature.Status } else { "Missing" }
         signer = if ($signature -and $signature.SignerCertificate) {
-            $signature.SignerCertificate.Subject
+            [string]$signature.SignerCertificate.Subject
         } else { $null }
-        ok = [bool]($signature -and $signature.Status -eq "Valid")
+        timestamped = [bool]($signature -and $signature.TimeStamperCertificate)
+        ok = [bool]($signature -and [string]$signature.Status -ceq "Valid" -and
+            $signature.SignerCertificate -and $signature.TimeStamperCertificate -and
+            ([string]$signature.SignerCertificate.Subject).StartsWith(
+                $ExpectedPublisher, [StringComparison]::Ordinal))
     }
 })
-$unexpectedApplicationSignatures = @($signatureReports | Where-Object {
-    $_.exists -and $_.status -ne "NotSigned"
-})
+$productBinariesNotPublisherSigned = @($signatureReports | Where-Object { -not $_.ok })
 $applicationSigningPolicyOk = $releasePolicy.ok -and
-    $unexpectedApplicationSignatures.Count -eq 0
+    $releasePolicy.payload.checks.application_signing_required -eq $true -and
+    $productBinariesNotPublisherSigned.Count -eq 0
 
 $lifecycleEvidence = @()
 $currentLifecycle = Read-JsonOrNull -Path (Resolve-RepoPath $LifecycleProofPath)
@@ -354,7 +358,8 @@ $result = [ordered]@{
         blockers = @($ownerBlockers)
         persistent_test_mode_policy_ok = [bool]$ownerTestModePolicyOk
         accepted_risks = @(
-            "Application and package binaries are intentionally unsigned.",
+            "Application binaries and the MSI are Authenticode-signed with Azure Artifact Signing; Smart App Control reputation is not guaranteed.",
+            "The kernel driver is WDK test-signed; production attestation signing needs an EV certificate and Partner Center.",
             "Persistent Windows Test Signing is required; this is never a production-ready configuration.",
             "Physical surprise-unplug and power-loss recovery are untested."
         )
@@ -384,7 +389,8 @@ $result = [ordered]@{
     build_metadata = $buildMetadata
     reproducible_build_evidence = $reproducibleEvidence
     signatures = @($signatureReports)
-    unexpected_application_signatures = @($unexpectedApplicationSignatures)
+    expected_application_publisher = $ExpectedPublisher
+    product_binaries_not_publisher_signed = @($productBinariesNotPublisherSigned)
     lifecycle_evidence = @($lifecycleEvidence)
     hardlink_transport_evidence = $hardlinkTransport
     driver_signing_evidence = $driverSigning

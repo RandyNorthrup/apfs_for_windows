@@ -10,12 +10,17 @@ param(
     [string]$DriverSigningMode = "Test",
     [switch]$AllowTestSignedDriver,
     [string]$PackageRoot = "artifacts\package",
+    [string]$VcRedistDir = "",
+    # Authenticode-sign shipped PE files with Azure Artifact Signing before any
+    # hash or manifest is computed (requires az login or a CI workload identity).
+    [switch]$Sign,
     [string]$OutputPath = "artifacts\package\package-proof.json"
 )
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "lib\project-version.ps1")
 . (Join-Path $PSScriptRoot "lib\winfsp-runtime.ps1")
+$script:ApfsVcRuntimeDlls = @("msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll", "vcruntime140.dll", "vcruntime140_1.dll")
 $Version = Get-ApfsProjectVersion -ExplicitVersion $Version -CallerRoot $PSScriptRoot
 
 function Resolve-RepoPath {
@@ -320,6 +325,11 @@ if (Test-Path -LiteralPath $winFspCertificate -PathType Leaf) {
     Copy-RequiredFile -Source $winFspCertificate `
         -Destination (Join-Path $stageRoot "winfsp-x64.cer")
 }
+if ($Sign) {
+    & (Join-Path $PSScriptRoot "sign-files.ps1") -Path @(
+        (Join-Path $stageRoot "*.exe"),
+        (Join-Path $stageRoot "winfsp-x64.dll")) | Out-Host
+}
 [IO.File]::WriteAllText(
     (Join-Path $stageRoot "winfsp.sxs"),
     "apfs-main`r`n",
@@ -368,6 +378,39 @@ foreach ($qtDll in $qtDlls) {
 Copy-RequiredFile `
     -Source (Join-Path (Split-Path -Parent $QtBin) "plugins\platforms\qwindows.dll") `
     -Destination (Join-Path $stageRoot "platforms\qwindows.dll")
+Copy-RequiredFile `
+    -Source (Join-Path (Split-Path -Parent $QtBin) "plugins\styles\qmodernwindowsstyle.dll") `
+    -Destination (Join-Path $stageRoot "styles\qmodernwindowsstyle.dll")
+
+# App-local Visual C++ runtime: clean Windows installs do not ship it, and the
+# service, worker, manager, and Qt all import it.
+if ([string]::IsNullOrWhiteSpace($VcRedistDir)) {
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    $vsRoot = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+        -property installationPath | Select-Object -First 1
+    $redistRoot = Join-Path $vsRoot "VC\Redist\MSVC"
+    $VcRedistDir = Get-ChildItem -LiteralPath $redistRoot -Directory |
+        Where-Object { $_.Name -match '^\d+\.\d+\.\d+$' } |
+        Sort-Object { [version]$_.Name } -Descending |
+        ForEach-Object { Join-Path $_.FullName "x64\Microsoft.VC143.CRT" } |
+        Where-Object { Test-Path -LiteralPath $_ -PathType Container } |
+        Select-Object -First 1
+}
+if (-not $VcRedistDir -or -not (Test-Path -LiteralPath $VcRedistDir -PathType Container)) {
+    throw "Visual C++ runtime redistributable directory was not found."
+}
+foreach ($vcDll in $script:ApfsVcRuntimeDlls) {
+    Copy-RequiredFile -Source (Join-Path $VcRedistDir $vcDll) -Destination (Join-Path $stageRoot $vcDll)
+}
+if ($Sign) {
+    # Official Qt binaries are already signed by The Qt Company; sign-files.ps1
+    # keeps that signature and signs only unsigned Qt files (custom Qt builds).
+    # The VC runtime keeps Microsoft's signature.
+    & (Join-Path $PSScriptRoot "sign-files.ps1") -Path @(
+        (Join-Path $stageRoot "Qt6*.dll"),
+        (Join-Path $stageRoot "platforms\*.dll"),
+        (Join-Path $stageRoot "styles\*.dll")) | Out-Host
+}
 
 $rootScripts = @(
     "configure-test-signing.ps1",
@@ -439,17 +482,19 @@ $payloadManifest = @($payloadPaths | ForEach-Object {
         sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
     }
 })
+$signingStatus = if ($Sign) { "azure_artifact_signing" } else { "unsigned_development_build" }
+$ownerReleaseCandidate = [bool]($DriverSigningMode -eq "Test" -and $Sign)
 $releaseManifest = [ordered]@{
     schema_version = 2
     product = "APFS for Windows"
     version = $Version
     source_commit = $sourceHead
     driver_signing_mode = $DriverSigningMode.ToLowerInvariant()
-    application_signing = "intentionally_unsigned_by_owner_decision"
-    package_signing = "intentionally_unsigned_by_owner_decision"
+    application_signing = $signingStatus
+    package_signing = $signingStatus
     physical_fault_recovery = "not_physically_tested_owner_accepted"
     production_ready = $false
-    owner_release_candidate = [bool]($DriverSigningMode -eq "Test")
+    owner_release_candidate = $ownerReleaseCandidate
     files = $payloadManifest
 }
 Write-StableJson -Value $releaseManifest `
@@ -490,11 +535,11 @@ $result = [ordered]@{
     version = $Version
     package_name = $packageName
     driver_signing_mode = $DriverSigningMode.ToLowerInvariant()
-    application_signing = "intentionally_unsigned_by_owner_decision"
-    package_signing = "intentionally_unsigned_by_owner_decision"
+    application_signing = $signingStatus
+    package_signing = $signingStatus
     physical_fault_recovery = "not_physically_tested_owner_accepted"
     production_ready = $false
-    owner_release_candidate = [bool]($DriverSigningMode -eq "Test")
+    owner_release_candidate = $ownerReleaseCandidate
     source_commit = $sourceHead
     winfsp_runtime_commit = $runtimeCommit
     winfsp_driver_signature = $driverSignature

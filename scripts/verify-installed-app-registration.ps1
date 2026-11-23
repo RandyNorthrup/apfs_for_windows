@@ -54,12 +54,8 @@ $startupTaskAction = @($startupTask.Actions | Select-Object -First 1)
 $startupTaskTrigger = @($startupTask.Triggers | Select-Object -First 1)
 $startupTaskGroupId = [string]$startupTask.Principal.GroupId
 $startupTaskGroupOk = $startupTaskGroupId -in @("S-1-5-32-545", "Users", "BUILTIN\Users")
-$startupTaskOk = $startupTask -and
-    ([string]$startupTaskAction.Execute).Equals($managerExe, [StringComparison]::OrdinalIgnoreCase) -and
-    ([string]$startupTaskAction.Arguments).Trim() -eq "--tray" -and
-    [string]$startupTaskTrigger.CimClass.CimClassName -eq "MSFT_TaskLogonTrigger" -and
-    $startupTaskGroupOk -and
-    [string]$startupTask.Settings.ExecutionTimeLimit -eq "PT0S"
+# Single autostart mechanism: the HKLM Run value. A logon task would start a duplicate tray.
+$startupTaskOk = $null -eq $startupTask
 $ok = $item -and
     $values.DisplayName -eq "APFS for Windows" -and
     $values.DisplayVersion -eq $ExpectedVersion -and

@@ -365,23 +365,11 @@ function Install-ManagerStartupEntry {
     $command = "`"$managerExe`" --tray"
     New-Item -Path $keyPath -Force | Out-Null
     New-ItemProperty -Path $keyPath -Name $valueName -Value $command -PropertyType String -Force | Out-Null
-    $action = New-ScheduledTaskAction -Execute $managerExe -Argument "--tray"
-    $trigger = New-ScheduledTaskTrigger -AtLogOn
-    $principal = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited
-    $settings = New-ScheduledTaskSettingsSet `
-        -MultipleInstances IgnoreNew `
-        -StartWhenAvailable `
-        -ExecutionTimeLimit ([TimeSpan]::Zero) `
-        -AllowStartIfOnBatteries `
-        -DontStopIfGoingOnBatteries
-    Register-ScheduledTask `
-        -TaskName $taskName `
-        -Action $action `
-        -Trigger $trigger `
-        -Principal $principal `
-        -Settings $settings `
-        -Force | Out-Null
-    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+    # The tray starts from the HKLM Run value only. Earlier builds also
+    # registered a logon task, which launched a second copy; remove it.
+    if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+    }
     [ordered]@{
         key_path = $keyPath
         value_name = $valueName
@@ -389,10 +377,8 @@ function Install-ManagerStartupEntry {
         registered = ([string](Get-ItemPropertyValue -Path $keyPath -Name $valueName -ErrorAction SilentlyContinue)).Equals(
             $command,
             [StringComparison]::OrdinalIgnoreCase)
-        scheduled_task_name = $taskName
-        scheduled_task_registered = $null -ne $task
-        scheduled_task_group_id = [string]$task.Principal.GroupId
-        scheduled_task_execution_time_limit = [string]$task.Settings.ExecutionTimeLimit
+        legacy_scheduled_task_name = $taskName
+        legacy_scheduled_task_absent = $null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)
     }
 }
 
@@ -552,6 +538,17 @@ foreach ($qtDll in $qtDlls) {
     Copy-RequiredFile -Source (Join-Path $qtRuntimeRoot $qtDll) -Destination (Join-Path $InstallRoot $qtDll)
 }
 
+foreach ($runtimeDll in @("msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll", "vcruntime140.dll", "vcruntime140_1.dll")) {
+    $runtimeSource = Join-Path $resolvedBuild $runtimeDll
+    if (Test-Path -LiteralPath $runtimeSource -PathType Leaf) {
+        Copy-RequiredFile -Source $runtimeSource -Destination (Join-Path $InstallRoot $runtimeDll)
+    }
+}
+$styleSource = Join-Path $resolvedBuild "styles\qmodernwindowsstyle.dll"
+if (Test-Path -LiteralPath $styleSource -PathType Leaf) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $InstallRoot "styles") | Out-Null
+    Copy-RequiredFile -Source $styleSource -Destination (Join-Path $InstallRoot "styles\qmodernwindowsstyle.dll")
+}
 $platformDir = Join-Path $InstallRoot "platforms"
 New-Item -ItemType Directory -Force -Path $platformDir | Out-Null
 Copy-RequiredFile `
@@ -648,7 +645,7 @@ $ok = $allBinariesMatch -and
     $recoveryPolicy.non_crash_failures_enabled -eq $true -and
     $managerCleanup.all_stopped -eq $true -and
     $managerStartupProof.registered -eq $true -and
-    $managerStartupProof.scheduled_task_registered -eq $true -and
+    $managerStartupProof.legacy_scheduled_task_absent -eq $true -and
     $mountProof -and
     ($mountProof.mode -ne "explicit_read_only_target" -or
         ($mountProof.read_only -eq $true -and $mountProof.allow_raw_writes -eq $false))

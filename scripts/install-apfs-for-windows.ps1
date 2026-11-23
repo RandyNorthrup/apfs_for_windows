@@ -136,22 +136,11 @@ function Install-ManagerStartupEntry {
     New-Item -Path $keyPath -Force | Out-Null
     New-ItemProperty -Path $keyPath -Name $valueName -Value $command -PropertyType String -Force | Out-Null
 
-    $action = New-ScheduledTaskAction -Execute $managerExe -Argument "--tray"
-    $trigger = New-ScheduledTaskTrigger -AtLogOn
-    $principal = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited
-    $settings = New-ScheduledTaskSettingsSet `
-        -MultipleInstances IgnoreNew `
-        -StartWhenAvailable `
-        -ExecutionTimeLimit ([TimeSpan]::Zero) `
-        -AllowStartIfOnBatteries `
-        -DontStopIfGoingOnBatteries
-    Register-ScheduledTask `
-        -TaskName $taskName `
-        -Action $action `
-        -Trigger $trigger `
-        -Principal $principal `
-        -Settings $settings `
-        -Force | Out-Null
+    # The tray starts from the HKLM Run value only. Earlier builds also
+    # registered a logon task, which launched a second copy; remove it.
+    if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+    }
 }
 
 $resolvedBuild = Resolve-Path -LiteralPath $BuildDir
@@ -247,6 +236,16 @@ if ($existingService -and $existingService.Status -ne "Stopped") {
     $existingService.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(20))
 }
 
+# A running tray (any session) locks the manager executable and Qt DLLs;
+# stop it before anything is unregistered so an upgrade cannot fail halfway.
+$installedManager = [IO.Path]::GetFullPath((Join-Path $InstallRoot "apfs_mount_manager.exe"))
+Get-CimInstance Win32_Process -Filter "Name='apfs_mount_manager.exe'" -ErrorAction SilentlyContinue |
+    Where-Object {
+        $_.ExecutablePath -and
+        ([IO.Path]::GetFullPath([string]$_.ExecutablePath)).Equals($installedManager, [StringComparison]::OrdinalIgnoreCase)
+    } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+
 $existingDriver = Get-ApfsWinFspDriverService
 if ($existingDriver) {
     $existingRuntimeRoot = Get-ApfsWinFspServiceRuntimeRoot
@@ -295,6 +294,17 @@ foreach ($qtDll in $qtDlls) {
     Copy-RequiredFile -Source (Join-Path $qtRuntimeRoot $qtDll) -Destination (Join-Path $InstallRoot $qtDll)
 }
 
+foreach ($runtimeDll in @("msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll", "vcruntime140.dll", "vcruntime140_1.dll")) {
+    $runtimeSource = Join-Path $resolvedBuild $runtimeDll
+    if (Test-Path -LiteralPath $runtimeSource -PathType Leaf) {
+        Copy-RequiredFile -Source $runtimeSource -Destination (Join-Path $InstallRoot $runtimeDll)
+    }
+}
+$styleSource = Join-Path $resolvedBuild "styles\qmodernwindowsstyle.dll"
+if (Test-Path -LiteralPath $styleSource -PathType Leaf) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $InstallRoot "styles") | Out-Null
+    Copy-RequiredFile -Source $styleSource -Destination (Join-Path $InstallRoot "styles\qmodernwindowsstyle.dll")
+}
 $platformDir = Join-Path $InstallRoot "platforms"
 New-Item -ItemType Directory -Force -Path $platformDir | Out-Null
 Copy-RequiredFile `

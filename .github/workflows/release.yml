@@ -8,11 +8,15 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   release-build:
     runs-on: windows-2022
     timeout-minutes: 90
+    # The Azure federated credential trusts this environment only
+    # (repo:RandyNorthrup/apfs_for_windows:environment:release).
+    environment: release
     steps:
       - name: Check out sanitized source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -113,7 +117,26 @@ jobs:
           ctest --test-dir build -C Release --output-on-failure
           if ($LASTEXITCODE -ne 0) { throw 'CTest failed.' }
 
-      - name: Build and verify release package
+      - name: Install WiX Toolset
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          if ($LASTEXITCODE -ne 0) { throw 'WiX installation failed.' }
+          $toolsDir = Join-Path $env:USERPROFILE '.dotnet\tools'
+          $toolsDir >> $env:GITHUB_PATH
+          $env:PATH = "$toolsDir;$env:PATH"
+          wix extension add -g WixToolset.Util.wixext/5.0.2 WixToolset.UI.wixext/5.0.2
+          if ($LASTEXITCODE -ne 0) { throw 'WiX extension installation failed.' }
+
+      # Log in only after the long build so the Azure CLI token is fresh for signing.
+      - name: Azure login for Artifact Signing
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build, sign, and verify release package
         shell: pwsh
         run: |
           $dependency = Get-Content dependencies\winfsp-apfs.json -Raw | ConvertFrom-Json
@@ -122,22 +145,41 @@ jobs:
             -BuildDir build\Release `
             -QtBin C:\Qt\6.10.3\msvc2022_64\bin `
             -WinFspArtifactRoot $runtimeRoot `
-            -DriverSigningMode Test -AllowTestSignedDriver
+            -DriverSigningMode Test -AllowTestSignedDriver -Sign
           .\scripts\verify-release-package.ps1 `
-            -DriverSigningMode Test -AllowTestSignedDriver `
+            -DriverSigningMode Test -AllowTestSignedDriver -RequireSigned `
             -OutputPath artifacts\package\verify-release-package-ps7.json
+          if ($LASTEXITCODE -ne 0) { throw 'PowerShell 7 package verification failed.' }
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
             .\scripts\verify-release-package.ps1 `
-            -DriverSigningMode Test -AllowTestSignedDriver `
+            -DriverSigningMode Test -AllowTestSignedDriver -RequireSigned `
             -OutputPath artifacts\package\verify-release-package-ps5.json
           if ($LASTEXITCODE -ne 0) { throw 'PowerShell 5.1 package verification failed.' }
           $stage = "artifacts\package\${{ steps.version.outputs.package }}"
           .\scripts\verify-repository-privacy.ps1 -ScanRoot $stage `
             -SkipGitMetadata -OutputPath artifacts\package\package-privacy.json
-          $zip = "artifacts\package\${{ steps.version.outputs.package }}.zip"
-          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $([IO.Path]::GetFileName($zip))" | Set-Content `
-            artifacts\package\SHA256SUMS.txt -Encoding ASCII
+
+      - name: Build and sign MSI
+        shell: pwsh
+        run: |
+          .\scripts\build-msi.ps1 -DriverSigningMode Test | Out-Host
+          $msi = "artifacts\package\${{ steps.version.outputs.package }}.msi"
+          if (-not (Test-Path -LiteralPath $msi -PathType Leaf)) {
+            throw "MSI was not produced: $msi"
+          }
+          .\scripts\sign-files.ps1 -Path $msi
+          $signature = Get-AuthenticodeSignature -LiteralPath $msi
+          if ($signature.Status -ne 'Valid' -or -not $signature.TimeStamperCertificate -or
+              -not ([string]$signature.SignerCertificate.Subject).StartsWith('CN=Randy Northrup')) {
+            throw "MSI signature is not valid: $($signature.Status)"
+          }
+          $sums = foreach ($asset in @(
+              "artifacts\package\${{ steps.version.outputs.package }}.msi",
+              "artifacts\package\${{ steps.version.outputs.package }}.zip")) {
+            $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $([IO.Path]::GetFileName($asset))"
+          }
+          $sums | Set-Content artifacts\package\SHA256SUMS.txt -Encoding ASCII
 
       - name: Upload verified workflow artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -146,6 +188,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           path: |
+            artifacts/package/${{ steps.version.outputs.package }}.msi
             artifacts/package/${{ steps.version.outputs.package }}.zip
             artifacts/package/package-proof.json
             artifacts/package/package-privacy.json
@@ -163,6 +206,7 @@ jobs:
           $title = "APFS for Windows ${{ steps.version.outputs.version }} (Test-Signed)"
           $notes = '${{ steps.version.outputs.notes }}'
           $assets = @(
+            "artifacts\package\${{ steps.version.outputs.package }}.msi",
             "artifacts\package\${{ steps.version.outputs.package }}.zip",
             'artifacts\package\SHA256SUMS.txt'
           )

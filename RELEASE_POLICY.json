@@ -1,17 +1,23 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "product": "APFS for Windows",
   "decision_date": "2026-08-17",
-  "release_model": "owner_controlled_unsigned_test_mode_distribution",
+  "release_model": "owner_controlled_signed_test_mode_distribution",
   "application_signing": {
-    "required": false,
-    "status": "intentionally_unsigned_by_owner_decision",
+    "required": true,
+    "status": "azure_artifact_signing",
+    "publisher": "CN=Randy Northrup",
     "smart_app_control_reputation_guaranteed": false
   },
   "package_signing": {
-    "required": false,
-    "status": "intentionally_unsigned_by_owner_decision",
-    "integrity_mechanism": "sha256_manifest_and_deterministic_archive"
+    "required": true,
+    "status": "azure_artifact_signing",
+    "artifact": "msi",
+    "integrity_mechanism": "authenticode_msi_and_sha256_manifest"
+  },
+  "installer": {
+    "format": "msi",
+    "toolset": "wix_5.0.2"
   },
   "kernel_driver_trust": {
     "required": true,
@@ -22,7 +28,8 @@
     "persistent_test_signing_required": true,
     "owner_test_mode_distribution_permitted": true,
     "secure_boot_or_integrity_bypass_automation_permitted": false,
-    "integrity_bypass_is_not_permitted": true
+    "integrity_bypass_is_not_permitted": true,
+    "production_signing_blocker": "ev_certificate_and_partner_center_attestation_required"
   },
   "physical_fault_recovery": {
     "status": "not_physically_tested",
