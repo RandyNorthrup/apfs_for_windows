@@ -156,6 +156,7 @@ void processControlServer(QLocalServer* server);
 QVector<MountConfig> enabledMounts(const QVector<MountConfig>& mounts);
 bool containsConfig(const QVector<MountConfig>& configs, const MountConfig& wanted);
 QString readRegistryString(HKEY root, const wchar_t* subKey, const wchar_t* value);
+bool pathIsInside(const QString& path, const QString& directory);
 
 QString winError(DWORD code) {
     LPWSTR buffer = nullptr;
@@ -2776,13 +2777,46 @@ QJsonObject winFspRuntimeJson() {
                            .arg(HIWORD(info->dwFileVersionLS)));
         }
     }
-    if (SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT)) {
-        if (SC_HANDLE driver = OpenServiceW(scm, L"WinFsp", SERVICE_QUERY_STATUS)) {
-            SERVICE_STATUS status{};
-            if (QueryServiceStatus(driver, &status)) {
-                out.insert(QStringLiteral("driver_state"), serviceStateName(status.dwCurrentState));
+    // Official WinFsp installs its driver side by side as "WinFsp+<id>" under
+    // InstallDir\SxS\...; report the one that belongs to this installation.
+    if (SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_ENUMERATE_SERVICE | SC_MANAGER_CONNECT)) {
+        DWORD needed = 0;
+        DWORD count = 0;
+        DWORD resume = 0;
+        EnumServicesStatusExW(scm, SC_ENUM_PROCESS_INFO, SERVICE_FILE_SYSTEM_DRIVER, SERVICE_STATE_ALL, nullptr,
+                              0, &needed, &count, &resume, nullptr);
+        std::vector<BYTE> buffer(needed);
+        resume = 0;
+        if (needed > 0 &&
+            EnumServicesStatusExW(scm, SC_ENUM_PROCESS_INFO, SERVICE_FILE_SYSTEM_DRIVER, SERVICE_STATE_ALL,
+                                  buffer.data(), static_cast<DWORD>(buffer.size()), &needed, &count, &resume,
+                                  nullptr)) {
+            const auto* entries = reinterpret_cast<const ENUM_SERVICE_STATUS_PROCESSW*>(buffer.data());
+            for (DWORD i = 0; i < count; ++i) {
+                const QString name = QString::fromWCharArray(entries[i].lpServiceName);
+                if (!name.startsWith(QStringLiteral("WinFsp"), Qt::CaseInsensitive)) {
+                    continue;
+                }
+                SC_HANDLE driver = OpenServiceW(scm, entries[i].lpServiceName, SERVICE_QUERY_CONFIG);
+                if (!driver) {
+                    continue;
+                }
+                DWORD configBytes = 0;
+                QueryServiceConfigW(driver, nullptr, 0, &configBytes);
+                std::vector<BYTE> configBuffer(std::max<DWORD>(configBytes, sizeof(QUERY_SERVICE_CONFIGW)));
+                auto* config = reinterpret_cast<QUERY_SERVICE_CONFIGW*>(configBuffer.data());
+                const bool ours = QueryServiceConfigW(driver, config, static_cast<DWORD>(configBuffer.size()),
+                                                      &configBytes) &&
+                                  config->lpBinaryPathName &&
+                                  pathIsInside(QString::fromWCharArray(config->lpBinaryPathName), installDir);
+                CloseServiceHandle(driver);
+                if (ours) {
+                    out.insert(QStringLiteral("driver_service"), name);
+                    out.insert(QStringLiteral("driver_state"),
+                               serviceStateName(entries[i].ServiceStatusProcess.dwCurrentState));
+                    break;
+                }
             }
-            CloseServiceHandle(driver);
         }
         CloseServiceHandle(scm);
     }
