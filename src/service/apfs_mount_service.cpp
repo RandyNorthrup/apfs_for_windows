@@ -33,6 +33,7 @@
 #include <aclapi.h>
 #include <dbt.h>
 #include <sddl.h>
+#pragma comment(lib, "version.lib")
 #include <winioctl.h>
 
 #include <algorithm>
@@ -154,6 +155,7 @@ struct DiscoveryScan {
 void processControlServer(QLocalServer* server);
 QVector<MountConfig> enabledMounts(const QVector<MountConfig>& mounts);
 bool containsConfig(const QVector<MountConfig>& configs, const MountConfig& wanted);
+QString readRegistryString(HKEY root, const wchar_t* subKey, const wchar_t* value);
 
 QString winError(DWORD code) {
     LPWSTR buffer = nullptr;
@@ -1438,9 +1440,11 @@ bool mergeDiscoveredMounts(QVector<MountConfig>* mounts,
             continue;
         }
 
+        // Newly discovered media mounts read-only. A user turns on read/write
+        // per volume from the tray, which records an explicit policy.
         MountConfig newMount{.target = volume.target,
-                             .read_only = false,
-                             .allow_raw_writes = true,
+                             .read_only = true,
+                             .allow_raw_writes = false,
                              .enabled = true};
         const std::optional<MountConfig> preferred =
             preferredMountForTarget(preferredMounts, volume.target);
@@ -2746,6 +2750,45 @@ int selfTestControlIpc() {
     return ok ? 0 : 1;
 }
 
+QJsonObject winFspRuntimeJson() {
+    QJsonObject out{{QStringLiteral("installed"), false}};
+    const QString installDir =
+        readRegistryString(HKEY_LOCAL_MACHINE, L"SOFTWARE\\WOW6432Node\\WinFsp", L"InstallDir");
+    if (installDir.isEmpty()) {
+        return out;
+    }
+    const QString dll = QDir(installDir).filePath(QStringLiteral("bin/winfsp-x64.dll"));
+    out.insert(QStringLiteral("install_dir"), QDir::toNativeSeparators(installDir));
+    out.insert(QStringLiteral("installed"), QFileInfo::exists(dll));
+    const std::wstring dllNative = QDir::toNativeSeparators(dll).toStdWString();
+    DWORD handle = 0;
+    const DWORD size = GetFileVersionInfoSizeW(dllNative.c_str(), &handle);
+    if (size > 0) {
+        std::vector<BYTE> data(size);
+        VS_FIXEDFILEINFO* info = nullptr;
+        UINT infoLength = 0;
+        if (GetFileVersionInfoW(dllNative.c_str(), 0, size, data.data()) &&
+            VerQueryValueW(data.data(), L"\\", reinterpret_cast<void**>(&info), &infoLength) && info) {
+            out.insert(QStringLiteral("version"),
+                       QStringLiteral("%1.%2.%3")
+                           .arg(HIWORD(info->dwFileVersionMS))
+                           .arg(LOWORD(info->dwFileVersionMS))
+                           .arg(HIWORD(info->dwFileVersionLS)));
+        }
+    }
+    if (SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT)) {
+        if (SC_HANDLE driver = OpenServiceW(scm, L"WinFsp", SERVICE_QUERY_STATUS)) {
+            SERVICE_STATUS status{};
+            if (QueryServiceStatus(driver, &status)) {
+                out.insert(QStringLiteral("driver_state"), serviceStateName(status.dwCurrentState));
+            }
+            CloseServiceHandle(driver);
+        }
+        CloseServiceHandle(scm);
+    }
+    return out;
+}
+
 int serviceHealth() {
     QString error;
     const QVector<MountConfig> mounts = readMountConfig(&error);
@@ -2756,6 +2799,7 @@ int serviceHealth() {
     QJsonObject out{{QStringLiteral("component"), QStringLiteral("apfs_mount_service")},
                     {QStringLiteral("config"), configPath()},
                     {QStringLiteral("service"), queryInstalledService()},
+                    {QStringLiteral("winfsp"), winFspRuntimeJson()},
                     {QStringLiteral("mounts"), mountHealth}};
     if (!error.isEmpty()) {
         out.insert(QStringLiteral("config_error"), error);
@@ -2873,7 +2917,7 @@ int partitionParserSelfTest() {
         mergeDiscoveredMounts(&automaticMounts, {hybridVolume}, &automaticAdded);
     const bool automaticWritableOk =
         automaticAddedMount && automaticMounts.size() == 1 &&
-        !automaticMounts.first().read_only && automaticMounts.first().allow_raw_writes &&
+        automaticMounts.first().read_only && !automaticMounts.first().allow_raw_writes &&
         automaticMounts.first().enabled && automaticAdded.size() == 1;
 
     QVector<MountConfig> restoredMounts;
@@ -2899,7 +2943,7 @@ int partitionParserSelfTest() {
                           {QStringLiteral("hybrid_partition_count"), hybridPartitions.size()},
                           {QStringLiteral("hybrid_alias_migration_ok"), migrationOk},
                           {QStringLiteral("hybrid_alias_deduplication_ok"), deduplicationOk},
-                          {QStringLiteral("automatic_discovery_writable_ok"), automaticWritableOk},
+                          {QStringLiteral("automatic_discovery_read_only_ok"), automaticWritableOk},
                           {QStringLiteral("preferred_policy_preserved_ok"), preferredPolicyOk},
                           {QStringLiteral("partition"),
                            partitions.isEmpty() ? QJsonObject{}
@@ -3598,11 +3642,16 @@ QString installDirectory() {
     return QFileInfo(executablePath()).absolutePath();
 }
 
+// Releases up to 0.2.0 registered a dedicated, test-signed WinFsp driver as
+// "WinFsp+apfs-main". 0.2.1 uses the official WinFsp installation instead and
+// only needs to remove that legacy registration.
+constexpr char kLegacyDriverSxsId[] = "apfs-main";
+
 std::optional<QString> dedicatedDriverServiceName(QString* error) {
     QFile marker(QDir(installDirectory()).filePath(QStringLiteral("winfsp.sxs")));
     if (!marker.open(QIODevice::ReadOnly)) {
-        *error = QStringLiteral("WinFsp side-by-side marker is missing: %1").arg(marker.fileName());
-        return std::nullopt;
+        Q_UNUSED(error);
+        return QStringLiteral("WinFsp+%1").arg(QString::fromLatin1(kLegacyDriverSxsId));
     }
     const QString id = QString::fromUtf8(marker.readLine()).trimmed();
     static const QRegularExpression valid(QStringLiteral("^[A-Za-z0-9._-]{1,64}$"));
@@ -3685,77 +3734,6 @@ QJsonArray repairSharedWinFspKeys() {
         }
     }
     return actions;
-}
-
-int registerDriver() {
-    QString error;
-    const std::optional<QString> name = dedicatedDriverServiceName(&error);
-    if (!name.has_value()) {
-        QTextStream(stderr) << error << Qt::endl;
-        return 2;
-    }
-    const QString driverPath =
-        QDir::toNativeSeparators(QDir(installDirectory()).filePath(QStringLiteral("winfsp-x64.sys")));
-    if (!QFileInfo::exists(driverPath)) {
-        QTextStream(stderr) << "Driver image is missing: " << driverPath << Qt::endl;
-        return 2;
-    }
-    const std::wstring serviceName = name->toStdWString();
-    const std::wstring imagePath = driverPath.toStdWString();
-    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE);
-    if (!scm) {
-        QTextStream(stderr) << "OpenSCManager failed: " << winError(GetLastError()) << Qt::endl;
-        return 3;
-    }
-    bool created = false;
-    SC_HANDLE service = OpenServiceW(scm, serviceName.c_str(), SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG);
-    if (service) {
-        if (!ChangeServiceConfigW(service, SERVICE_FILE_SYSTEM_DRIVER, SERVICE_DEMAND_START,
-                                  SERVICE_ERROR_NORMAL, imagePath.c_str(), nullptr, nullptr, nullptr,
-                                  nullptr, nullptr, serviceName.c_str())) {
-            const DWORD changeError = GetLastError();
-            CloseServiceHandle(service);
-            CloseServiceHandle(scm);
-            if (changeError == ERROR_SERVICE_MARKED_FOR_DELETE) {
-                QTextStream(stderr) << "The previous APFS file system driver is still loaded. Restart Windows, "
-                                       "then run setup again."
-                                    << Qt::endl;
-                return 3010;
-            }
-            QTextStream(stderr) << "ChangeServiceConfig failed: " << winError(changeError) << Qt::endl;
-            return 4;
-        }
-    } else {
-        service = CreateServiceW(scm, serviceName.c_str(), serviceName.c_str(),
-                                 SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG, SERVICE_FILE_SYSTEM_DRIVER,
-                                 SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL, imagePath.c_str(), nullptr,
-                                 nullptr, nullptr, nullptr, nullptr);
-        if (!service) {
-            const DWORD createError = GetLastError();
-            CloseServiceHandle(scm);
-            if (createError == ERROR_SERVICE_MARKED_FOR_DELETE) {
-                QTextStream(stderr) << "The previous APFS file system driver is still loaded. Restart Windows, "
-                                       "then run setup again."
-                                    << Qt::endl;
-                return 3010;
-            }
-            QTextStream(stderr) << "CreateService failed: " << winError(createError) << Qt::endl;
-            return 4;
-        }
-        created = true;
-    }
-    wchar_t description[] = L"APFS for Windows dedicated WinFsp file system driver.";
-    SERVICE_DESCRIPTIONW serviceDescription{description};
-    ChangeServiceConfig2W(service, SERVICE_CONFIG_DESCRIPTION, &serviceDescription);
-    CloseServiceHandle(service);
-    CloseServiceHandle(scm);
-    printJson({{QStringLiteral("component"), QStringLiteral("apfs_mount_service")},
-               {QStringLiteral("driver_registered"), true},
-               {QStringLiteral("created"), created},
-               {QStringLiteral("service_name"), *name},
-               {QStringLiteral("image_path"), driverPath},
-               {QStringLiteral("shared_key_repairs"), repairSharedWinFspKeys()}});
-    return 0;
 }
 
 int unregisterDriver() {
@@ -4048,10 +4026,8 @@ int main(int argc, char* argv[]) {
     if (args.contains(QStringLiteral("--uninstall"), Qt::CaseInsensitive)) {
         return uninstallService();
     }
-    if (args.contains(QStringLiteral("--register-driver"), Qt::CaseInsensitive)) {
-        return registerDriver();
-    }
-    if (args.contains(QStringLiteral("--unregister-driver"), Qt::CaseInsensitive)) {
+    if (args.contains(QStringLiteral("--unregister-driver"), Qt::CaseInsensitive) ||
+        args.contains(QStringLiteral("--remove-legacy-driver"), Qt::CaseInsensitive)) {
         return unregisterDriver();
     }
     if (args.contains(QStringLiteral("--harden-programdata"), Qt::CaseInsensitive)) {

@@ -122,7 +122,7 @@
       "relative_path": "src\\core\\partition_apfs_writer.cpp",
       "source_blob_oid": "aaa04f6e5694d2384a65440c95be057eb0ad8612",
       "source_sha256": "946A69139203F5C8004800CC1406BA4DD4AE36E1A820A2C16AAD521EBCCC1F5F",
-      "vendored_sha256": "FA97966964B07B9ADB2C390CD04BCD41B582DA7E2AD65351CA3C9F1BE90175E0",
+      "vendored_sha256": "C283A62F8C6EBC45C89AAEB554E0305E73D8626965E789390A7D84721A11ECBB",
       "locally_modified": true
     },
     {
@@ -143,7 +143,7 @@
       "relative_path": "src\\core\\partition_raw_device_io.cpp",
       "source_blob_oid": "879131ef63d2106a4b55627b62aaa3196ac983ef",
       "source_sha256": "A1DD304007597BC07229BC8743571F26EBC7F25B463B6ED3C2E9BF0E0111AF58",
-      "vendored_sha256": "5F65A92A0DE0C4296D02CF9EAB7AE2F2B96D674A60D0BB50EB0BB5E19AE66CDF",
+      "vendored_sha256": "B9F4819D469BF885A17B53678C402196CA2A353B4E277C6374D49ED71A6B2E41",
       "locally_modified": true
     }
   ]

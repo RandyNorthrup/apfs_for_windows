@@ -1,10 +1,15 @@
 #Requires -Version 5.1
-
+<#
+    Checks that the official, production-signed WinFsp is installed system-wide
+    at or above the release pinned in dependencies\winfsp.json, and that the
+    built worker loads it. Developer headers and the import library are
+    reported but not required (builds use the staged SDK instead).
+#>
 [CmdletBinding()]
 param(
     [string]$BuildDir = "build\Release",
     [string]$QtBin = "C:\Qt\6.10.3\msvc2022_64\bin",
-    [string]$MinimumDisplayVersion = "2.1.0",
+    [string]$MinimumDisplayVersion = "",
     [string]$OutputPath = "artifacts\prerequisites\winfsp-prerequisite.json"
 )
 
@@ -29,6 +34,11 @@ function Get-FileReport {
     }
 }
 
+$winFspDependency = Get-Content -LiteralPath (Resolve-RepoPath "dependencies\winfsp.json") -Raw |
+    ConvertFrom-Json
+if ([string]::IsNullOrWhiteSpace($MinimumDisplayVersion)) {
+    $MinimumDisplayVersion = [string]$winFspDependency.version
+}
 $resolvedBuild = Resolve-RepoPath $BuildDir
 $resolvedOutput = Resolve-RepoPath $OutputPath
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $resolvedOutput) | Out-Null
@@ -83,8 +93,17 @@ foreach ($uninstallRoot in $uninstallRoots) {
 }
 
 $bestRoot = @($rootReports | Where-Object {
-    $_.header.exists -and $_.import_library.exists -and $_.runtime_dll.exists -and $_.runtime_driver.exists
+    $_.runtime_dll.exists -and $_.runtime_driver.exists
 } | Select-Object -First 1)
+$driverSignature = if ($bestRoot.Count -gt 0) {
+    Get-AuthenticodeSignature -LiteralPath $bestRoot[0].runtime_driver.path
+} else { $null }
+$driverSigner = if ($driverSignature -and $driverSignature.SignerCertificate) {
+    [string]$driverSignature.SignerCertificate.Subject
+} else { $null }
+$driverProductionSigned = [bool]($driverSignature -and
+    [string]$driverSignature.Status -ceq "Valid" -and $driverSigner -and
+    $driverSigner.StartsWith("CN=$($winFspDependency.driver_signer)", [StringComparison]::OrdinalIgnoreCase))
 
 $oldPath = $env:PATH
 if ($bestRoot.Count -gt 0 -and $bestRoot[0].runtime_dll.exists) {
@@ -109,6 +128,7 @@ if ($displayVersion) {
 }
 
 $ok = $bestRoot.Count -gt 0 -and
+    $driverProductionSigned -and
     $registryEntries.Count -gt 0 -and
     $versionOk -and
     $workerStatusExit -eq 0 -and
@@ -126,6 +146,8 @@ $result = [ordered]@{
     display_version_ok = [bool]$versionOk
     roots = @($rootReports)
     selected_root = if ($bestRoot.Count -gt 0) { $bestRoot[0] } else { $null }
+    driver_signer = $driverSigner
+    driver_production_signed = [bool]$driverProductionSigned
     worker_status = [ordered]@{
         exit_code = [int]$workerStatusExit
         parsed = $null -ne $workerStatus

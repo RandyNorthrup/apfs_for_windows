@@ -12,9 +12,11 @@ endif()
 
 project(apfs_for_windows VERSION ${APFS_PROJECT_VERSION} LANGUAGES C CXX)
 
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/winfsp-apfs.json" APFS_WINFSP_MANIFEST_JSON)
-string(JSON APFS_WINFSP_RUNTIME_REPOSITORY GET "${APFS_WINFSP_MANIFEST_JSON}" repository)
-string(JSON APFS_WINFSP_RUNTIME_COMMIT GET "${APFS_WINFSP_MANIFEST_JSON}" commit)
+# Official, production-signed WinFsp is a separately installed system
+# component; dependencies/winfsp.json pins the release the product is built
+# and tested against (see scripts/lib/winfsp-sdk.ps1).
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/winfsp.json" APFS_WINFSP_MANIFEST_JSON)
+string(JSON APFS_WINFSP_DEPENDENCY_VERSION GET "${APFS_WINFSP_MANIFEST_JSON}" version)
 find_package(Git REQUIRED)
 execute_process(
     COMMAND "${GIT_EXECUTABLE}" -C "${CMAKE_CURRENT_SOURCE_DIR}" rev-parse HEAD
@@ -44,42 +46,47 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 option(APFS_PRODUCTION_BUILD "Enforce production dependency and compiler gates." OFF)
 option(APFS_REQUIRE_WINFSP "Fail configuration when WinFsp is unavailable." OFF)
-option(APFS_REQUIRE_NATIVE_HARDLINKS "Require the WinFsp native hard-link ABI." OFF)
+# Official WinFsp has no hard-link creation callback, so this stays OFF for
+# release builds; it exists for experiments against a WinFsp build that adds one.
+option(APFS_REQUIRE_NATIVE_HARDLINKS "Require a WinFsp SDK with the native hard-link creation ABI." OFF)
 option(APFS_WARNINGS_AS_ERRORS "Treat warnings in project-owned targets as errors." OFF)
 option(APFS_REPRODUCIBLE_BUILD "Remove source-path and timestamp variance from shipped binaries." OFF)
 
 set(APFS_REPRODUCIBLE_SOURCE_PATH "C:/src/apfs_for_windows")
 
+# A staged SDK (scripts/lib/winfsp-sdk.ps1) records which official WinFsp
+# release it was extracted from in winfsp-sdk.json.
+set(APFS_WINFSP_VERSION "")
+set(APFS_WINFSP_SDK_METADATA "${WinFsp_ROOT}/winfsp-sdk.json")
+if(WinFsp_ROOT AND EXISTS "${APFS_WINFSP_SDK_METADATA}")
+    file(READ "${APFS_WINFSP_SDK_METADATA}" APFS_WINFSP_SDK_JSON)
+    string(JSON APFS_WINFSP_VERSION ERROR_VARIABLE APFS_WINFSP_SDK_JSON_ERROR
+        GET "${APFS_WINFSP_SDK_JSON}" version)
+    if(APFS_WINFSP_SDK_JSON_ERROR)
+        set(APFS_WINFSP_VERSION "")
+    endif()
+endif()
+
 if(APFS_PRODUCTION_BUILD)
     set(APFS_REQUIRE_WINFSP ON)
-    set(APFS_REQUIRE_NATIVE_HARDLINKS ON)
     set(APFS_WARNINGS_AS_ERRORS ON)
     set(APFS_REPRODUCIBLE_BUILD ON)
     if(APFS_SOURCE_DIRTY)
         message(FATAL_ERROR "Production builds require a clean main checkout.")
     endif()
     if(NOT WinFsp_ROOT)
-        message(FATAL_ERROR "Production builds require an explicit -DWinFsp_ROOT=<coherent-runtime-root>.")
-    endif()
-    execute_process(
-        COMMAND git -C "${WinFsp_ROOT}" rev-parse HEAD
-        RESULT_VARIABLE APFS_WINFSP_GIT_RESULT
-        OUTPUT_VARIABLE APFS_WINFSP_CHECKOUT_COMMIT
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET)
-    if(NOT APFS_WINFSP_GIT_RESULT EQUAL 0 OR
-            NOT APFS_WINFSP_CHECKOUT_COMMIT STREQUAL APFS_WINFSP_RUNTIME_COMMIT)
         message(FATAL_ERROR
-            "Production WinFsp_ROOT must be the pinned winfsp-apfs commit ${APFS_WINFSP_RUNTIME_COMMIT}.")
+            "Production builds require -DWinFsp_ROOT=<staged official WinFsp SDK>; "
+            "stage it with scripts/lib/winfsp-sdk.ps1 (Get-ApfsWinFspSdk).")
     endif()
-    execute_process(
-        COMMAND git -C "${WinFsp_ROOT}" status --porcelain
-        RESULT_VARIABLE APFS_WINFSP_STATUS_RESULT
-        OUTPUT_VARIABLE APFS_WINFSP_CHECKOUT_STATUS
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET)
-    if(NOT APFS_WINFSP_STATUS_RESULT EQUAL 0 OR APFS_WINFSP_CHECKOUT_STATUS)
-        message(FATAL_ERROR "Production WinFsp_ROOT must be a clean checkout.")
+    if(NOT EXISTS "${APFS_WINFSP_SDK_METADATA}")
+        message(FATAL_ERROR
+            "Production WinFsp_ROOT is not a staged official WinFsp SDK: ${APFS_WINFSP_SDK_METADATA} is missing.")
+    endif()
+    if(NOT APFS_WINFSP_VERSION STREQUAL APFS_WINFSP_DEPENDENCY_VERSION)
+        message(FATAL_ERROR
+            "Production WinFsp_ROOT holds WinFsp '${APFS_WINFSP_VERSION}', but dependencies/winfsp.json "
+            "pins ${APFS_WINFSP_DEPENDENCY_VERSION}. Restage it with Get-ApfsWinFspSdk.")
     endif()
 endif()
 
@@ -209,6 +216,13 @@ find_package(WinFsp QUIET)
 if(WinFsp_FOUND)
     target_compile_definitions(apfs_winfs_worker PRIVATE APFS_HAVE_WINFSP=1)
     target_link_libraries(apfs_winfs_worker PRIVATE WinFsp::WinFsp)
+    if(MSVC)
+        # The worker calls FspLoad at startup, which loads the WinFsp DLL from
+        # the system WinFsp install directory. Without delay-loading, Windows
+        # would have to find the DLL at process start, before FspLoad runs.
+        target_link_options(apfs_winfs_worker PRIVATE "/DELAYLOAD:${WinFsp_RUNTIME_NAME}")
+        target_link_libraries(apfs_winfs_worker PRIVATE delayimp)
+    endif()
 else()
     target_compile_definitions(apfs_winfs_worker PRIVATE APFS_HAVE_WINFSP=0)
     message(WARNING "WinFsp SDK not found; apfs_winfs_worker builds in scaffold mode.")
@@ -229,7 +243,9 @@ if(WinFsp_FOUND)
     endif()
 endif()
 if(APFS_REQUIRE_NATIVE_HARDLINKS AND NOT APFS_WINFSP_HAS_NATIVE_HARDLINKS)
-    message(FATAL_ERROR "Native hard links require the reviewed dedicated WinFsp runtime.")
+    message(FATAL_ERROR
+        "APFS_REQUIRE_NATIVE_HARDLINKS is ON, but the WinFsp SDK has no hard-link creation ABI. "
+        "Official WinFsp does not provide one.")
 endif()
 if(APFS_WINFSP_HAS_NATIVE_HARDLINKS)
     target_compile_definitions(apfs_winfs_worker PRIVATE APFS_WINFSP_NATIVE_HARDLINKS=1)
@@ -295,7 +311,7 @@ else()
 endif()
 file(GENERATE
     OUTPUT "${CMAKE_BINARY_DIR}/$<CONFIG>/apfs-build-metadata.json"
-    CONTENT "{\n  \"schema_version\": 4,\n  \"version\": \"${PROJECT_VERSION}\",\n  \"configuration\": \"$<CONFIG>\",\n  \"source_commit\": \"${APFS_SOURCE_COMMIT}\",\n  \"source_dirty\": ${APFS_SOURCE_DIRTY_JSON},\n  \"production_build\": ${APFS_PRODUCTION_BUILD_JSON},\n  \"reproducible_build\": ${APFS_REPRODUCIBLE_BUILD_JSON},\n  \"reproducible_source_path\": \"${APFS_REPRODUCIBLE_SOURCE_PATH}\",\n  \"compiler_id\": \"${CMAKE_CXX_COMPILER_ID}\",\n  \"compiler_version\": \"${CMAKE_CXX_COMPILER_VERSION}\",\n  \"winfsp_found\": ${APFS_WINFSP_FOUND_JSON},\n  \"winfsp_native_hardlinks\": ${APFS_WINFSP_HARDLINKS_JSON},\n  \"winfsp_runtime_repository\": \"${APFS_WINFSP_RUNTIME_REPOSITORY}\",\n  \"winfsp_runtime_commit\": \"${APFS_WINFSP_RUNTIME_COMMIT}\",\n  \"winfsp_header\": \"winfsp/winfsp.h\",\n  \"winfsp_library_name\": \"winfsp-x64.lib\",\n  \"winfsp_runtime_name\": \"winfsp-x64.dll\"\n}\n")
+    CONTENT "{\n  \"schema_version\": 5,\n  \"version\": \"${PROJECT_VERSION}\",\n  \"configuration\": \"$<CONFIG>\",\n  \"source_commit\": \"${APFS_SOURCE_COMMIT}\",\n  \"source_dirty\": ${APFS_SOURCE_DIRTY_JSON},\n  \"production_build\": ${APFS_PRODUCTION_BUILD_JSON},\n  \"reproducible_build\": ${APFS_REPRODUCIBLE_BUILD_JSON},\n  \"reproducible_source_path\": \"${APFS_REPRODUCIBLE_SOURCE_PATH}\",\n  \"compiler_id\": \"${CMAKE_CXX_COMPILER_ID}\",\n  \"compiler_version\": \"${CMAKE_CXX_COMPILER_VERSION}\",\n  \"winfsp_found\": ${APFS_WINFSP_FOUND_JSON},\n  \"winfsp_native_hardlinks\": ${APFS_WINFSP_HARDLINKS_JSON},\n  \"winfsp_version\": \"${APFS_WINFSP_VERSION}\",\n  \"winfsp_header\": \"winfsp/winfsp.h\",\n  \"winfsp_library_name\": \"winfsp-x64.lib\",\n  \"winfsp_runtime_name\": \"winfsp-x64.dll\"\n}\n")
 
 enable_testing()
 add_test(NAME apfs_probe_help COMMAND apfs_probe --help)
@@ -314,6 +330,9 @@ add_test(NAME apfs_core_selftest COMMAND apfs_core_selftest)
 
 set(APFS_TEST_PATH_MODS "PATH=path_list_prepend:${APFS_QT_RUNTIME_DIR}")
 list(APPEND APFS_TEST_PATH_MODS "QT_PLUGIN_PATH=set:${APFS_QT_PLUGIN_DIR}")
+# Tests that run the worker need the WinFsp runtime DLL. FspLoad tries the
+# normal DLL search path before the installed WinFsp directory, so the staged
+# SDK bin on PATH lets CTest run on machines without WinFsp installed.
 if(WinFsp_FOUND)
     get_filename_component(APFS_WINFSP_RUNTIME_DIR "${WinFsp_RUNTIME_DLL}" DIRECTORY)
     list(APPEND APFS_TEST_PATH_MODS "PATH=path_list_prepend:${APFS_WINFSP_RUNTIME_DIR}")

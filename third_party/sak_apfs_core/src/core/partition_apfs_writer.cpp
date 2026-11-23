@@ -6570,11 +6570,30 @@ bool publishCheckpoint(ApfsCheckpointAdvanceRequest& request,
     if (!stampAndWriteApfsBlock(request.image, geometry, cpmBlock, checkpointMap, blockers)) {
         return false;
     }
+    // Write barrier (APFS for Windows divergence from the S.A.K. import): every
+    // copy-on-write block this commit wrote -- data, FS tree, object maps,
+    // extent-ref tree, spaceman, free queues, and the checkpoint map -- must be
+    // durable before the superblock that references them is written. Without
+    // it the OS or drive cache may persist the superblock first, and a power
+    // loss or surprise removal leaves the newest checkpoint pointing at blocks
+    // that were never written.
+    QString flushError;
+    if (!flushDeviceBuffers(request.image, &flushError)) {
+        blockers->append(
+            QStringLiteral("Pre-publish flush failed; checkpoint not published: %1").arg(flushError));
+        return false;
+    }
     applyNxSuperblockCheckpointDeltas(
         request, live, newXid, static_cast<uint32_t>(ephemeralBlocks), geometry);
     if (!stampAndWriteApfsBlock(request.image, geometry, nxsbBlock, &request.nxsb, blockers) ||
         !writeApfsRepairBlock(
             request.image, geometry, kApfsFormatNxsbBlock, request.nxsb, blockers)) {
+        return false;
+    }
+    // Second barrier: the commit is reported only once the new superblock is
+    // durable too.
+    if (!flushDeviceBuffers(request.image, &flushError)) {
+        blockers->append(QStringLiteral("Post-publish flush failed: %1").arg(flushError));
         return false;
     }
     *result = {true, live.xid, newXid, cpmBlock, nxsbBlock};

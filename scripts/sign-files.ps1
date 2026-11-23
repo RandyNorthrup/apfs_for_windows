@@ -15,7 +15,7 @@
     not trusted for kernel-mode code.
 
 .EXAMPLE
-    .\scripts\sign-files.ps1 -Path artifacts\package\APFS-for-Windows-0.2.0-test-signed\*.exe
+    .\scripts\sign-files.ps1 -Path artifacts\package\APFS-for-Windows-0.2.1\*.exe
 #>
 [CmdletBinding()]
 param(

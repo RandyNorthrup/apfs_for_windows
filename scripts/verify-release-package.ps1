@@ -1,13 +1,22 @@
 #Requires -Version 5.1
+<#
+.SYNOPSIS
+    Verify the staged APFS for Windows release payload.
 
+.DESCRIPTION
+    Checks artifacts\package\APFS-for-Windows-<version>\ produced by
+    build-release-package.ps1: required files, the absence of any WinFsp
+    binary, driver manifest, test certificate, or retired installer script,
+    release-manifest.json hashes, production build metadata against the
+    pinned official WinFsp (dependencies\winfsp.json), the release policy,
+    the deterministic ZIP used by the reproducibility gate, and (with
+    -RequireSigned) Authenticode signatures on the product binaries.
+#>
 [CmdletBinding()]
 param(
     [string]$Version = "",
     [string]$PackageRoot = "artifacts\package",
     [string]$OutputPath = "artifacts\package\verify-release-package.json",
-    [ValidateSet("Production", "Test")]
-    [string]$DriverSigningMode = "Test",
-    [switch]$AllowTestSignedDriver,
     # Release gate: require Azure Artifact Signing in the manifest and a valid,
     # timestamped CN=Randy Northrup signature on every product binary.
     [switch]$RequireSigned,
@@ -25,121 +34,6 @@ function Resolve-RepoPath {
         return [IO.Path]::GetFullPath($Path)
     }
     return [IO.Path]::GetFullPath((Join-Path $repoRoot $Path))
-}
-
-function Invoke-PayloadValidation {
-    param(
-        [Parameter(Mandatory = $true)][string]$ScriptPath,
-        [Parameter(Mandatory = $true)][string]$Name,
-        [switch]$AllowTestSignedDriver
-    )
-    $arguments = @(
-        "-NoProfile",
-        "-ExecutionPolicy", "Bypass",
-        "-File", $ScriptPath,
-        "-ValidatePayloadOnly"
-    )
-    if ($AllowTestSignedDriver) {
-        $arguments += "-AllowTestSignedDriver"
-    }
-    $raw = @(powershell @arguments 2>&1)
-    $exitCode = $LASTEXITCODE
-    $json = $null
-    $errorText = $null
-    try {
-        $json = ($raw -join "`n") | ConvertFrom-Json
-    } catch {
-        $errorText = $_.Exception.Message
-    }
-    [ordered]@{
-        name = $Name
-        ok = [bool]($exitCode -eq 0 -and $json -and $json.ok)
-        exit_code = $exitCode
-        result = $json
-        parse_error = $errorText
-        raw = if ($json) { $null } else { $raw -join "`n" }
-    }
-}
-
-function Invoke-RepairLauncherSelfTest {
-    param([Parameter(Mandatory = $true)][string]$ScriptPath)
-    $testTarget = "\\.\PhysicalDrive2147483647"
-    $testBuildDir = Split-Path -Parent $ScriptPath
-    $raw = @(powershell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath -SelfTest `
-        -UsbTarget $testTarget -UsbMount V: -BuildDir $testBuildDir `
-        -AllowTestSignedDriver 2>&1)
-    $exitCode = $LASTEXITCODE
-    $json = $null
-    $errorText = $null
-    try {
-        $json = ($raw -join "`n") | ConvertFrom-Json
-    } catch {
-        $errorText = $_.Exception.Message
-    }
-    [ordered]@{
-        name = "repair_elevated_encoded_command"
-        ok = [bool]($exitCode -eq 0 -and $json -and $json.ok -and
-            $json.target_roundtrip -and $json.mount_roundtrip -and
-            $json.build_dir_roundtrip -and
-            $json.allow_test_signed_driver_roundtrip)
-        exit_code = $exitCode
-        result = $json
-        parse_error = $errorText
-        raw = if ($json) { $null } else { $raw -join "`n" }
-    }
-}
-
-function Invoke-TestSigningHelperSelfTest {
-    param([Parameter(Mandatory = $true)][string]$ScriptPath)
-
-    $raw = @(powershell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath `
-        -SelfTest 2>&1)
-    $exitCode = $LASTEXITCODE
-    $json = $null
-    $errorText = $null
-    try {
-        $json = ($raw -join "`n") | ConvertFrom-Json
-    } catch {
-        $errorText = $_.Exception.Message
-    }
-    [ordered]@{
-        name = "test_signing_helper_self_test"
-        ok = [bool]($exitCode -eq 0 -and $json -and $json.ok -and
-            $json.command_arguments_exact -and
-            $json.parser_enabled -and $json.parser_disabled -and
-            $json.parser_absent_defaults_disabled -and
-            $json.no_boot_change_performed -and $json.no_restart_performed)
-        exit_code = $exitCode
-        result = $json
-        parse_error = $errorText
-        raw = if ($json) { $null } else { $raw -join "`n" }
-    }
-}
-
-function Invoke-UninstallSelfTest {
-    param([Parameter(Mandatory = $true)][string]$ScriptPath)
-
-    $raw = @(powershell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath `
-        -SelfTest 2>&1)
-    $exitCode = $LASTEXITCODE
-    $json = $null
-    $errorText = $null
-    try {
-        $json = ($raw -join "`n") | ConvertFrom-Json
-    } catch {
-        $errorText = $_.Exception.Message
-    }
-    [ordered]@{
-        name = "uninstall_runtime_release_self_test"
-        ok = [bool]($exitCode -eq 0 -and $json -and $json.ok -and
-            $json.release.attempted -eq $true -and
-            $json.release.removed -eq $true -and
-            [int]$json.release.attempts -ge 1)
-        exit_code = $exitCode
-        result = $json
-        parse_error = $errorText
-        raw = if ($json) { $null } else { $raw -join "`n" }
-    }
 }
 
 function Get-StreamSha256 {
@@ -233,7 +127,7 @@ function Get-ProductSignatureReport {
     # valid third-party signature, so Qt files accept either publisher.
     $qtPublisher = "CN=The QT Company Oy,"
     $groups = @(
-        [ordered]@{ patterns = @("*.exe", "winfsp-x64.dll"); publishers = @($ExpectedPublisher) },
+        [ordered]@{ patterns = @("*.exe"); publishers = @($ExpectedPublisher) },
         [ordered]@{ patterns = @("Qt6*.dll", "platforms\*.dll", "styles\*.dll");
             publishers = @($ExpectedPublisher, $qtPublisher) }
     )
@@ -277,11 +171,7 @@ function Get-ProductSignatureReport {
 
 $resolvedPackageRoot = Resolve-RepoPath $PackageRoot
 $resolvedOutput = Resolve-RepoPath $OutputPath
-if ($DriverSigningMode -eq "Test" -and -not $AllowTestSignedDriver) {
-    throw "Verifying a test-signed package requires explicit -AllowTestSignedDriver."
-}
-$packageSuffix = if ($DriverSigningMode -eq "Test") { "-test-signed" } else { "" }
-$packageName = "APFS-for-Windows-$Version$packageSuffix"
+$packageName = "APFS-for-Windows-$Version"
 $stageRoot = Join-Path $resolvedPackageRoot $packageName
 $zipPath = Join-Path $resolvedPackageRoot "$packageName.zip"
 
@@ -301,11 +191,6 @@ $requiredFiles = @(
     "msvcp140_2.dll",
     "vcruntime140.dll",
     "vcruntime140_1.dll",
-    "configure-test-signing.ps1",
-    "install-apfs-for-windows.ps1",
-    "repair-apfs-for-windows-install.ps1",
-    "start-repair-elevated.ps1",
-    "uninstall-apfs-for-windows.ps1",
     "README.md",
     "CONTRIBUTING.md",
     "docs\APFS_WINDOWS_EXPLORER_NATIVE_MOUNT_PLAN.md",
@@ -318,8 +203,6 @@ $requiredFiles = @(
     "docs\TESTING.md",
     "docs\USER_GUIDE.md",
     "LICENSE",
-    "lib\project-version.ps1",
-    "lib\winfsp-runtime.ps1",
     "THIRD_PARTY_LICENSES.md",
     "APFS_CORE_PROVENANCE.md",
     "APFS_CORE_IMPORT_MANIFEST.json",
@@ -329,15 +212,8 @@ $requiredFiles = @(
     "SHA256SUMS.txt",
     "SECURITY.md",
     "VERSION",
-    "WINFSP_PROVENANCE.json",
-    "winfsp-driver.json",
-    "winfsp.sxs",
-    "winfsp-x64.dll",
-    "winfsp-x64.sys"
+    "WINFSP_PROVENANCE.json"
 )
-if ($DriverSigningMode -eq "Test") {
-    $requiredFiles += "winfsp-x64.cer"
-}
 
 $fileReports = @()
 foreach ($relative in $requiredFiles) {
@@ -349,8 +225,19 @@ foreach ($relative in $requiredFiles) {
         size_bytes = if (Test-Path -LiteralPath $path -PathType Leaf) { [int64](Get-Item -LiteralPath $path).Length } else { $null }
     }
 }
-
 $missing = @($fileReports | Where-Object { -not $_.exists } | ForEach-Object { $_.relative_path })
+
+# WinFsp is a separately installed official component; the payload must not
+# carry its binaries, a driver manifest, a test certificate, the Test Mode
+# helper, or the retired script-based installer.
+$forbiddenPayload = if (Test-Path -LiteralPath $stageRoot -PathType Container) {
+    @(Get-ChildItem -LiteralPath $stageRoot -Recurse -File | Where-Object {
+        $_.Name -like "winfsp*.dll" -or $_.Name -like "*.sys" -or $_.Name -like "*.cer" -or
+            $_.Name -ieq "winfsp.sxs" -or $_.Name -ieq "winfsp-driver.json" -or
+            $_.Extension -ieq ".ps1"
+    } | ForEach-Object { $_.FullName.Substring($stageRoot.Length + 1).Replace("\", "/") })
+} else { @() }
+
 $zipExists = Test-Path -LiteralPath $zipPath -PathType Leaf
 $zipHash = if ($zipExists) { (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash } else { $null }
 $archiveReport = if ($zipExists -and (Test-Path -LiteralPath $stageRoot -PathType Container)) {
@@ -380,60 +267,62 @@ $buildMetadata = if (Test-Path -LiteralPath $buildMetadataPath -PathType Leaf) {
     Get-Content -LiteralPath $buildMetadataPath -Raw | ConvertFrom-Json
 } else { $null }
 $winFspDependency = Get-Content `
-    -LiteralPath (Join-Path $repoRoot "dependencies\winfsp-apfs.json") -Raw |
+    -LiteralPath (Join-Path $repoRoot "dependencies\winfsp.json") -Raw |
     ConvertFrom-Json
+$winFspVersion = [string]$winFspDependency.version
 $buildMetadataOk = $buildMetadata -and
-    [int]$buildMetadata.schema_version -eq 4 -and
+    [int]$buildMetadata.schema_version -eq 5 -and
     [string]$buildMetadata.version -eq $Version -and
     $buildMetadata.production_build -eq $true -and
     $buildMetadata.reproducible_build -eq $true -and
     [string]$buildMetadata.reproducible_source_path -ceq "C:/src/apfs_for_windows" -and
     $buildMetadata.source_dirty -eq $false -and
-    $buildMetadata.winfsp_native_hardlinks -eq $true -and
-    [string]$buildMetadata.winfsp_runtime_repository -ceq [string]$winFspDependency.repository -and
-    [string]$buildMetadata.winfsp_runtime_commit -ceq [string]$winFspDependency.commit -and
+    $buildMetadata.winfsp_found -eq $true -and
+    $buildMetadata.winfsp_native_hardlinks -eq $false -and
+    [string]$buildMetadata.winfsp_version -ceq $winFspVersion -and
     [string]$buildMetadata.winfsp_header -ceq "winfsp/winfsp.h" -and
     [string]$buildMetadata.winfsp_library_name -ceq "winfsp-x64.lib" -and
     [string]$buildMetadata.winfsp_runtime_name -ceq "winfsp-x64.dll"
 $sourceProvenanceOk = $releaseManifest -and $buildMetadata -and
     [string]$releaseManifest.source_commit -ceq [string]$buildMetadata.source_commit
+$winFspProvenancePath = Join-Path $stageRoot "WINFSP_PROVENANCE.json"
+$winFspProvenance = if (Test-Path -LiteralPath $winFspProvenancePath -PathType Leaf) {
+    Get-Content -LiteralPath $winFspProvenancePath -Raw | ConvertFrom-Json
+} else { $null }
+$winFspProvenanceOk = $winFspProvenance -and
+    [string]$winFspProvenance.version -ceq $winFspVersion -and
+    [string]$winFspProvenance.msi_sha256 -ceq [string]$winFspDependency.msi_sha256
+$manifestWinFspOk = $releaseManifest -and $releaseManifest.winfsp -and
+    [string]$releaseManifest.winfsp.distribution -ceq "official_winfsp_system_install" -and
+    [string]$releaseManifest.winfsp.version -ceq $winFspVersion -and
+    [string]$releaseManifest.winfsp.msi_sha256 -ieq [string]$winFspDependency.msi_sha256 -and
+    $releaseManifest.winfsp.bundled_in_payload -eq $false -and
+    [string]$releaseManifest.native_hard_link_creation -ceq "unsupported_with_official_winfsp"
 $releasePolicyPath = Join-Path $stageRoot "RELEASE_POLICY.json"
 $releasePolicy = if (Test-Path -LiteralPath $releasePolicyPath -PathType Leaf) {
     Get-Content -LiteralPath $releasePolicyPath -Raw | ConvertFrom-Json
 } else { $null }
-$releasePolicyOk = $releasePolicy -and [int]$releasePolicy.schema_version -eq 3 -and
-    [string]$releasePolicy.release_model -ceq
-        "owner_controlled_signed_test_mode_distribution" -and
+$releasePolicyOk = $releasePolicy -and [int]$releasePolicy.schema_version -eq 4 -and
+    [string]$releasePolicy.release_model -ceq "owner_controlled_signed_distribution" -and
     $releasePolicy.application_signing.required -eq $true -and
     [string]$releasePolicy.application_signing.status -ceq "azure_artifact_signing" -and
     $releasePolicy.package_signing.required -eq $true -and
     [string]$releasePolicy.package_signing.status -ceq "azure_artifact_signing" -and
     [string]$releasePolicy.installer.format -ceq "msi" -and
+    [string]$releasePolicy.installer.bundle -ceq "wix_burn_setup_exe" -and
+    $releasePolicy.installer.chains_official_winfsp -eq $true -and
+    $releasePolicy.kernel_driver_trust.required -eq $true -and
     [string]$releasePolicy.kernel_driver_trust.distribution_mode -ceq
-        "persistent_windows_test_signing" -and
-    $releasePolicy.kernel_driver_trust.production_signing_planned -eq $false -and
-    $releasePolicy.kernel_driver_trust.production_signing_required_for_owner_release -eq $false -and
-    $releasePolicy.kernel_driver_trust.test_signed_driver_required -eq $true -and
-    $releasePolicy.kernel_driver_trust.persistent_test_signing_required -eq $true -and
-    $releasePolicy.kernel_driver_trust.owner_test_mode_distribution_permitted -eq $true -and
+        "official_winfsp_system_install" -and
+    [string]$releasePolicy.kernel_driver_trust.driver_signer -ceq
+        [string]$winFspDependency.driver_signer -and
+    $releasePolicy.kernel_driver_trust.test_mode_required -eq $false -and
+    $releasePolicy.kernel_driver_trust.secure_boot_compatible -eq $true -and
     $releasePolicy.kernel_driver_trust.secure_boot_or_integrity_bypass_automation_permitted -eq $false -and
     $releasePolicy.kernel_driver_trust.integrity_bypass_is_not_permitted -eq $true -and
+    [string]$releasePolicy.native_hard_link_creation -ceq "unsupported_with_official_winfsp" -and
     [string]$releasePolicy.physical_fault_recovery.status -ceq "not_physically_tested" -and
     $releasePolicy.physical_fault_recovery.owner_accepts_residual_risk -eq $true
-$installPayload = Invoke-PayloadValidation `
-    -ScriptPath (Join-Path $stageRoot "install-apfs-for-windows.ps1") `
-    -Name "install_payload" `
-    -AllowTestSignedDriver:$AllowTestSignedDriver
-$repairPayload = Invoke-PayloadValidation `
-    -ScriptPath (Join-Path $stageRoot "repair-apfs-for-windows-install.ps1") `
-    -Name "repair_payload" `
-    -AllowTestSignedDriver:$AllowTestSignedDriver
-$repairLauncher = Invoke-RepairLauncherSelfTest `
-    -ScriptPath (Join-Path $stageRoot "start-repair-elevated.ps1")
-$testSigningSelfTest = Invoke-TestSigningHelperSelfTest `
-    -ScriptPath (Join-Path $stageRoot "configure-test-signing.ps1")
-$uninstallSelfTest = Invoke-UninstallSelfTest `
-    -ScriptPath (Join-Path $stageRoot "uninstall-apfs-for-windows.ps1")
 $signedStatus = "azure_artifact_signing"
 $unsignedStatus = "unsigned_development_build"
 $manifestApplicationSigning = if ($releaseManifest) { [string]$releaseManifest.application_signing } else { $null }
@@ -453,21 +342,18 @@ $signatureReport = if (Test-Path -LiteralPath $stageRoot -PathType Container) {
     [ordered]@{ ok = $false; expected_publisher = $ExpectedPublisher; file_count = 0; files = @() }
 }
 $signaturesOk = (-not $RequireSigned) -or $signatureReport.ok
-$expectedOwnerReleaseCandidate = [bool]($DriverSigningMode -eq "Test" -and
-    $manifestSigned -and $releasePolicyOk -and
-    $releasePolicy.kernel_driver_trust.owner_test_mode_distribution_permitted -eq $true)
-$ok = $zipExists -and $archiveReport.ok -and ($missing.Count -eq 0) -and $releaseManifest -and
+$expectedOwnerReleaseCandidate = [bool]($manifestSigned -and $releasePolicyOk)
+$ok = $zipExists -and $archiveReport.ok -and ($missing.Count -eq 0) -and
+    ($forbiddenPayload.Count -eq 0) -and $releaseManifest -and
     ($manifestMismatches.Count -eq 0) -and $buildMetadataOk -and
-    $sourceProvenanceOk -and $releasePolicyOk -and
-    [int]$releaseManifest.schema_version -eq 2 -and
-    ([string]$releaseManifest.driver_signing_mode -ceq $DriverSigningMode.ToLowerInvariant()) -and
+    $sourceProvenanceOk -and $releasePolicyOk -and $winFspProvenanceOk -and
+    $manifestWinFspOk -and
+    [int]$releaseManifest.schema_version -eq 3 -and
     $manifestSigningOk -and $signaturesOk -and
     ([string]$releaseManifest.physical_fault_recovery -ceq
         "not_physically_tested_owner_accepted") -and
     $releaseManifest.production_ready -eq $false -and
-    $releaseManifest.owner_release_candidate -eq $expectedOwnerReleaseCandidate -and
-    $installPayload.ok -and $repairPayload.ok -and $repairLauncher.ok -and
-    $testSigningSelfTest.ok -and $uninstallSelfTest.ok
+    $releaseManifest.owner_release_candidate -eq $expectedOwnerReleaseCandidate
 
 $result = [ordered]@{
     component = "apfs_for_windows"
@@ -476,17 +362,21 @@ $result = [ordered]@{
     no_admin_required = $true
     version = $Version
     package_name = $packageName
-    driver_signing_mode = $DriverSigningMode.ToLowerInvariant()
     stage_root = $stageRoot
     zip_path = $zipPath
     zip_exists = [bool]$zipExists
     zip_sha256 = $zipHash
+    zip_release_asset = $false
     deterministic_archive = $archiveReport
     missing_required_files = @($missing)
+    forbidden_payload_files = @($forbiddenPayload)
     release_manifest_ok = [bool]($releaseManifest -and $manifestMismatches.Count -eq 0)
     release_manifest_mismatches = @($manifestMismatches)
     build_metadata_ok = [bool]$buildMetadataOk
     source_provenance_ok = [bool]$sourceProvenanceOk
+    winfsp_version = $winFspVersion
+    winfsp_provenance_ok = [bool]$winFspProvenanceOk
+    manifest_winfsp_ok = [bool]$manifestWinFspOk
     release_policy_ok = [bool]$releasePolicyOk
     release_policy = $releasePolicy
     require_signed = [bool]$RequireSigned
@@ -496,11 +386,6 @@ $result = [ordered]@{
     product_signatures_ok = [bool]$signatureReport.ok
     product_signatures = $signatureReport
     build_metadata = $buildMetadata
-    install_payload = $installPayload
-    repair_payload = $repairPayload
-    repair_launcher = $repairLauncher
-    test_signing_helper = $testSigningSelfTest
-    uninstall_self_test = $uninstallSelfTest
     files = @($fileReports)
     completed_utc = (Get-Date).ToUniversalTime().ToString("o")
 }

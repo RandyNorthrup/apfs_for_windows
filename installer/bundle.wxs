@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  APFS for Windows Setup (WiX Toolset v5 Burn bundle).
+
+  Chains the official, production-signed WinFsp MSI and the APFS for Windows
+  MSI. WinFsp is shared with other software, so the bundle never removes it:
+  it is installed or upgraded when needed and left in place on uninstall. If a
+  newer WinFsp is already installed, Burn treats the bundled one as obsolete
+  and skips it.
+
+  Preprocessor variables: Version, ApfsMsi, WinFspMsi, AssetsDir, IconFile.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
+
+  <Bundle Name="APFS for Windows"
+          Manufacturer="Randy Northrup"
+          Version="$(var.Version)"
+          UpgradeCode="C578C182-4544-4C56-A0D3-20CCB11A0695"
+          IconSourceFile="$(var.IconFile)"
+          AboutUrl="https://github.com/RandyNorthrup/apfs_for_windows"
+          HelpUrl="https://github.com/RandyNorthrup/apfs_for_windows/blob/main/docs/USER_GUIDE.md"
+          UpdateUrl="https://github.com/RandyNorthrup/apfs_for_windows/releases">
+
+    <BootstrapperApplication>
+      <bal:WixStandardBootstrapperApplication
+          Theme="rtfLicense"
+          LicenseFile="$(var.AssetsDir)\License.rtf"
+          LogoFile="$(var.AssetsDir)\logo.png"
+          ShowVersion="yes"
+          SuppressOptionsUI="yes" />
+    </BootstrapperApplication>
+
+    <Chain>
+      <MsiPackage Id="WinFsp"
+                  SourceFile="$(var.WinFspMsi)"
+                  Permanent="yes"
+                  Vital="yes"
+                  Visible="yes" />
+      <MsiPackage Id="ApfsForWindows"
+                  SourceFile="$(var.ApfsMsi)"
+                  Vital="yes">
+        <!-- One Apps & Features entry: the bundle's. -->
+        <MsiProperty Name="ARPSYSTEMCOMPONENT" Value="1" />
+      </MsiPackage>
+    </Chain>
+  </Bundle>
+</Wix>

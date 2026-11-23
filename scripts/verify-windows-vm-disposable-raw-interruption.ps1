@@ -10,7 +10,6 @@ param(
     [string]$PlinkPath,
     [string]$PscpPath,
     [string]$HostKey,
-    [switch]$AllowTestSignedDriver,
     [string]$OutputPath = "artifacts\device-loss\windows-vm-raw-interruption-proof.json"
 )
 
@@ -49,6 +48,9 @@ foreach ($required in @($password, $package, $baseImage, $remoteScript)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Required VM interruption input is missing: $required"
     }
+}
+if ([IO.Path]::GetExtension($package) -ine ".msi") {
+    throw "The VM interruption test installs the signed MSI; -PackagePath must be an .msi file (official WinFsp must already be installed on the VM)."
 }
 
 function Get-AuthArguments {
@@ -115,12 +117,11 @@ try {
     $baseTransferBytes = (Get-Item $baseTransferZip).Length
 
     Invoke-Remote "cmd.exe /d /c mkdir $remoteRoot" | Out-Null
-    Copy-ToVm $package "$remoteScpRoot/package.zip"
+    Copy-ToVm $package "$remoteScpRoot/package.msi"
     Copy-ToVm $baseTransferZip "$remoteScpRoot/base-image.zip"
     Copy-ToVm $remoteScript "$remoteScpRoot/run.ps1"
     Invoke-Remote "powershell.exe -NoProfile -NonInteractive -Command Expand-Archive -LiteralPath $remoteRoot\base-image.zip -DestinationPath $remoteRoot -Force" | Out-Null
     $command = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $remoteRoot\run.ps1 -RunRoot $remoteRoot"
-    if ($AllowTestSignedDriver) { $command += " -AllowTestSignedDriver" }
     $remoteRun = Invoke-Remote $command -AllowedExitCodes @(0, 1)
     Copy-FromVm "$remoteScpRoot/raw-interruption-proof.json" `
         (Join-Path $localRunRoot "remote-proof.json")

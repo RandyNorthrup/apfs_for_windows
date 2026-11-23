@@ -14,7 +14,6 @@ param(
     [int]$TimeoutSeconds = 60,
     [string]$OutputPath = "artifacts\repair\install-repair-proof.json",
     [switch]$SkipWinFspCheck,
-    [switch]$AllowTestSignedDriver,
     [switch]$ValidatePayloadOnly
 )
 
@@ -408,11 +407,6 @@ if ($ValidatePayloadOnly) {
         @("apfs_winfs_worker.exe", (Join-Path $resolvedBuild "apfs_winfs_worker.exe")),
         @("apfs_mount_manager.exe", (Join-Path $resolvedBuild "apfs_mount_manager.exe")),
         @("apfs_probe.exe", (Join-Path $resolvedBuild "apfs_probe.exe")),
-        @("winfsp-x64.dll", (Join-Path $resolvedBuild "winfsp-x64.dll")),
-        @("winfsp-x64.sys", (Join-Path $resolvedBuild "winfsp-x64.sys")),
-        @("winfsp.sxs", (Join-Path $resolvedBuild "winfsp.sxs")),
-        @("winfsp-driver.json", (Join-Path $resolvedBuild "winfsp-driver.json")),
-        @("configure-test-signing.ps1", (Join-Path $PSScriptRoot "configure-test-signing.ps1")),
         @("uninstall-apfs-for-windows.ps1", (Join-Path $PSScriptRoot "uninstall-apfs-for-windows.ps1")),
         @("lib\winfsp-runtime.ps1", (Join-Path $PSScriptRoot "lib\winfsp-runtime.ps1")),
         @("Qt6Core.dll", (Join-Path $qtRuntimeRoot "Qt6Core.dll")),
@@ -429,29 +423,19 @@ if ($ValidatePayloadOnly) {
         }
     })
     $missingPayload = @($payloadFiles | Where-Object { -not $_.exists } | ForEach-Object { $_.name })
-    $winFspPayload = $null
-    $winFspError = $null
-    if ($missingPayload.Count -eq 0) {
-        try {
-            $winFspPayload = Test-ApfsWinFspRuntimePayload `
-                -RuntimeRoot $resolvedBuild `
-                -AllowTestSignedDriver:$AllowTestSignedDriver
-        } catch {
-            $winFspError = $_.Exception.Message
-        }
-    }
+    # WinFsp is a system component, not part of the payload; report it only.
+    $systemWinFsp = Get-ApfsSystemWinFsp
     $payloadResult = [ordered]@{
         component = "apfs_for_windows"
         check = "repair_payload"
-        ok = [bool]($missingPayload.Count -eq 0 -and $winFspPayload -and -not $winFspError)
+        ok = [bool]($missingPayload.Count -eq 0)
         validation_only = $true
         no_admin_required = $true
         build_dir = [string]$resolvedBuild
         qt_runtime_root = $qtRuntimeRoot
         qt_platform_source = $qtPlatformSource
         missing_payload = @($missingPayload)
-        winfsp_runtime = $winFspPayload
-        winfsp_error = $winFspError
+        system_winfsp = $systemWinFsp
         files = @($payloadFiles)
     }
     $payloadResult | ConvertTo-Json -Depth 6
@@ -461,12 +445,7 @@ if ($ValidatePayloadOnly) {
 
 Assert-Admin
 
-$winFspPayload = Test-ApfsWinFspRuntimePayload `
-    -RuntimeRoot $resolvedBuild `
-    -AllowTestSignedDriver:$AllowTestSignedDriver
-$testSigning = if ($winFspPayload.driver_signing_mode -eq "test") {
-    Assert-ApfsTestSigningEnabled
-} else { $null }
+$systemWinFsp = if ($SkipWinFspCheck) { Get-ApfsSystemWinFsp } else { Assert-ApfsSystemWinFsp }
 
 $resolvedOutput = Resolve-RepoPath $OutputPath
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $resolvedOutput) | Out-Null
@@ -493,13 +472,14 @@ $managerCleanup = Stop-InstalledManagerProcesses -InstallPath $InstallRoot -Time
 if (-not $managerCleanup.all_stopped) {
     throw "Installed APFS mount manager is still running after stop request."
 }
-$existingDriver = Get-ApfsWinFspDriverService
-if ($existingDriver) {
-    $existingRuntimeRoot = Get-ApfsWinFspServiceRuntimeRoot
-    $driverRemoval = Unregister-ApfsWinFspRuntime -RuntimeRoot $existingRuntimeRoot `
-        -TimeoutSeconds $TimeoutSeconds
-    if (-not $driverRemoval.unregistered) {
-        throw "The APFS WinFsp driver could not unload; restart Windows and run repair again."
+# 0.2.0 registered a dedicated test-signed driver service; remove it and its
+# files. The product now uses the system WinFsp driver.
+$legacyDriverRemoval = Remove-ApfsLegacyWinFspDriver -TimeoutSeconds $TimeoutSeconds
+foreach ($legacyFile in @("winfsp-x64.dll", "winfsp-x64.sys", "winfsp.sxs", "winfsp-driver.json",
+        "winfsp-x64.cer", "configure-test-signing.ps1")) {
+    $legacyPath = Join-Path $InstallRoot $legacyFile
+    if (Test-Path -LiteralPath $legacyPath -PathType Leaf) {
+        Remove-Item -LiteralPath $legacyPath -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -513,26 +493,10 @@ foreach ($binary in $binaries) {
     Copy-RequiredFile -Source (Join-Path $resolvedBuild $binary) -Destination (Join-Path $InstallRoot $binary)
 }
 Copy-RequiredFile -Source (Join-Path $PSScriptRoot "uninstall-apfs-for-windows.ps1") -Destination (Join-Path $InstallRoot "uninstall-apfs-for-windows.ps1")
-Copy-RequiredFile -Source (Join-Path $PSScriptRoot "configure-test-signing.ps1") -Destination (Join-Path $InstallRoot "configure-test-signing.ps1")
-foreach ($winFspFile in @("winfsp-x64.dll", "winfsp-x64.sys", "winfsp.sxs", "winfsp-driver.json")) {
-    Copy-RequiredFile -Source (Join-Path $resolvedBuild $winFspFile) `
-        -Destination (Join-Path $InstallRoot $winFspFile)
-}
-$winFspCertificate = Join-Path $resolvedBuild "winfsp-x64.cer"
-if (Test-Path -LiteralPath $winFspCertificate -PathType Leaf) {
-    Copy-RequiredFile -Source $winFspCertificate `
-        -Destination (Join-Path $InstallRoot "winfsp-x64.cer")
-}
 $installLib = Join-Path $InstallRoot "lib"
 New-Item -ItemType Directory -Force -Path $installLib | Out-Null
 Copy-RequiredFile -Source (Join-Path $PSScriptRoot "lib\winfsp-runtime.ps1") `
     -Destination (Join-Path $installLib "winfsp-runtime.ps1")
-$installedWinFspPayload = Test-ApfsWinFspRuntimePayload `
-    -RuntimeRoot $InstallRoot `
-    -AllowTestSignedDriver:$AllowTestSignedDriver
-$driverRegistration = Register-ApfsWinFspRuntime `
-    -RuntimeRoot $InstallRoot `
-    -TimeoutSeconds $TimeoutSeconds
 
 foreach ($qtDll in $qtDlls) {
     Copy-RequiredFile -Source (Join-Path $qtRuntimeRoot $qtDll) -Destination (Join-Path $InstallRoot $qtDll)
@@ -569,13 +533,9 @@ $recoveryPolicy = Set-ServiceRecoveryPolicy -Name $ServiceName
 $startMenuProof = Install-StartMenuEntries -Root $StartMenuDir -InstallPath $InstallRoot
 $registryProof = Install-UninstallRegistryEntry -InstallPath $InstallRoot -Version $AppVersion
 $uninstallKey = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\APFS for Windows"
-New-ItemProperty -Path $uninstallKey -Name WinFspDriverService `
-    -Value $driverRegistration.service_name -PropertyType String -Force | Out-Null
-Remove-ItemProperty -Path $uninstallKey -Name WinFspForkCommit -ErrorAction SilentlyContinue
-New-ItemProperty -Path $uninstallKey -Name WinFspRuntimeCommit `
-    -Value $installedWinFspPayload.runtime_commit -PropertyType String -Force | Out-Null
-New-ItemProperty -Path $uninstallKey -Name DriverSigningMode `
-    -Value $installedWinFspPayload.driver_signing_mode -PropertyType String -Force | Out-Null
+foreach ($legacyValue in @("WinFspDriverService", "WinFspForkCommit", "WinFspRuntimeCommit", "DriverSigningMode")) {
+    Remove-ItemProperty -Path $uninstallKey -Name $legacyValue -ErrorAction SilentlyContinue
+}
 $managerStartupProof = Install-ManagerStartupEntry -InstallPath $InstallRoot
 
 if ([string]::IsNullOrWhiteSpace($UsbTarget) -xor [string]::IsNullOrWhiteSpace($UsbMount)) {
@@ -620,8 +580,7 @@ if (-not [string]::IsNullOrWhiteSpace($UsbTarget)) {
 }
 
 $serviceCimAfter = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'" -ErrorAction Stop
-$driverCimAfter = Get-CimInstance Win32_SystemDriver `
-    -Filter "Name='WinFsp+apfs-main'" -ErrorAction Stop
+$systemWinFspAfter = Get-ApfsSystemWinFsp
 $binaryReports = @()
 foreach ($binary in $binaries) {
     $buildPath = Join-Path $resolvedBuild $binary
@@ -641,7 +600,7 @@ $allBinariesMatch = ($binaryReports | Where-Object { -not $_.installed_matches_b
 $ok = $allBinariesMatch -and
     $serviceCimAfter.State -eq "Running" -and
     $serviceCimAfter.StartMode -eq "Auto" -and
-    $driverCimAfter.State -eq "Running" -and
+    ($SkipWinFspCheck -or $systemWinFspAfter.driver_state -eq "Running") -and
     $recoveryPolicy.non_crash_failures_enabled -eq $true -and
     $managerCleanup.all_stopped -eq $true -and
     $managerStartupProof.registered -eq $true -and
@@ -665,14 +624,8 @@ $result = [ordered]@{
         process_id_before = $servicePidBefore
         process_id_after = [int]$serviceCimAfter.ProcessId
     }
-    winfsp_driver = [ordered]@{
-        name = [string]$driverCimAfter.Name
-        state = [string]$driverCimAfter.State
-        start_mode = [string]$driverCimAfter.StartMode
-        path = [string]$driverCimAfter.PathName
-        runtime = $installedWinFspPayload
-    }
-    windows_test_signing = $testSigning
+    system_winfsp = $systemWinFspAfter
+    legacy_winfsp_driver_removal = $legacyDriverRemoval
     mount_verification = $mountProof
     discovery = $discovery
     service_recovery = $recoveryPolicy

@@ -1,10 +1,21 @@
 #Requires -Version 5.1
+<#
+.SYNOPSIS
+    Verify the official WinFsp dependency boundary.
 
+.DESCRIPTION
+    APFS for Windows depends on the official, production-signed WinFsp
+    installed system-wide. This offline gate checks that
+    dependencies\winfsp.json pins an official winfsp/winfsp release asset with
+    its SHA-256 and signers, and that no dedicated WinFsp fork (submodule,
+    manifest, or vendored tree) remains in the repository. With -SdkRoot it
+    also checks a staged SDK from scripts\lib\winfsp-sdk.ps1 against the pin,
+    including the Microsoft signature on the kernel driver.
+#>
 [CmdletBinding()]
 param(
-    [string]$ManifestPath = "dependencies\winfsp-apfs.json",
-    [string]$CheckoutRoot = "third_party\winfsp",
-    [bool]$RequireCheckout = $true,
+    [string]$ManifestPath = "dependencies\winfsp.json",
+    [string]$SdkRoot = "",
     [string]$OutputPath = "artifacts\source-boundary\winfsp-runtime-boundary.json"
 )
 
@@ -19,79 +30,124 @@ function Resolve-RepoPath {
     return [IO.Path]::GetFullPath((Join-Path $repoRoot $Path))
 }
 
+function Test-SignerCommonName {
+    param([AllowNull()][string]$Subject, [Parameter(Mandatory = $true)][string]$CommonName)
+    if ([string]::IsNullOrWhiteSpace($Subject)) { return $false }
+    [bool]($Subject -match ("^CN=`"?" + [regex]::Escape($CommonName) + "`"?(,|$)"))
+}
+
 $resolvedManifest = Resolve-RepoPath $ManifestPath
-$resolvedCheckout = Resolve-RepoPath $CheckoutRoot
 $resolvedOutput = Resolve-RepoPath $OutputPath
-$manifest = if (Test-Path -LiteralPath $resolvedManifest -PathType Leaf) {
-    Get-Content -LiteralPath $resolvedManifest -Raw | ConvertFrom-Json
-} else { $null }
-
-$manifestOk = $manifest -and $manifest.schema_version -eq 1 -and
-    [string]$manifest.name -eq "winfsp-apfs" -and
-    [string]$manifest.repository -eq "https://github.com/RandyNorthrup/winfsp-apfs.git" -and
-    [string]$manifest.branch -eq "main" -and
-    [string]$manifest.commit -match '^[0-9a-f]{40}$' -and
-    [string]$manifest.upstream_base_commit -match '^[0-9a-f]{40}$' -and
-    [string]$manifest.interface_macro -eq "FSP_FILE_SYSTEM_INTERFACE_HAS_CREATE_HARD_LINK"
-
-$checkoutExists = Test-Path -LiteralPath (Join-Path $resolvedCheckout ".git")
-$checkoutHead = $null
-$checkoutStatus = @()
-$checkoutRemote = $null
-$checkoutBranch = $null
-$checkoutBranches = @()
-$checkoutError = $null
-if ($checkoutExists) {
+$manifest = $null
+$parseError = $null
+if (Test-Path -LiteralPath $resolvedManifest -PathType Leaf) {
     try {
-        $checkoutHead = [string](& git -C $resolvedCheckout rev-parse HEAD 2>$null)
-        if ($LASTEXITCODE -ne 0) { throw "Unable to read checkout HEAD." }
-        $checkoutStatus = @(& git -C $resolvedCheckout status --short 2>$null |
-            ForEach-Object { [string]$_ })
-        if ($LASTEXITCODE -ne 0) { throw "Unable to read checkout status." }
-        $checkoutRemote = [string](& git -C $resolvedCheckout remote get-url origin 2>$null)
-        if ($LASTEXITCODE -ne 0) { throw "Unable to read runtime checkout origin remote." }
-        $checkoutBranch = [string](& git -C $resolvedCheckout branch --show-current 2>$null)
-        if ($LASTEXITCODE -ne 0) { throw "Unable to read runtime checkout branch." }
-        $checkoutBranches = @(& git -C $resolvedCheckout for-each-ref `
-            "--format=%(refname:short)" refs/heads 2>$null | ForEach-Object { [string]$_ })
-        if ($LASTEXITCODE -ne 0) { throw "Unable to enumerate runtime checkout branches." }
+        $manifest = Get-Content -LiteralPath $resolvedManifest -Raw | ConvertFrom-Json
     } catch {
-        $checkoutError = $_.Exception.Message
+        $parseError = $_.Exception.Message
     }
 }
 
-$checkoutDetached = [string]::IsNullOrWhiteSpace($checkoutBranch)
-$checkoutMainOnly = ($checkoutBranch -eq "main" -or $checkoutDetached) -and
-    @($checkoutBranches | Where-Object { $_ -ne "main" }).Count -eq 0
-$checkoutOk = $checkoutExists -and -not $checkoutError -and $manifestOk -and
-    $checkoutHead -eq [string]$manifest.commit -and $checkoutStatus.Count -eq 0 -and
-    $checkoutRemote.TrimEnd('/') -eq ([string]$manifest.repository).TrimEnd('/') -and
-    $checkoutMainOnly
-$ok = $manifestOk -and ($checkoutOk -or -not $RequireCheckout)
+$expectedUrl = if ($manifest) {
+    "https://github.com/winfsp/winfsp/releases/download/$($manifest.tag)/$($manifest.msi_name)"
+} else { $null }
+$manifestChecks = [ordered]@{
+    parsed = [bool]$manifest
+    schema = [bool]($manifest -and [int]$manifest.schema_version -eq 1)
+    name = [bool]($manifest -and [string]$manifest.name -ceq "winfsp")
+    version = [bool]($manifest -and [string]$manifest.version -match '^\d+\.\d+\.\d+$')
+    tag = [bool]($manifest -and [string]$manifest.tag -match '^v\d+\.\d+(\.\d+)?$')
+    official_repository = [bool]($manifest -and
+        [string]$manifest.repository -ceq "https://github.com/winfsp/winfsp" -and
+        [string]$manifest.source_url -ceq "https://github.com/winfsp/winfsp/tree/$($manifest.tag)")
+    official_release_asset = [bool]($manifest -and
+        [string]$manifest.msi_name -ceq "winfsp-$($manifest.version).msi" -and
+        [string]$manifest.msi_url -ceq $expectedUrl)
+    msi_sha256 = [bool]($manifest -and [string]$manifest.msi_sha256 -match '^[0-9A-F]{64}$')
+    msi_signer = [bool]($manifest -and [string]$manifest.msi_signer -ceq "NAVIMATICS LLC")
+    driver_signer = [bool]($manifest -and
+        [string]$manifest.driver_signer -ceq "Microsoft Windows Hardware Compatibility Publisher")
+    license = [bool]($manifest -and [string]$manifest.license -ceq "GPLv3 with FLOSS exception")
+    distribution = [bool]($manifest -and
+        [string]$manifest.distribution -ceq "official_winfsp_system_install")
+    native_hard_link_creation = [bool]($manifest -and
+        [string]$manifest.native_hard_link_creation -ceq "unsupported_with_official_winfsp")
+}
+$manifestOk = @($manifestChecks.Values | Where-Object { -not $_ }).Count -eq 0
+
+# No dedicated fork may remain: no gitlink, no .gitmodules entry, no fork
+# manifest, and no vendored WinFsp tree.
+$trackedWinFsp = @(& git -C $repoRoot ls-files --stage -- "third_party/winfsp" 2>$null |
+    ForEach-Object { [string]$_ })
+$gitCommandOk = $LASTEXITCODE -eq 0
+$gitModulesPath = Join-Path $repoRoot ".gitmodules"
+$gitModulesWinFsp = (Test-Path -LiteralPath $gitModulesPath -PathType Leaf) -and
+    ((Get-Content -LiteralPath $gitModulesPath -Raw) -match '(?i)winfsp')
+$forkResidue = [ordered]@{
+    tracked_third_party_winfsp = @($trackedWinFsp)
+    gitmodules_mentions_winfsp = [bool]$gitModulesWinFsp
+    fork_manifest_present = Test-Path -LiteralPath (Join-Path $repoRoot "dependencies\winfsp-apfs.json")
+    vendored_tree_present = Test-Path -LiteralPath (Join-Path $repoRoot "third_party\winfsp")
+}
+$noForkResidue = $gitCommandOk -and $trackedWinFsp.Count -eq 0 -and -not $gitModulesWinFsp -and
+    -not $forkResidue.fork_manifest_present -and -not $forkResidue.vendored_tree_present
+
+$sdkRequested = -not [string]::IsNullOrWhiteSpace($SdkRoot)
+$sdkReport = $null
+$sdkOk = $true
+if ($sdkRequested) {
+    $resolvedSdk = Resolve-RepoPath $SdkRoot
+    $sdkMetadataPath = Join-Path $resolvedSdk "winfsp-sdk.json"
+    $sdkMetadata = if (Test-Path -LiteralPath $sdkMetadataPath -PathType Leaf) {
+        Get-Content -LiteralPath $sdkMetadataPath -Raw | ConvertFrom-Json
+    } else { $null }
+    $driverPath = Join-Path $resolvedSdk "bin\winfsp-x64.sys"
+    $driverSignature = if (Test-Path -LiteralPath $driverPath -PathType Leaf) {
+        Get-AuthenticodeSignature -LiteralPath $driverPath
+    } else { $null }
+    $driverSubject = if ($driverSignature -and $driverSignature.SignerCertificate) {
+        [string]$driverSignature.SignerCertificate.Subject
+    } else { $null }
+    $requiredSdkFiles = @("inc\winfsp\winfsp.h", "lib\winfsp-x64.lib", "bin\winfsp-x64.dll", "bin\winfsp-x64.sys")
+    $missingSdkFiles = @($requiredSdkFiles | Where-Object {
+        -not (Test-Path -LiteralPath (Join-Path $resolvedSdk $_) -PathType Leaf)
+    })
+    $sdkOk = [bool]($manifest -and $sdkMetadata -and $missingSdkFiles.Count -eq 0 -and
+        [string]$sdkMetadata.version -ceq [string]$manifest.version -and
+        [string]$sdkMetadata.msi_sha256 -ieq [string]$manifest.msi_sha256 -and
+        $driverSignature -and [string]$driverSignature.Status -ceq "Valid" -and
+        (Test-SignerCommonName -Subject $driverSubject -CommonName ([string]$manifest.driver_signer)))
+    $sdkReport = [ordered]@{
+        sdk_root = $resolvedSdk
+        ok = [bool]$sdkOk
+        version = if ($sdkMetadata) { [string]$sdkMetadata.version } else { $null }
+        msi_sha256 = if ($sdkMetadata) { [string]$sdkMetadata.msi_sha256 } else { $null }
+        missing_files = @($missingSdkFiles)
+        driver_signature_status = if ($driverSignature) { [string]$driverSignature.Status } else { $null }
+        driver_signer = $driverSubject
+    }
+}
+
+$ok = $manifestOk -and $noForkResidue -and $sdkOk
 
 $result = [ordered]@{
     component = "apfs_for_windows"
     check = "winfsp_runtime_boundary"
     ok = [bool]$ok
     no_admin_required = $true
-    require_checkout = [bool]$RequireCheckout
+    distribution = "official_winfsp_system_install"
     manifest_path = $resolvedManifest
+    manifest_parse_error = $parseError
     manifest_ok = [bool]$manifestOk
-    repository = if ($manifest) { [string]$manifest.repository } else { $null }
-    expected_commit = if ($manifest) { [string]$manifest.commit } else { $null }
-    upstream_base_commit = if ($manifest) { [string]$manifest.upstream_base_commit } else { $null }
-    production_approved = if ($manifest) { [bool]$manifest.production_approved } else { $false }
-    checkout_path = $resolvedCheckout
-    checkout_exists = [bool]$checkoutExists
-    checkout_ok = [bool]$checkoutOk
-    checkout_head = $checkoutHead
-    checkout_clean = [bool]($checkoutExists -and $checkoutStatus.Count -eq 0)
-    checkout_status = @($checkoutStatus)
-    checkout_remote = $checkoutRemote
-    checkout_branch = $checkoutBranch
-    checkout_local_branches = @($checkoutBranches)
-    checkout_main_only = [bool]$checkoutMainOnly
-    checkout_error = $checkoutError
+    manifest_checks = $manifestChecks
+    version = if ($manifest) { [string]$manifest.version } else { $null }
+    tag = if ($manifest) { [string]$manifest.tag } else { $null }
+    msi_url = if ($manifest) { [string]$manifest.msi_url } else { $null }
+    msi_sha256 = if ($manifest) { [string]$manifest.msi_sha256 } else { $null }
+    no_fork_residue = [bool]$noForkResidue
+    fork_residue = $forkResidue
+    sdk_checked = [bool]$sdkRequested
+    sdk = $sdkReport
     completed_utc = (Get-Date).ToUniversalTime().ToString("o")
 }
 

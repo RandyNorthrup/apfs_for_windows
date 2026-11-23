@@ -10,7 +10,6 @@ param(
     [string]$UsbMount = "",
     [int]$MaxPhysicalDrives = 32,
     [int]$TimeoutSeconds = 300,
-    [switch]$AllowTestSignedDriver,
     [switch]$SelfTest
 )
 
@@ -50,9 +49,6 @@ function New-RepairEncodedCommand {
     }
     if (-not [string]::IsNullOrWhiteSpace($resolvedBuildDir)) {
         $command[-1] += " -BuildDir $(ConvertTo-PowerShellLiteral $resolvedBuildDir)"
-    }
-    if ($AllowTestSignedDriver) {
-        $command[-1] += " -AllowTestSignedDriver"
     }
     $command += @(
         "    if (-not `$?) { exit 1 }",
@@ -124,7 +120,6 @@ if ($SelfTest) {
         $decodedCommand.Contains("-UsbTarget $targetLiteral") -and
         $decodedCommand.Contains("-UsbMount $mountLiteral") -and
         $decodedCommand.Contains("-BuildDir $buildLiteral") -and
-        $decodedCommand.Contains("-AllowTestSignedDriver") -and
         $decodedCommand.Contains((ConvertTo-PowerShellLiteral $resolvedRepairScript)) -and
         $decodedCommand.Contains((ConvertTo-PowerShellLiteral $resolvedRepairOutput))
     [ordered]@{
@@ -135,7 +130,6 @@ if ($SelfTest) {
         target_roundtrip = [bool]$decodedCommand.Contains("-UsbTarget $targetLiteral")
         mount_roundtrip = [bool]$decodedCommand.Contains("-UsbMount $mountLiteral")
         build_dir_roundtrip = [bool]$decodedCommand.Contains("-BuildDir $buildLiteral")
-        allow_test_signed_driver_roundtrip = [bool]$decodedCommand.Contains("-AllowTestSignedDriver")
         command_decoded = $true
     } | ConvertTo-Json -Depth 4
     if (-not $ok) { exit 1 }
@@ -159,7 +153,6 @@ $baseResult = [ordered]@{
     }
     repair_script = $resolvedRepairScript
     build_dir = $resolvedBuildDir
-    allow_test_signed_driver = [bool]$AllowTestSignedDriver
     repair_output_path = $resolvedRepairOutput
     pending_uac = $pendingUac
     blockers = @()
@@ -204,9 +197,6 @@ if (Test-CurrentProcessAdmin) {
         }
         if (-not [string]::IsNullOrWhiteSpace($resolvedBuildDir)) {
             $repairArgs += @("-BuildDir", $resolvedBuildDir)
-        }
-        if ($AllowTestSignedDriver) {
-            $repairArgs += "-AllowTestSignedDriver"
         }
         & powershell @repairArgs
         $repairExit = $LASTEXITCODE

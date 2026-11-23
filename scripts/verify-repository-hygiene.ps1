@@ -37,14 +37,12 @@ $requiredFiles = @(
     ".editorconfig",
     ".gitattributes",
     ".gitignore",
-    ".gitmodules",
     ".github\CODEOWNERS",
     ".github\workflows\repository-gates.yml",
     ".github\workflows\release.yml",
-    ".github\workflows\winfsp-runtime-build.yml",
     "CMakeLists.txt",
     "CONTRIBUTING.md",
-    "dependencies\winfsp-apfs.json",
+    "dependencies\winfsp.json",
     "LICENSE",
     "README.md",
     "RELEASE_POLICY.json",
@@ -66,7 +64,8 @@ $requiredFiles = @(
     "scripts\verify-release-policy.ps1",
     "scripts\verify-release-governance.ps1",
     "scripts\verify-apfs-protected-volume-policy.ps1",
-    "scripts\collect-winfsp-runtime-build-provenance.ps1",
+    "scripts\verify-winfsp-runtime-boundary.ps1",
+    "scripts\lib\winfsp-sdk.ps1",
     "scripts\verify-windows-vm-disposable-raw-interruption.ps1",
     "scripts\windows-vm\run-disposable-raw-interruption.ps1",
     "third_party\sak_apfs_core\IMPORT_MANIFEST.json"
@@ -104,7 +103,7 @@ $sensitiveTracked = @($projectFiles | Where-Object {
 })
 
 $allowedTopLevel = @(
-    ".editorconfig", ".gitattributes", ".github", ".gitignore", ".gitmodules",
+    ".editorconfig", ".gitattributes", ".github", ".gitignore",
     "cmake", "CMakeLists.txt", "CONTRIBUTING.md", "docs", "installer", "LICENSE",
     "README.md", "RELEASE_POLICY.json", "scripts", "SECURITY.md", "src", "THIRD_PARTY_LICENSES.md",
     "third_party", "VERSION", "dependencies"
@@ -189,7 +188,6 @@ $version = if (Test-Path -LiteralPath $versionPath -PathType Leaf) {
 $versionFormatOk = $version -match '^\d+\.\d+\.\d+$'
 $versionFiles = @(
     "scripts\build-release-package.ps1",
-    "scripts\install-apfs-for-windows.ps1",
     "scripts\repair-apfs-for-windows-install.ps1",
     "scripts\verify-installed-app-registration.ps1",
     "scripts\verify-release-package.ps1"

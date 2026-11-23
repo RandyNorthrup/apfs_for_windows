@@ -21,7 +21,6 @@ jobs:
       - name: Check out sanitized source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          submodules: recursive
           fetch-depth: 0
 
       - name: Set up Python
@@ -59,7 +58,7 @@ jobs:
             }
           }
           "version=$version" >> $env:GITHUB_OUTPUT
-          "package=APFS-for-Windows-$version-test-signed" >> $env:GITHUB_OUTPUT
+          "package=APFS-for-Windows-$version" >> $env:GITHUB_OUTPUT
           "notes=$notes" >> $env:GITHUB_OUTPUT
 
       - name: Install Qt
@@ -71,49 +70,32 @@ jobs:
             throw 'Qt installation is incomplete.'
           }
 
-      - name: Build dedicated WinFsp runtime
+      # Official, production-signed WinFsp pinned in dependencies/winfsp.json:
+      # download, verify SHA-256 and signatures, admin-extract, stage the SDK.
+      - name: Stage official WinFsp SDK
+        id: winfsp
         shell: pwsh
         run: |
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} `
-            'Microsoft Visual Studio\Installer\vswhere.exe'
-          $msbuild = (& $vswhere -latest -products * `
-            -requires Microsoft.Component.MSBuild `
-            -find 'MSBuild\Current\Bin\MSBuild.exe' | Select-Object -First 1)
-          if (-not $msbuild) { throw 'MSBuild was not found.' }
-          $projects = @(
-            'third_party\winfsp\build\VStudio\winfsp_sys.vcxproj',
-            'third_party\winfsp\build\VStudio\winfsp_dll.vcxproj',
-            'third_party\winfsp\build\VStudio\testing\winfsp-tests.vcxproj'
-          )
-          foreach ($project in $projects) {
-            & $msbuild $project /t:Build /p:Configuration=Release `
-              /p:Platform=x64 /m /nologo /v:minimal
-            if ($LASTEXITCODE -ne 0) { throw "MSBuild failed: $project" }
-          }
-          .\scripts\collect-winfsp-runtime-build-provenance.ps1
-          $dependency = Get-Content dependencies\winfsp-apfs.json -Raw | ConvertFrom-Json
-          $runtimeRoot = "artifacts\winfsp-runtime\test-signed\$(([string]$dependency.commit).Substring(0, 8))\x64"
-          New-Item -ItemType Directory -Force -Path $runtimeRoot | Out-Null
-          $buildRoot = 'third_party\winfsp\build\VStudio\build\Release'
-          Copy-Item "$buildRoot\winfsp-x64.dll" $runtimeRoot -Force
-          Copy-Item "$buildRoot\winfsp-x64.sys" $runtimeRoot -Force
-          $signature = Get-AuthenticodeSignature "$runtimeRoot\winfsp-x64.sys"
-          if (-not $signature.SignerCertificate) {
-            throw 'Dedicated driver has no embedded test certificate.'
-          }
-          Export-Certificate -Cert $signature.SignerCertificate `
-            -FilePath "$runtimeRoot\winfsp-x64.cer" -Force | Out-Null
+          . .\scripts\lib\winfsp-sdk.ps1
+          $sdk = Get-ApfsWinFspSdk
+          .\scripts\verify-winfsp-runtime-boundary.ps1 -SdkRoot $sdk.SdkRoot | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Staged WinFsp SDK failed verification.' }
+          "root=$($sdk.SdkRoot)" >> $env:GITHUB_OUTPUT
+          "bin=$($sdk.BinDir)" >> $env:GITHUB_OUTPUT
+          "msi=$($sdk.MsiPath)" >> $env:GITHUB_OUTPUT
 
       - name: Configure and build APFS for Windows
         shell: pwsh
         run: |
           cmake -S . -B build -G 'Visual Studio 17 2022' -A x64 `
             -DCMAKE_PREFIX_PATH='C:\Qt\6.10.3\msvc2022_64' `
-            -DWinFsp_ROOT="$pwd\third_party\winfsp" `
+            -DWinFsp_ROOT='${{ steps.winfsp.outputs.root }}' `
             -DAPFS_PRODUCTION_BUILD=ON
           if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed.' }
           cmake --build build --config Release --parallel
           if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
+          # The runner has no WinFsp installed; tests load the staged runtime.
+          $env:PATH = '${{ steps.winfsp.outputs.bin }};' + $env:PATH
           ctest --test-dir build -C Release --output-on-failure
           if ($LASTEXITCODE -ne 0) { throw 'CTest failed.' }
 
@@ -125,7 +107,7 @@ jobs:
           $toolsDir = Join-Path $env:USERPROFILE '.dotnet\tools'
           $toolsDir >> $env:GITHUB_PATH
           $env:PATH = "$toolsDir;$env:PATH"
-          wix extension add -g WixToolset.Util.wixext/5.0.2 WixToolset.UI.wixext/5.0.2
+          wix extension add -g WixToolset.Util.wixext/5.0.2 WixToolset.UI.wixext/5.0.2 WixToolset.Bal.wixext/5.0.2
           if ($LASTEXITCODE -ne 0) { throw 'WiX extension installation failed.' }
 
       # Log in only after the long build so the Azure CLI token is fresh for signing.
@@ -136,46 +118,43 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Build, sign, and verify release package
+      - name: Build, sign, and verify release payload
         shell: pwsh
         run: |
-          $dependency = Get-Content dependencies\winfsp-apfs.json -Raw | ConvertFrom-Json
-          $runtimeRoot = "artifacts\winfsp-runtime\test-signed\$(([string]$dependency.commit).Substring(0, 8))\x64"
           .\scripts\build-release-package.ps1 `
             -BuildDir build\Release `
             -QtBin C:\Qt\6.10.3\msvc2022_64\bin `
-            -WinFspArtifactRoot $runtimeRoot `
-            -DriverSigningMode Test -AllowTestSignedDriver -Sign
-          .\scripts\verify-release-package.ps1 `
-            -DriverSigningMode Test -AllowTestSignedDriver -RequireSigned `
+            -Sign
+          .\scripts\verify-release-package.ps1 -RequireSigned `
             -OutputPath artifacts\package\verify-release-package-ps7.json
           if ($LASTEXITCODE -ne 0) { throw 'PowerShell 7 package verification failed.' }
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-            .\scripts\verify-release-package.ps1 `
-            -DriverSigningMode Test -AllowTestSignedDriver -RequireSigned `
+            .\scripts\verify-release-package.ps1 -RequireSigned `
             -OutputPath artifacts\package\verify-release-package-ps5.json
           if ($LASTEXITCODE -ne 0) { throw 'PowerShell 5.1 package verification failed.' }
           $stage = "artifacts\package\${{ steps.version.outputs.package }}"
           .\scripts\verify-repository-privacy.ps1 -ScanRoot $stage `
             -SkipGitMetadata -OutputPath artifacts\package\package-privacy.json
 
-      - name: Build and sign MSI
+      - name: Build and sign MSI and Setup.exe
         shell: pwsh
         run: |
-          .\scripts\build-msi.ps1 -DriverSigningMode Test | Out-Host
-          $msi = "artifacts\package\${{ steps.version.outputs.package }}.msi"
-          if (-not (Test-Path -LiteralPath $msi -PathType Leaf)) {
-            throw "MSI was not produced: $msi"
+          .\scripts\build-msi.ps1 -Sign -WinFspMsi '${{ steps.winfsp.outputs.msi }}' | Out-Host
+          $assets = @(
+            "artifacts\package\${{ steps.version.outputs.package }}-Setup.exe",
+            "artifacts\package\${{ steps.version.outputs.package }}.msi"
+          )
+          foreach ($asset in $assets) {
+            if (-not (Test-Path -LiteralPath $asset -PathType Leaf)) {
+              throw "Installer was not produced: $asset"
+            }
+            $signature = Get-AuthenticodeSignature -LiteralPath $asset
+            if ($signature.Status -ne 'Valid' -or -not $signature.TimeStamperCertificate -or
+                -not ([string]$signature.SignerCertificate.Subject).StartsWith('CN=Randy Northrup')) {
+              throw "Installer signature is not valid: $asset ($($signature.Status))"
+            }
           }
-          .\scripts\sign-files.ps1 -Path $msi
-          $signature = Get-AuthenticodeSignature -LiteralPath $msi
-          if ($signature.Status -ne 'Valid' -or -not $signature.TimeStamperCertificate -or
-              -not ([string]$signature.SignerCertificate.Subject).StartsWith('CN=Randy Northrup')) {
-            throw "MSI signature is not valid: $($signature.Status)"
-          }
-          $sums = foreach ($asset in @(
-              "artifacts\package\${{ steps.version.outputs.package }}.msi",
-              "artifacts\package\${{ steps.version.outputs.package }}.zip")) {
+          $sums = foreach ($asset in $assets) {
             $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $([IO.Path]::GetFileName($asset))"
           }
@@ -188,8 +167,8 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           path: |
+            artifacts/package/${{ steps.version.outputs.package }}-Setup.exe
             artifacts/package/${{ steps.version.outputs.package }}.msi
-            artifacts/package/${{ steps.version.outputs.package }}.zip
             artifacts/package/package-proof.json
             artifacts/package/package-privacy.json
             artifacts/package/verify-release-package-ps5.json
@@ -203,11 +182,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = $env:GITHUB_REF_NAME
-          $title = "APFS for Windows ${{ steps.version.outputs.version }} (Test-Signed)"
+          $title = "APFS for Windows ${{ steps.version.outputs.version }}"
           $notes = '${{ steps.version.outputs.notes }}'
           $assets = @(
+            "artifacts\package\${{ steps.version.outputs.package }}-Setup.exe",
             "artifacts\package\${{ steps.version.outputs.package }}.msi",
-            "artifacts\package\${{ steps.version.outputs.package }}.zip",
             'artifacts\package\SHA256SUMS.txt'
           )
           gh release create $tag @assets --verify-tag --latest `

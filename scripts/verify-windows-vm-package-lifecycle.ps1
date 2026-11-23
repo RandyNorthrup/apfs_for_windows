@@ -1,17 +1,22 @@
 #Requires -Version 5.1
-
+<#
+    Install / reboot / uninstall lifecycle of the signed MSI on a disposable
+    Windows VM. The VM must already have the official WinFsp installed.
+    -PackagePath defaults to artifacts\package\APFS-for-Windows-<VERSION>.msi
+    and -ReleaseManifestPath to the release-manifest.json of the stage the
+    MSI was built from (installed binaries are compared against it).
+#>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$VmHost,
     [Parameter(Mandatory = $true)][string]$VmUser,
     [Parameter(Mandatory = $true)][string]$PasswordFile,
     [Parameter(Mandatory = $true)][string]$FixturePath,
-    [string]$HardlinkFixturePath = "",
-    [string]$PackagePath = "artifacts\package\APFS-for-Windows-0.1.0.zip",
+    [string]$PackagePath = "",
+    [string]$ReleaseManifestPath = "",
     [string]$PlinkPath,
     [string]$PscpPath,
     [string]$HostKey,
-    [switch]$AllowTestSignedDriver,
     [int]$OfflineTimeoutSeconds = 90,
     [int]$OnlineTimeoutSeconds = 300,
     [string]$OutputPath = "artifacts\windows-vm\current-lifecycle-proof.json"
@@ -94,28 +99,30 @@ function Wait-SshState {
     $false
 }
 
+$version = (Get-Content -LiteralPath (Join-Path $repoRoot "VERSION") -Raw).Trim()
+if ([string]::IsNullOrWhiteSpace($PackagePath)) {
+    $PackagePath = "artifacts\package\APFS-for-Windows-$version.msi"
+}
+if ([string]::IsNullOrWhiteSpace($ReleaseManifestPath)) {
+    $ReleaseManifestPath = "artifacts\package\APFS-for-Windows-$version\release-manifest.json"
+}
 $resolvedPackage = Resolve-RepoPath $PackagePath
+$resolvedReleaseManifest = Resolve-RepoPath $ReleaseManifestPath
 $resolvedFixture = Resolve-RepoPath $FixturePath
-$resolvedHardlinkFixture = if ($HardlinkFixturePath) {
-    Resolve-RepoPath $HardlinkFixturePath
-} else { $null }
 $resolvedPasswordFile = Resolve-RepoPath $PasswordFile
 $resolvedOutput = Resolve-RepoPath $OutputPath
 $resolvedPhaseScript = Resolve-RepoPath "scripts\windows-vm\run-package-lifecycle-phase.ps1"
 $resolvedVerifyScript = Resolve-RepoPath "scripts\windows-vm\verify-installed-state.ps1"
-$resolvedHardlinkScript = Resolve-RepoPath "scripts\windows-vm\verify-hardlink-transport.ps1"
-foreach ($required in @($resolvedPackage, $resolvedFixture, $resolvedPasswordFile,
-    $resolvedPhaseScript, $resolvedVerifyScript)) {
+foreach ($required in @($resolvedPackage, $resolvedReleaseManifest, $resolvedFixture,
+    $resolvedPasswordFile, $resolvedPhaseScript, $resolvedVerifyScript)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Required lifecycle input is missing: $required"
     }
 }
-if ($resolvedHardlinkFixture -and
-    (-not (Test-Path -LiteralPath $resolvedHardlinkFixture -PathType Leaf) -or
-     -not (Test-Path -LiteralPath $resolvedHardlinkScript -PathType Leaf))) {
-    throw "Hard-link lifecycle fixture or verifier is missing."
+if ([IO.Path]::GetExtension($resolvedPackage) -ine ".msi") {
+    throw "The lifecycle tests the signed MSI; -PackagePath must be an .msi file."
 }
-foreach ($fixture in @($resolvedFixture, $resolvedHardlinkFixture) | Where-Object { $_ }) {
+foreach ($fixture in @($resolvedFixture)) {
     $fixtureStream = [IO.File]::OpenRead($fixture)
     try {
         $fixtureHeader = [byte[]]::new(36)
@@ -145,45 +152,23 @@ $startedUtc = (Get-Date).ToUniversalTime()
 $remoteCleaned = $false
 $vmRestarted = $false
 $install = $null
-$hardlinkTransport = $null
 $postReboot = $null
 $uninstall = $null
 $errorText = $null
 try {
     Invoke-RemoteCommand -Command "cmd.exe /d /c mkdir $remoteRoot" | Out-Null
-    Copy-ToVm -Source $resolvedPackage -Destination "$remoteScpRoot/package.zip"
+    Copy-ToVm -Source $resolvedPackage -Destination "$remoteScpRoot/package.msi"
+    Copy-ToVm -Source $resolvedReleaseManifest -Destination "$remoteScpRoot/release-manifest.json"
     Copy-ToVm -Source $resolvedFixture -Destination "$remoteScpRoot/windows-origin.apfs"
     Copy-ToVm -Source $resolvedPhaseScript -Destination "$remoteScpRoot/run-package-lifecycle-phase.ps1"
     Copy-ToVm -Source $resolvedVerifyScript -Destination "$remoteScpRoot/verify-installed-state.ps1"
     Invoke-RemoteCommand -Command "cmd.exe /d /c mkdir $remoteRoot\fixture" | Out-Null
     Invoke-RemoteCommand -Command "cmd.exe /d /c move /y $remoteRoot\windows-origin.apfs $remoteRoot\fixture\windows-origin.apfs" | Out-Null
-    if ($resolvedHardlinkFixture) {
-        Invoke-RemoteCommand -Command "cmd.exe /d /c mkdir $remoteRoot\hardlink-runtime" | Out-Null
-        Copy-ToVm -Source $resolvedHardlinkFixture `
-            -Destination "$remoteScpRoot/hardlink-runtime/hardlink-runtime.apfs"
-        Copy-ToVm -Source $resolvedHardlinkScript `
-            -Destination "$remoteScpRoot/verify-hardlink-transport.ps1"
-    }
 
-    $phaseBase = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $remoteRoot\run-package-lifecycle-phase.ps1 -RunRoot $remoteRoot -PackageName package.zip -PackageSha256 $packageHash"
-    if ($AllowTestSignedDriver) { $phaseBase += " -AllowTestSignedDriver" }
+    $phaseBase = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $remoteRoot\run-package-lifecycle-phase.ps1 -RunRoot $remoteRoot -PackageName package.msi -PackageSha256 $packageHash"
     $installRaw = Invoke-RemoteCommand -Command "$phaseBase -Phase Install"
     $install = $installRaw.text | ConvertFrom-Json
     if (-not $install.ok) { throw "Windows VM install phase reported failure." }
-
-    if ($resolvedHardlinkFixture) {
-        foreach ($name in @("apfs_winfs_worker.exe", "winfsp-x64.dll", "winfsp.sxs")) {
-            Invoke-RemoteCommand -Command `
-                "cmd.exe /d /c copy /y $remoteRoot\package\$name $remoteRoot\hardlink-runtime\$name" |
-                Out-Null
-        }
-        $hardlinkRaw = Invoke-RemoteCommand -Command `
-            "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $remoteRoot\verify-hardlink-transport.ps1 -RuntimeRoot $remoteRoot\hardlink-runtime -OutputPath native-hardlink.json"
-        $hardlinkTransport = $hardlinkRaw.text | ConvertFrom-Json
-        if (-not $hardlinkTransport.ok) {
-            throw "Windows VM native hard-link transport phase reported failure."
-        }
-    }
 
     Invoke-RemoteCommand -Command "shutdown.exe /r /t 0 /f" -AllowedExitCodes @(0, 1) | Out-Null
     $vmRestarted = $true
@@ -214,12 +199,9 @@ try {
     if (-not $uninstall.ok) { throw "Windows VM uninstall phase reported failure." }
 
     foreach ($name in @("phase-install.json", "pre-reboot.json", "phase-postreboot.json",
-        "post-reboot.json", "phase-uninstall.json", "uninstall-detail.json")) {
+        "post-reboot.json", "phase-uninstall.json", "uninstall-detail.json",
+        "install.log", "uninstall.log")) {
         Copy-FromVm -Source "$remoteScpRoot/$name" -Destination (Join-Path $localRunRoot $name)
-    }
-    if ($resolvedHardlinkFixture) {
-        Copy-FromVm -Source "$remoteScpRoot/hardlink-runtime/native-hardlink.json" `
-            -Destination (Join-Path $localRunRoot "native-hardlink.json")
     }
 } catch {
     $errorText = $_.Exception.Message
@@ -253,7 +235,6 @@ $packageHashAfter = if (Test-Path -LiteralPath $resolvedPackage -PathType Leaf) 
 $packageUnchanged = $packageHashAfter -and ($packageHashAfter -ieq $packageHash)
 $ok = -not $errorText -and $install.ok -and $postReboot.ok -and $uninstall.ok -and
     $vmRestarted -and $remoteCleaned -and
-    (-not $resolvedHardlinkFixture -or ($hardlinkTransport -and $hardlinkTransport.ok)) -and
     $packageUnchanged -and
     ([string]$install.package_sha256 -ieq $packageHash) -and
     ([string]$postReboot.package_sha256 -ieq $packageHash) -and
@@ -266,16 +247,14 @@ $result = [ordered]@{
     windows_vm_rebooted = [bool]$vmRestarted
     credential_material_recorded = $false
     vm_endpoint = "$VmUser@$VmHost"
+    package_format = "msi"
     package_sha256 = $packageHash
     package_sha256_after = $packageHashAfter
     package_source_unchanged = [bool]$packageUnchanged
     package_path = $resolvedPackage
+    release_manifest_path = $resolvedReleaseManifest
     fixture_sha256 = (Get-FileHash -LiteralPath $resolvedFixture -Algorithm SHA256).Hash
-    hardlink_fixture_sha256 = if ($resolvedHardlinkFixture) {
-        (Get-FileHash -LiteralPath $resolvedHardlinkFixture -Algorithm SHA256).Hash
-    } else { $null }
     install = $install
-    native_hardlink_transport = $hardlinkTransport
     post_reboot = $postReboot
     uninstall = $uninstall
     remote_artifacts_cleaned = [bool]$remoteCleaned

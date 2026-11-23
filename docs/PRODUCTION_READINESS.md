@@ -2,10 +2,10 @@
 
 Status date: 2026-11-22
 
-Current classification: **owner-controlled signed Test Mode release; not production-ready**.
+Current classification: **owner-controlled signed release; not production-ready**.
 
-Application binaries (service, worker, manager, probe, and WinFsp runtime DLL)
-and the MSI installer are Authenticode-signed by `CN=Randy Northrup` with Azure
+Application binaries (service, worker, manager, and probe), the MSI, and the
+`Setup.exe` bundle are Authenticode-signed by `CN=Randy Northrup` with Azure
 Artifact Signing and an RFC 3161 timestamp. Bundled Qt and Visual C++ runtime
 files keep their original Qt Company and Microsoft signatures. Release CI
 refuses to publish unless every project binary has a valid, timestamped
@@ -14,19 +14,25 @@ from either publisher. Payload manifests and SHA-256 hashes remain as integrity 
 Signing establishes publisher identity; it does not guarantee Smart App Control
 or SmartScreen reputation.
 
-The dedicated filesystem driver is WDK test-signed. Artifact Signing
-certificates are not trusted for kernel-mode code, and production kernel signing
-(Microsoft attestation signing) needs an EV code-signing certificate and a
-Partner Center hardware account, which the owner does not have. Persistent
-Windows Test Signing is therefore an explicit owner-accepted distribution
-requirement, and the package cannot make a production-ready claim.
-It does not automate Secure Boot, BitLocker, Memory Integrity/HVCI, kernel
-debugging, or integrity-bypass changes.
+Kernel driver trust is closed by using the official WinFsp release installed
+system-wide (pinned in `dependencies/winfsp.json`: WinFsp 2.2.26323). Its driver
+is signed by Microsoft Windows Hardware Compatibility Publisher and its MSI and
+DLL by NAVIMATICS LLC. Windows Test Mode is not required and Secure Boot stays
+compatible. The product does not automate Secure Boot, BitLocker, Memory
+Integrity/HVCI, kernel debugging, or integrity-bypass changes. The trade-off is
+that creating new hard links from Windows is unsupported with official WinFsp
+(`native_hard_link_creation: unsupported_with_official_winfsp`); existing APFS
+hard links still open.
 
 Physical surprise-unplug and power-loss recovery are not part of the verified
 release evidence. They remain explicit owner-accepted, untested residual risks.
 Synthetic worker-termination and raw-VHD interruption tests reduce risk but are not
-represented as physical proof. `RELEASE_POLICY.json` records both boundaries.
+represented as physical proof. `RELEASE_POLICY.json` (schema 4) records these
+boundaries.
+
+Known functional limits: write throughput is low for many small files, and
+directories with 1000 or more entries are not writable from Windows. Both remain
+until the planned new write engine lands.
 
 ## Current Candidate
 
@@ -34,24 +40,26 @@ Canonical generated identity is in the packaged `release-manifest.json` and
 `artifacts/package/package-proof.json`. Documentation intentionally avoids copying
 mutable candidate hashes.
 
+Rows marked *needs fresh evidence* were last proven on the 0.2.0 test-signed
+package and must be rerun against the exact 0.2.1 MSI before an owner release.
+
 | Gate | Current result |
 |---|---|
 | Source isolation | Imported APFS manifest is pinned; S.A.K. checkout remains read-only |
-| Local build | Clean production-mode configuration, deterministic compiler settings, native hard-link ABI, `/W4 /WX` |
-| Tests | CTest 13/13 |
-| Package | Deterministic test-signed candidate; PowerShell 5.1 and 7 verification pass |
-| Reproducibility | Two detached source paths, two CTest passes, byte-identical binaries, metadata, and ZIP |
-| Physical APFS USB | Exact package worker passed normal-user create/read/rename/write/delete, Unicode, long path, Robocopy, concurrent reads, metadata, ACL, symlink, file/directory/root EA, and cleanup |
-| Installed runtime | Exact package service/worker; service Automatic/running; dedicated SxS driver retained |
-| Windows 11 lifecycle | Exact ZIP install, Automatic service, read-only APFS mount, tray Open/Exit, VM reboot persistence, exact hashes, clean uninstall |
-| Uninstall residue | Service, dedicated driver, mount, manager, startup entry, registry, Start menu, install root, and ProgramData absent |
+| WinFsp dependency | Official WinFsp 2.2.26323 pinned by version, MSI URL, SHA-256, and signers; no fork submodule |
+| Local build | Clean production-mode configuration against the staged official SDK, deterministic compiler settings, `/W4 /WX` |
+| Tests | CTest with the staged SDK `bin` on `PATH` |
+| Package | Deterministic signed stage without WinFsp files; PowerShell 5.1 and 7 verification |
+| Reproducibility | Two detached source paths, two CTest passes, byte-identical binaries, metadata, and stage ZIP |
+| Physical APFS USB | *Needs fresh evidence.* 0.2.0 package worker passed normal-user create/read/rename/write/delete, Unicode, long path, Robocopy, concurrent reads, metadata, ACL, symlink, file/directory/root EA, and cleanup |
+| Windows 11 lifecycle | *Needs fresh evidence.* `verify-windows-vm-package-lifecycle.ps1` now installs the exact MSI on a VM with official WinFsp preinstalled; readiness requires its proof to match the MSI SHA-256 |
+| Uninstall residue | *Needs fresh evidence.* Service, mount, manager, startup entry, registry, Start menu, install root, ProgramData, and the legacy `WinFsp+apfs-main` driver absent; system WinFsp retained |
 | Protected APFS policy | Writable sealed, FileVault, per-file-key, unknown-policy, filesystem-owned-xattr, and content-critical-xattr paths fail closed |
-| Plug-in policy | Newly discovered supported APFS media receives a free drive letter and writable/raw-write policy; explicit saved policy is preserved |
+| Plug-in policy | Newly discovered supported APFS media receives a free drive letter and read-only policy; users switch read/write per volume; explicit saved policy is preserved |
 | Repository governance | Sanitized `main` only; privacy and repository gates; admin enforcement; linear history; force-push and deletion disabled |
-| Retained runtime CI | Windows Server 2022 builds and hashes x64 SYS, DLL, import library, and kernel test executable without install, Test Mode, or reboot |
 | App/package signing | Azure Artifact Signing (`CN=Randy Northrup`), timestamped; enforced by `verify-release-package.ps1 -RequireSigned` and `verify-production-readiness.ps1` |
-| Installer | WiX v5 MSI built from the verified package stage and signed; blocks legacy script installs and inactive Test Signing |
-| Driver signing | **Owner accepted: WDK test signature plus persistent Windows Test Signing** |
+| Installer | Signed WiX v5 MSI built from the verified stage, plus a signed Burn `Setup.exe` that chains the official WinFsp MSI; removes the legacy test-signed driver on upgrade |
+| Driver signing | Official WinFsp driver, Microsoft-signed; no Test Mode |
 | Physical unplug/power loss | **Accepted untested residual risk** |
 
 Retained local evidence:
@@ -70,13 +78,13 @@ tracked or published. Public documentation contains capability summaries only.
 
 | Boundary | Required closure |
 |---|---|
-| Windows driver trust | Obtain an EV code-signing certificate and a Microsoft Partner Center hardware account, attestation-sign the dedicated driver, build a production package, and prove the exact package loads with Test Mode disabled |
 | Physical fault residual risk | No closure planned with current hardware; keep claim explicitly untested and owner-accepted |
 
-Application and installer signing is done and is no longer a blocker.
-Persistent Test Signing and the physical-fault residual are accepted
-owner-release constraints. They prevent a production-ready claim but do not
-block the owner-controlled Test Mode release.
+The former Windows driver trust blocker (WDK test signature plus persistent
+Test Signing) is closed by the move to official WinFsp. Application and
+installer signing is done. The physical-fault residual is an accepted
+owner-release constraint. It prevents a production-ready claim but does not
+block the owner-controlled release.
 
 ## Strict Check
 
@@ -86,26 +94,14 @@ Run from clean `main`:
 .\scripts\verify-production-readiness.ps1
 ```
 
-Default `Auto` mode selects exact-source production package when available,
-otherwise exact-source test package. It reports strict production status and nested
-owner status. Strict status remains red for test driver and physical-fault proof.
-Owner status accepts documented persistent Test Mode and physical-fault risk when
-the exact test package passes every other gate. Both statuses require the staged
+It reports strict production status and nested owner status. Strict status
+remains red while physical-fault proof is missing. Owner status
+(`owner_release_ready_with_accepted_physical_fault_risk`) accepts the documented
+physical-fault risk when the exact package passes every other gate, including
+lifecycle evidence that matches the MSI SHA-256. Both statuses require the staged
 product executables to carry a valid, timestamped `CN=Randy Northrup` signature,
-so evaluate a package built with `-Sign`.
-
-Explicit test-candidate evaluation requires:
-
-```powershell
-.\scripts\verify-production-readiness.ps1 `
-  -DriverSigningMode Test -AllowTestSignedDriver
-```
-
-Explicit production evaluation uses:
-
-```powershell
-.\scripts\verify-production-readiness.ps1 -DriverSigningMode Production
-```
+so evaluate a package built with `-Sign`. The former `-DriverSigningMode` and
+`-AllowTestSignedDriver` parameters are gone.
 
 Readiness verification performs no install, elevation, VM action, or reboot.
 

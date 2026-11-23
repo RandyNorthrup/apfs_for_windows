@@ -1,14 +1,23 @@
 #Requires -Version 5.1
+<#
+.SYNOPSIS
+    Aggregate release evidence into a production-readiness classification.
 
+.DESCRIPTION
+    The product uses the official, production-signed WinFsp installed
+    system-wide, so there is no test-signed driver and no Test Mode gate. The
+    shipped artifacts are the signed MSI and Setup.exe built from the release
+    stage; lifecycle and physical-fault evidence must match the MSI SHA-256.
+    Physical surprise-unplug and power-loss recovery remain untested, so the
+    strict classification stays not_production_ready until that evidence
+    exists. The owner-release classification accepts only that residual risk.
+#>
 [CmdletBinding()]
 param(
     [string]$BuildDir = "build\Release",
     [string]$PackageRoot = "artifacts\package",
     [string]$ReproducibleProofPath = "artifacts\reproducible-build\proof.json",
     [string]$LifecycleProofPath = "artifacts\windows-vm\current-lifecycle-proof.json",
-    [ValidateSet("Auto", "Production", "Test")]
-    [string]$DriverSigningMode = "Auto",
-    [switch]$AllowTestSignedDriver,
     [bool]$RequireCleanGit = $true,
     [switch]$SkipTests,
     [string]$OutputPath = "artifacts\production\production-readiness.json",
@@ -67,71 +76,48 @@ function Read-JsonOrNull {
     }
 }
 
+function Get-SignatureReport {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    $signature = if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        Get-AuthenticodeSignature -LiteralPath $Path
+    } else { $null }
+    [ordered]@{
+        file = $Name
+        exists = Test-Path -LiteralPath $Path -PathType Leaf
+        status = if ($signature) { [string]$signature.Status } else { "Missing" }
+        signer = if ($signature -and $signature.SignerCertificate) {
+            [string]$signature.SignerCertificate.Subject
+        } else { $null }
+        timestamped = [bool]($signature -and $signature.TimeStamperCertificate)
+        ok = [bool]($signature -and [string]$signature.Status -ceq "Valid" -and
+            $signature.SignerCertificate -and $signature.TimeStamperCertificate -and
+            ([string]$signature.SignerCertificate.Subject).StartsWith(
+                $ExpectedPublisher, [StringComparison]::Ordinal))
+    }
+}
+
 $version = (Get-Content -LiteralPath (Join-Path $repoRoot "VERSION") -Raw).Trim()
 $resolvedBuild = Resolve-RepoPath $BuildDir
 $resolvedPackageRoot = Resolve-RepoPath $PackageRoot
 $sourceHead = [string](& git -C $repoRoot rev-parse HEAD 2>$null)
 $sourceStatus = @(& git -C $repoRoot status --porcelain 2>$null)
+$winFspDependency = Get-Content -LiteralPath (Join-Path $repoRoot "dependencies\winfsp.json") -Raw |
+    ConvertFrom-Json
 
-if ($DriverSigningMode -eq "Test" -and -not $AllowTestSignedDriver) {
-    throw "Evaluating a test-signed candidate requires explicit -AllowTestSignedDriver."
-}
-
-$candidateModes = if ($DriverSigningMode -eq "Auto") {
-    @("Production", "Test")
-} else {
-    @($DriverSigningMode)
-}
-$selectedCandidate = $null
-$fallbackCandidate = $null
-foreach ($mode in $candidateModes) {
-    $suffix = if ($mode -eq "Test") { "-test-signed" } else { "" }
-    $candidateStage = Join-Path $resolvedPackageRoot "APFS-for-Windows-$version$suffix"
-    $candidateZip = Join-Path $resolvedPackageRoot "APFS-for-Windows-$version$suffix.zip"
-    $candidateManifest = Read-JsonOrNull -Path (Join-Path $candidateStage "release-manifest.json")
-    $candidateMetadata = Read-JsonOrNull -Path (Join-Path $candidateStage "apfs-build-metadata.json")
-    $candidate = [ordered]@{
-        mode = $mode
-        stage = $candidateStage
-        zip = $candidateZip
-        manifest = $candidateManifest
-        metadata = $candidateMetadata
-        exists = [bool]((Test-Path -LiteralPath $candidateStage -PathType Container) -and
-            (Test-Path -LiteralPath $candidateZip -PathType Leaf))
-        exact_source = [bool]($candidateManifest -and $candidateMetadata -and $sourceHead -and
-            [string]$candidateManifest.source_commit -ceq $sourceHead -and
-            [string]$candidateMetadata.source_commit -ceq $sourceHead -and
-            $candidateMetadata.source_dirty -eq $false)
-    }
-    if (-not $fallbackCandidate -and $candidate.exists) {
-        $fallbackCandidate = $candidate
-    }
-    if ($candidate.exists -and $candidate.exact_source) {
-        $selectedCandidate = $candidate
-        break
-    }
-}
-if (-not $selectedCandidate) {
-    $selectedCandidate = if ($fallbackCandidate) { $fallbackCandidate } else {
-        $mode = $candidateModes[0]
-        $suffix = if ($mode -eq "Test") { "-test-signed" } else { "" }
-        [ordered]@{
-            mode = $mode
-            stage = Join-Path $resolvedPackageRoot "APFS-for-Windows-$version$suffix"
-            zip = Join-Path $resolvedPackageRoot "APFS-for-Windows-$version$suffix.zip"
-            manifest = $null
-            metadata = $null
-            exists = $false
-            exact_source = $false
-        }
-    }
-}
-$selectedDriverSigningMode = [string]$selectedCandidate.mode
-$stageRoot = [string]$selectedCandidate.stage
-$zipPath = [string]$selectedCandidate.zip
-$zipHash = if (Test-Path -LiteralPath $zipPath -PathType Leaf) {
-    (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash
+$packageName = "APFS-for-Windows-$version"
+$stageRoot = Join-Path $resolvedPackageRoot $packageName
+$msiPath = Join-Path $resolvedPackageRoot "$packageName.msi"
+$setupPath = Join-Path $resolvedPackageRoot "$packageName-Setup.exe"
+$msiHash = if (Test-Path -LiteralPath $msiPath -PathType Leaf) {
+    (Get-FileHash -LiteralPath $msiPath -Algorithm SHA256).Hash
 } else { $null }
+$setupHash = if (Test-Path -LiteralPath $setupPath -PathType Leaf) {
+    (Get-FileHash -LiteralPath $setupPath -Algorithm SHA256).Hash
+} else { $null }
+$releaseManifest = Read-JsonOrNull -Path (Join-Path $stageRoot "release-manifest.json")
 
 $hygieneArguments = if ($RequireCleanGit) { @("-RequireCleanWorktree") } else { @() }
 $hygiene = Invoke-JsonGate -Script (Join-Path $PSScriptRoot "verify-repository-hygiene.ps1") `
@@ -145,16 +131,8 @@ $releaseGovernanceGate = Invoke-JsonGate `
 $apfsPolicyGate = Invoke-JsonGate `
     -Script (Join-Path $PSScriptRoot "verify-apfs-protected-volume-policy.ps1") `
     -Arguments @("-BuildDir", $resolvedBuild)
-$packageArguments = @(
-    "-Version", $version,
-    "-PackageRoot", $resolvedPackageRoot,
-    "-DriverSigningMode", $selectedDriverSigningMode
-)
-if ($selectedDriverSigningMode -eq "Test") {
-    $packageArguments += "-AllowTestSignedDriver"
-}
 $package = Invoke-JsonGate -Script (Join-Path $PSScriptRoot "verify-release-package.ps1") `
-    -Arguments $packageArguments
+    -Arguments @("-Version", $version, "-PackageRoot", $resolvedPackageRoot, "-RequireSigned")
 
 $testResult = [ordered]@{ ok = $false; exit_code = $null; output = @(); skipped = [bool]$SkipTests }
 if (-not $SkipTests) {
@@ -172,9 +150,13 @@ $productionBuildOk = $buildMetadata -and $buildMetadata.production_build -eq $tr
 $reproducibleBuildOk = $buildMetadata -and
     $buildMetadata.reproducible_build -eq $true -and
     [string]$buildMetadata.reproducible_source_path -ceq "C:/src/apfs_for_windows"
-$hardlinkBuildOk = $buildMetadata -and $buildMetadata.winfsp_native_hardlinks -eq $true
-$sourceRevisionOk = $buildMetadata -and $sourceHead -and
+$officialWinFspBuildOk = $buildMetadata -and
+    [int]$buildMetadata.schema_version -eq 5 -and
+    [string]$buildMetadata.winfsp_version -ceq [string]$winFspDependency.version -and
+    $buildMetadata.winfsp_native_hardlinks -eq $false
+$sourceRevisionOk = $buildMetadata -and $sourceHead -and $releaseManifest -and
     ([string]$buildMetadata.source_commit -eq $sourceHead) -and
+    ([string]$releaseManifest.source_commit -eq $sourceHead) -and
     $buildMetadata.source_dirty -eq $false -and $sourceStatus.Count -eq 0
 $reproducibleEvidence = Read-JsonOrNull -Path (Resolve-RepoPath $ReproducibleProofPath)
 $reproducibleEvidenceOk = $reproducibleEvidence -and
@@ -187,8 +169,6 @@ $reproducibleEvidenceOk = $reproducibleEvidence -and
     $reproducibleEvidence.package_verification_ok -eq $true -and
     @($reproducibleEvidence.files).Count -eq 6 -and
     @($reproducibleEvidence.files | Where-Object { $_.ok -ne $true }).Count -eq 0
-$winFspApproved = $winFspBoundary.payload -and
-    $winFspBoundary.payload.production_approved -eq $true
 
 $productBinaries = @(
     "apfs_mount_service.exe",
@@ -197,30 +177,19 @@ $productBinaries = @(
     "apfs_probe.exe"
 )
 $signatureReports = @($productBinaries | ForEach-Object {
-    $path = Join-Path $stageRoot $_
-    $signature = if (Test-Path -LiteralPath $path -PathType Leaf) {
-        Get-AuthenticodeSignature -LiteralPath $path
-    } else { $null }
-    [ordered]@{
-        file = $_
-        exists = Test-Path -LiteralPath $path -PathType Leaf
-        status = if ($signature) { [string]$signature.Status } else { "Missing" }
-        signer = if ($signature -and $signature.SignerCertificate) {
-            [string]$signature.SignerCertificate.Subject
-        } else { $null }
-        timestamped = [bool]($signature -and $signature.TimeStamperCertificate)
-        ok = [bool]($signature -and [string]$signature.Status -ceq "Valid" -and
-            $signature.SignerCertificate -and $signature.TimeStamperCertificate -and
-            ([string]$signature.SignerCertificate.Subject).StartsWith(
-                $ExpectedPublisher, [StringComparison]::Ordinal))
-    }
+    Get-SignatureReport -Path (Join-Path $stageRoot $_) -Name $_
 })
 $productBinariesNotPublisherSigned = @($signatureReports | Where-Object { -not $_.ok })
 $applicationSigningPolicyOk = $releasePolicy.ok -and
     $releasePolicy.payload.checks.application_signing_required -eq $true -and
     $productBinariesNotPublisherSigned.Count -eq 0
+$installerSignatures = @(
+    (Get-SignatureReport -Path $msiPath -Name "$packageName.msi"),
+    (Get-SignatureReport -Path $setupPath -Name "$packageName-Setup.exe"))
+$installerArtifactsOk = $releasePolicy.ok -and
+    $releasePolicy.payload.checks.package_signing_required -eq $true -and
+    @($installerSignatures | Where-Object { -not $_.ok }).Count -eq 0
 
-$lifecycleEvidence = @()
 $currentLifecycle = Read-JsonOrNull -Path (Resolve-RepoPath $LifecycleProofPath)
 $currentLifecycleResidueClean = $currentLifecycle -and $currentLifecycle.uninstall -and
     $currentLifecycle.uninstall.residue -and
@@ -228,6 +197,9 @@ $currentLifecycleResidueClean = $currentLifecycle -and $currentLifecycle.uninsta
         $_.Value -ne $false -and $_.Name -ne "manager_process_count"
     }).Count -eq 0 -and
     [int]$currentLifecycle.uninstall.residue.manager_process_count -eq 0
+$lifecycleMatchesMsi = [bool]($currentLifecycle -and $msiHash -and
+    [string]$currentLifecycle.package_format -ceq "msi" -and
+    ([string]$currentLifecycle.package_sha256 -ieq $msiHash))
 $currentLifecycleOk = $currentLifecycle -and $currentLifecycle.ok -eq $true -and
     $currentLifecycle.no_host_reboot_performed -eq $true -and
     $currentLifecycle.windows_vm_rebooted -eq $true -and
@@ -241,41 +213,19 @@ $currentLifecycleOk = $currentLifecycle -and $currentLifecycle.ok -eq $true -and
     $currentLifecycle.post_reboot.installed_state.binary_hashes_match -eq $true -and
     $currentLifecycle.uninstall.uninstall_detail.install_root_removed -eq $true -and
     $currentLifecycle.uninstall.uninstall_detail.data_root_removed -eq $true -and
-    $currentLifecycleResidueClean -and $zipHash -and
-    ([string]$currentLifecycle.package_sha256 -ieq $zipHash)
-$lifecycleEvidence += [ordered]@{
+    $currentLifecycleResidueClean -and $lifecycleMatchesMsi
+$lifecycleEvidence = @([ordered]@{
     path = $LifecycleProofPath
     ok = [bool]$currentLifecycleOk
     package_sha256 = if ($currentLifecycle) { [string]$currentLifecycle.package_sha256 } else { $null }
-    matches_current_package = [bool]($currentLifecycle -and $zipHash -and
-        ([string]$currentLifecycle.package_sha256 -ieq $zipHash))
+    matches_current_msi = $lifecycleMatchesMsi
     source = "current_local_exact_lifecycle"
-}
-$exactLifecycleOk = [bool]$currentLifecycleOk
+})
 
-$standaloneHardlinkTransport = Read-JsonOrNull -Path (Join-Path $repoRoot `
-    "artifacts\release\native-hardlink-transport-proof.json")
-$hardlinkTransport = if ($currentLifecycle -and
-    $currentLifecycle.native_hardlink_transport) {
-    $currentLifecycle.native_hardlink_transport
-} else {
-    $standaloneHardlinkTransport
-}
-$hardlinkTransportOk = [bool](
-    ($currentLifecycleOk -and $currentLifecycle.native_hardlink_transport -and
-        $currentLifecycle.native_hardlink_transport.ok -eq $true) -or
-    ($standaloneHardlinkTransport -and $standaloneHardlinkTransport.ok -eq $true -and
-        $zipHash -and
-        ([string]$standaloneHardlinkTransport.package_sha256 -ieq $zipHash)))
-$driverSigning = Read-JsonOrNull -Path (Join-Path $repoRoot `
-    "artifacts\release\driver-signing-proof.json")
-$driverSigningOk = $driverSigning -and $driverSigning.ok -eq $true -and
-    $driverSigning.test_mode_disabled -eq $true -and
-    $zipHash -and ([string]$driverSigning.package_sha256 -ieq $zipHash)
 $physicalFaults = Read-JsonOrNull -Path (Join-Path $repoRoot `
     "artifacts\release\physical-fault-recovery-proof.json")
 $physicalFaultsOk = $physicalFaults -and $physicalFaults.ok -eq $true -and
-    $zipHash -and ([string]$physicalFaults.package_sha256 -ieq $zipHash)
+    $msiHash -and ([string]$physicalFaults.package_sha256 -ieq $msiHash)
 $stagedWorker = Join-Path $stageRoot "apfs_winfs_worker.exe"
 $stagedWorkerHash = if (Test-Path -LiteralPath $stagedWorker -PathType Leaf) {
     (Get-FileHash -LiteralPath $stagedWorker -Algorithm SHA256).Hash
@@ -285,61 +235,38 @@ $apfsPolicyOk = $apfsPolicyGate.ok -and $stagedWorkerHash -and
 $releaseGovernanceOk = [bool]$releaseGovernanceGate.ok
 $physicalFaultDispositionOk = $releasePolicy.ok -and
     $releasePolicy.payload.checks.physical_fault_risk_explicitly_disposed -eq $true
-$ownerTestModePolicyOk = $releasePolicy.ok -and
-    $selectedDriverSigningMode -ceq "Test" -and
-    $releasePolicy.payload.checks.kernel_driver_test_mode_distribution -eq $true -and
+$kernelDriverTrustOk = $releasePolicy.ok -and $winFspBoundary.ok -and
+    $releasePolicy.payload.checks.kernel_driver_official_winfsp -eq $true -and
+    $releasePolicy.payload.checks.no_test_mode_required -eq $true -and
     $releasePolicy.payload.checks.no_integrity_or_platform_bypass_automation -eq $true
-
-$runtimeCiRuns = @()
-$runtimeCiError = $null
-try {
-    $rawRuns = @(& gh run list --workflow "winfsp-runtime-build.yml" --branch main `
-        --commit $sourceHead --limit 10 `
-        --json databaseId,headSha,status,conclusion,url,workflowName 2>&1)
-    if ($LASTEXITCODE -eq 0) {
-        $runtimeCiRuns = @(($rawRuns -join "`n") | ConvertFrom-Json)
-    } else {
-        $runtimeCiError = $rawRuns -join "`n"
-    }
-} catch {
-    $runtimeCiError = $_.Exception.Message
-}
-$retainedRuntimeCiOk = @($runtimeCiRuns | Where-Object {
-    [string]$_.headSha -ceq $sourceHead -and
-    [string]$_.status -ceq "completed" -and
-    [string]$_.conclusion -ceq "success"
-}).Count -gt 0
 
 $gateStatus = [ordered]@{
     repository_hygiene = [bool]$hygiene.ok
     source_boundary = [bool]$sourceBoundary.ok
-    winfsp_runtime_boundary = [bool]$winFspBoundary.ok
-    winfsp_dependency_approved = [bool]$winFspApproved
+    winfsp_dependency_boundary = [bool]$winFspBoundary.ok
     license_notices = [bool]$licenses.ok
     ctest = [bool]$testResult.ok
     release_package = [bool]$package.ok
-    production_package = [bool]($selectedDriverSigningMode -eq "Production")
     production_build_mode = [bool]$productionBuildOk
+    official_winfsp_build = [bool]$officialWinFspBuildOk
     reproducible_build_metadata = [bool]$reproducibleBuildOk
     reproducible_build_evidence = [bool]$reproducibleEvidenceOk
     exact_source_revision = [bool]$sourceRevisionOk
-    native_hardlink_build = [bool]$hardlinkBuildOk
     application_signing_policy = [bool]$applicationSigningPolicyOk
-    exact_package_lifecycle = [bool]$exactLifecycleOk
-    native_hardlink_transport = [bool]$hardlinkTransportOk
-    production_driver_signing = [bool]$driverSigningOk
+    signed_installer_artifacts = [bool]$installerArtifactsOk
+    kernel_driver_trust = [bool]$kernelDriverTrustOk
+    exact_package_lifecycle = [bool]$currentLifecycleOk
     physical_fault_recovery = [bool]$physicalFaultsOk
     physical_fault_risk_disposition = [bool]$physicalFaultDispositionOk
     remaining_apfs_policy = [bool]$apfsPolicyOk
     release_governance = [bool]$releaseGovernanceOk
-    retained_runtime_build_ci = [bool]$retainedRuntimeCiOk
 }
 $blockers = @($gateStatus.Keys | Where-Object { -not $gateStatus[$_] })
 $ok = $blockers.Count -eq 0
+# Physical surprise-unplug and power-loss testing is the only gate the owner
+# release accepts as residual risk (RELEASE_POLICY.json physical_fault_recovery).
 $ownerBlockers = @($blockers | Where-Object {
-    $_ -cne "physical_fault_recovery" -and
-    $_ -cne "production_package" -and
-    -not ($_ -ceq "production_driver_signing" -and $ownerTestModePolicyOk)
+    -not ($_ -ceq "physical_fault_recovery" -and $physicalFaultDispositionOk)
 })
 $ownerOk = $ownerBlockers.Count -eq 0
 
@@ -351,17 +278,18 @@ $result = [ordered]@{
     owner_release = [ordered]@{
         ok = [bool]$ownerOk
         classification = if ($ownerOk) {
-            "owner_release_ready_with_persistent_test_mode_and_accepted_physical_fault_risk"
+            "owner_release_ready_with_accepted_physical_fault_risk"
         } else {
             "owner_release_incomplete"
         }
         blockers = @($ownerBlockers)
-        persistent_test_mode_policy_ok = [bool]$ownerTestModePolicyOk
         accepted_risks = @(
-            "Application binaries and the MSI are Authenticode-signed with Azure Artifact Signing; Smart App Control reputation is not guaranteed.",
-            "The kernel driver is WDK test-signed; production attestation signing needs an EV certificate and Partner Center.",
-            "Persistent Windows Test Signing is required; this is never a production-ready configuration.",
+            "Application binaries, the MSI, and Setup.exe are Authenticode-signed with Azure Artifact Signing; Smart App Control reputation is not guaranteed.",
             "Physical surprise-unplug and power-loss recovery are untested."
+        )
+        known_limits = @(
+            "Creating new hard links from Windows is unsupported with official WinFsp.",
+            "Write performance and the 1000-entry directory write limit remain until the planned write engine."
         )
         production_claim_permitted = $false
     }
@@ -369,19 +297,23 @@ $result = [ordered]@{
     no_vm_action_performed = $true
     no_reboot_performed = $true
     version = $version
-    candidate = [ordered]@{
-        requested_driver_signing_mode = $DriverSigningMode.ToLowerInvariant()
-        selected_driver_signing_mode = $selectedDriverSigningMode.ToLowerInvariant()
-        exact_source = [bool]$selectedCandidate.exact_source
-        package_exists = [bool]$selectedCandidate.exists
+    winfsp = [ordered]@{
+        distribution = "official_winfsp_system_install"
+        version = [string]$winFspDependency.version
+        msi_sha256 = [string]$winFspDependency.msi_sha256
+        driver_signer = [string]$winFspDependency.driver_signer
+        test_mode_required = $false
     }
-    package_path = $zipPath
-    package_sha256 = $zipHash
+    stage_root = $stageRoot
+    msi_path = $msiPath
+    msi_sha256 = $msiHash
+    setup_path = $setupPath
+    setup_sha256 = $setupHash
     blockers = @($blockers)
     gates = $gateStatus
     hygiene = $hygiene
     source_boundary = $sourceBoundary
-    winfsp_runtime_boundary = $winFspBoundary
+    winfsp_dependency_boundary = $winFspBoundary
     licenses = $licenses
     release_policy = $releasePolicy
     tests = $testResult
@@ -389,16 +321,13 @@ $result = [ordered]@{
     build_metadata = $buildMetadata
     reproducible_build_evidence = $reproducibleEvidence
     signatures = @($signatureReports)
+    installer_signatures = @($installerSignatures)
     expected_application_publisher = $ExpectedPublisher
     product_binaries_not_publisher_signed = @($productBinariesNotPublisherSigned)
-    lifecycle_evidence = @($lifecycleEvidence)
-    hardlink_transport_evidence = $hardlinkTransport
-    driver_signing_evidence = $driverSigning
+    lifecycle_evidence = $lifecycleEvidence
     physical_fault_evidence = $physicalFaults
     apfs_policy_evidence = $apfsPolicyGate
     release_governance_evidence = $releaseGovernanceGate
-    retained_runtime_ci_runs = @($runtimeCiRuns)
-    retained_runtime_ci_error = $runtimeCiError
     completed_utc = (Get-Date).ToUniversalTime().ToString("o")
 }
 
