@@ -24,6 +24,46 @@ function Test-AllowedEmail {
         $Email -match '(?i)^noreply@github\.com$'
 }
 
+function Test-PlausibleEmail {
+    # Compiled code and data can contain byte runs that match the email
+    # pattern (two capitals, an at sign, two capitals, a dot, two capitals was
+    # seen in 0.2.0's service). In binaries, only treat matches with a
+    # real top-level domain as addresses.
+    param([Parameter(Mandatory = $true)][string]$Email)
+    $domain = ($Email -split '@')[-1]
+    $labels = @($domain -split '\.')
+    if ($labels.Count -lt 2) { return $false }
+    $tld = $labels[-1].ToLowerInvariant()
+    $known = @('com', 'net', 'org', 'io', 'dev', 'app', 'me', 'co', 'us', 'uk', 'de', 'fr', 'ca', 'au',
+        'info', 'biz', 'edu', 'gov', 'mil', 'ai', 'xyz', 'tech', 'cloud', 'email', 'online', 'site', 'eu',
+        'nl', 'ch', 'jp', 'cn', 'ru', 'in', 'br', 'es', 'it', 'se', 'no', 'fi', 'pl', 'local', 'lan', 'internal')
+    return $known -contains $tld
+}
+
+function Get-PeContentBytes {
+    # Returns the file without its Authenticode certificate table. The table
+    # holds signer and CA certificates plus signature bytes; those random bytes
+    # can spell email-like strings by chance and are not project content.
+    param([Parameter(Mandatory = $true)][byte[]]$Bytes)
+    if ($Bytes.Length -lt 0x40 -or $Bytes[0] -ne 0x4D -or $Bytes[1] -ne 0x5A) { return , $Bytes }
+    $peOffset = [BitConverter]::ToInt32($Bytes, 0x3C)
+    if ($peOffset -lt 0 -or $peOffset + 0x18 + 0x90 -gt $Bytes.Length) { return , $Bytes }
+    if ([BitConverter]::ToUInt32($Bytes, $peOffset) -ne 0x00004550) { return , $Bytes }
+    $optional = $peOffset + 0x18
+    $magic = [BitConverter]::ToUInt16($Bytes, $optional)
+    $dataDirectories = switch ($magic) { 0x20B { $optional + 0x70 } 0x10B { $optional + 0x60 } default { -1 } }
+    if ($dataDirectories -lt 0) { return , $Bytes }
+    $securityEntry = $dataDirectories + 4 * 8  # IMAGE_DIRECTORY_ENTRY_SECURITY
+    if ($securityEntry + 8 -gt $Bytes.Length) { return , $Bytes }
+    $certOffset = [BitConverter]::ToUInt32($Bytes, $securityEntry)
+    $certSize = [BitConverter]::ToUInt32($Bytes, $securityEntry + 4)
+    if ($certOffset -eq 0 -or $certSize -eq 0 -or $certOffset + $certSize -gt $Bytes.Length) { return , $Bytes }
+    $content = New-Object byte[] ($Bytes.Length - $certSize)
+    [Array]::Copy($Bytes, 0, $content, 0, $certOffset)
+    [Array]::Copy($Bytes, $certOffset + $certSize, $content, $certOffset, $Bytes.Length - $certOffset - $certSize)
+    return , $content
+}
+
 $resolvedScanRoot = if ([string]::IsNullOrWhiteSpace($ScanRoot)) {
     $repoRoot
 } else {
@@ -143,7 +183,7 @@ if (-not $isRepositoryScan) {
         [IO.Path]::GetFileName($_) -match '(?i)^apfs_.*\.exe$'
     })) {
         $fullPath = Join-Path $resolvedScanRoot $relativePath.Replace('/', '\')
-        $bytes = [IO.File]::ReadAllBytes($fullPath)
+        $bytes = Get-PeContentBytes -Bytes ([IO.File]::ReadAllBytes($fullPath))
         $binaryText = @(
             [Text.Encoding]::ASCII.GetString($bytes),
             [Text.Encoding]::Unicode.GetString($bytes)
@@ -159,7 +199,9 @@ if (-not $isRepositoryScan) {
         }
         $embeddedEmails = @($binaryText | ForEach-Object { $emailRegex.Matches($_) } |
             ForEach-Object { $_.Value } | Sort-Object -Unique)
-        if (@($embeddedEmails | Where-Object { -not (Test-AllowedEmail -Email $_) }).Count -gt 0) {
+        if (@($embeddedEmails | Where-Object {
+                    (Test-PlausibleEmail -Email $_) -and -not (Test-AllowedEmail -Email $_)
+                }).Count -gt 0) {
             $violations.Add([ordered]@{
                 rule = 'embedded_personal_email_address'
                 path = $relativePath

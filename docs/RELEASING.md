@@ -46,9 +46,15 @@ federation:
 - The `release` GitHub environment holds the secrets `AZURE_CLIENT_ID`,
   `AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID`. Its deployment rules allow
   tags matching `apfs-for-windows-v*` and the `main` branch.
-- The Entra app registration has a federated credential with subject
-  `repo:RandyNorthrup/apfs_for_windows:environment:release`, and the app holds
-  the certificate profile signer role on the Artifact Signing account.
+- The Entra app registration `APFS-for-Windows-GitHub-Signing` has a
+  federated credential for the subject GitHub actually presents, which carries
+  immutable owner and repository IDs:
+  `repo:RandyNorthrup@122551425/apfs_for_windows@1336201140:environment:release`
+  (a second credential keeps the legacy
+  `repo:RandyNorthrup/apfs_for_windows:environment:release` form). The app
+  holds the Artifact Signing Certificate Profile Signer role on the
+  `SAKUtility` certificate profile only. If a login fails with AADSTS700213,
+  compare the subject in the error with these credentials.
 - The release job declares `environment: release` and `id-token: write`.
 
 ## Automated GitHub Build
