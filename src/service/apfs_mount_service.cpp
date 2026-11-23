@@ -153,6 +153,7 @@ struct DiscoveryScan {
 
 void processControlServer(QLocalServer* server);
 QVector<MountConfig> enabledMounts(const QVector<MountConfig>& mounts);
+bool containsConfig(const QVector<MountConfig>& configs, const MountConfig& wanted);
 
 QString winError(DWORD code) {
     LPWSTR buffer = nullptr;
@@ -2998,9 +2999,34 @@ bool mountTargetAvailable(const MountConfig& mount, QString* error = nullptr) {
     return true;
 }
 
-QVector<MountConfig> runnableMounts(const QVector<MountConfig>& mounts) {
+// Presence check that never conflicts with the worker's own open handles:
+// a zero-access open succeeds while the target is in use for writing.
+bool targetPresent(const QString& target) {
+    const std::wstring native = QDir::toNativeSeparators(target).toStdWString();
+    HANDLE handle = CreateFileW(native.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    CloseHandle(handle);
+    return true;
+}
+
+QVector<MountConfig> runnableMounts(const QVector<MountConfig>& mounts,
+                                    const QVector<MountConfig>& running = {}) {
     QVector<MountConfig> runnable;
     for (const auto& mount : enabledMounts(mounts)) {
+        // A running worker holds the target open (exclusively while it writes),
+        // so a full APFS probe would fail with a sharing violation and the
+        // healthy worker would be stopped mid-write. Keep it while present.
+        if (containsConfig(running, mount)) {
+            if (targetPresent(mount.target)) {
+                runnable.append(mount);
+            } else {
+                appendServiceLog(QStringLiteral("APFS target %1 -> %2 disappeared").arg(mount.target, mount.mount));
+            }
+            continue;
+        }
         QString error;
         if (mountTargetAvailable(mount, &error)) {
             runnable.append(mount);
@@ -3146,6 +3172,16 @@ bool sameWorkerConfig(const MountConfig& left, const MountConfig& right) {
            left.enabled == right.enabled;
 }
 
+QVector<MountConfig> runningWorkerConfigs(const std::vector<WorkerHandle>& workers) {
+    QVector<MountConfig> configs;
+    for (const auto& worker : workers) {
+        if (worker.process && worker.process->state() != QProcess::NotRunning) {
+            configs.append(worker.config);
+        }
+    }
+    return configs;
+}
+
 QVector<MountConfig> activeWorkerConfigs(const std::vector<WorkerHandle>& workers) {
     QVector<MountConfig> configs;
     for (const auto& worker : workers) {
@@ -3215,7 +3251,8 @@ void syncConfiguredWorkers(std::vector<WorkerHandle>* workers) {
     }
     QString error;
     const QVector<MountConfig> desired =
-        runnableMounts(readMountConfigWithAutoDiscovery(&error, activeWorkerConfigs(*workers)));
+        runnableMounts(readMountConfigWithAutoDiscovery(&error, activeWorkerConfigs(*workers)),
+                       runningWorkerConfigs(*workers));
     if (!error.isEmpty()) {
         appendServiceLog(error);
         return;
