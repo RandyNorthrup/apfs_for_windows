@@ -164,6 +164,10 @@ path. Do not mix the two: remove a script-based install before using the MSI.
 - `Secure Boot is enabled` from the helper: disable Secure Boot in firmware,
   then retry.
 - `restart_required` remains true: restart Windows and recheck status.
+- "The previous APFS file system driver is still loaded" when reinstalling
+  right after an uninstall: Windows keeps the file system driver loaded until
+  the next restart once a volume has been mounted. Restart, then run setup
+  again. Upgrades over an installed version do not need a restart.
 - The driver does not start after an install with `SKIPTESTSIGNINGCHECK=1`:
   turn Test Signing on and restart.
 - Setup fails: rerun with `/l*v apfs-install.log` and check the log. Download
