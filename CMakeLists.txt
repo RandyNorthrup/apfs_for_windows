@@ -114,6 +114,27 @@ function(apfs_apply_project_options target)
     endif()
 endfunction()
 
+set(APFS_APP_ICON "${CMAKE_CURRENT_SOURCE_DIR}/src/resources/apfs_for_windows.ico")
+
+# Embed VERSIONINFO (and optionally the product icon) so Explorer, Task Manager,
+# Apps & Features, and Authenticode signatures show consistent product identity.
+function(apfs_add_version_resource target description with_icon)
+    if(NOT WIN32)
+        return()
+    endif()
+    set(APFS_RC_NAME "${target}")
+    set(APFS_RC_DESCRIPTION "${description}")
+    if(with_icon)
+        file(TO_CMAKE_PATH "${APFS_APP_ICON}" APFS_RC_ICON_PATH)
+        set(APFS_RC_ICON_LINE "IDI_APP_ICON ICON \"${APFS_RC_ICON_PATH}\"")
+    else()
+        set(APFS_RC_ICON_LINE "")
+    endif()
+    set(rc_file "${CMAKE_CURRENT_BINARY_DIR}/${target}_version.rc")
+    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/version.rc.in" "${rc_file}" @ONLY)
+    target_sources(${target} PRIVATE "${rc_file}")
+endfunction()
+
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Widgets Network)
 get_target_property(APFS_QT_CORE_DLL Qt6::Core IMPORTED_LOCATION_RELEASE)
 if(NOT APFS_QT_CORE_DLL)
@@ -167,12 +188,14 @@ add_executable(apfs_probe
 
 target_link_libraries(apfs_probe PRIVATE sak_apfs_core Qt6::Core)
 apfs_apply_project_options(apfs_probe)
+apfs_add_version_resource(apfs_probe "APFS for Windows Probe" TRUE)
 
 add_executable(apfs_mount_service
     src/service/apfs_mount_service.cpp
 )
 target_link_libraries(apfs_mount_service PRIVATE sak_apfs_core Qt6::Core Qt6::Network)
 apfs_apply_project_options(apfs_mount_service)
+apfs_add_version_resource(apfs_mount_service "APFS for Windows Mount Service" TRUE)
 if(WIN32)
     target_compile_definitions(apfs_mount_service PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_link_libraries(apfs_mount_service PRIVATE advapi32)
@@ -224,6 +247,7 @@ else()
     set(APFS_SOURCE_DIRTY_JSON false)
 endif()
 apfs_apply_project_options(apfs_winfs_worker)
+apfs_add_version_resource(apfs_winfs_worker "APFS for Windows Filesystem Worker" TRUE)
 if(WIN32)
     target_compile_definitions(apfs_winfs_worker PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_link_libraries(apfs_winfs_worker PRIVATE advapi32)
@@ -232,8 +256,16 @@ endif()
 add_executable(apfs_mount_manager
     src/manager/apfs_mount_manager.cpp
 )
+# GUI subsystem: the tray starts at sign-in and must not open a console window.
+# CLI modes (--status, --self-test, --help) attach to the parent console.
+set_target_properties(apfs_mount_manager PROPERTIES WIN32_EXECUTABLE TRUE)
 target_link_libraries(apfs_mount_manager PRIVATE Qt6::Core Qt6::Widgets Qt6::Network)
+if(WIN32)
+    target_compile_definitions(apfs_mount_manager PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(apfs_mount_manager PRIVATE advapi32)
+endif()
 apfs_apply_project_options(apfs_mount_manager)
+apfs_add_version_resource(apfs_mount_manager "APFS for Windows Mount Manager" TRUE)
 
 add_executable(apfs_core_selftest
     src/tests/apfs_core_selftest.cpp

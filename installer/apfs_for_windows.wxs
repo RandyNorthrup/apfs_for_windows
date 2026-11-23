@@ -1,0 +1,269 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  APFS for Windows per-machine MSI (WiX Toolset v5).
+
+  Built by scripts/build-msi.ps1 from a verified release package stage
+  directory. Preprocessor variables:
+    Version           product version (x.y.z)
+    StageDir          staged package root (binaries, runtime, docs)
+    AssetsDir         installer/assets (banner, dialog, license)
+    IconFile          src/resources/apfs_for_windows.ico
+    DriverTestSigned  1 when the bundled WinFsp driver carries a WDK test signature
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <Package Name="APFS for Windows"
+           Manufacturer="Randy Northrup"
+           Version="$(var.Version)"
+           UpgradeCode="0B46A373-7D1B-46C2-B921-B2A27F78F974"
+           Scope="perMachine"
+           InstallerVersion="500"
+           Compressed="yes">
+
+    <SummaryInformation Description="APFS for Windows $(var.Version) Installer"
+                        Manufacturer="Randy Northrup" />
+
+    <MajorUpgrade Schedule="afterInstallInitialize"
+                  DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- Apps & Features -->
+    <Icon Id="ProductIcon" SourceFile="$(var.IconFile)" />
+    <Property Id="ARPPRODUCTICON" Value="ProductIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/RandyNorthrup/apfs_for_windows" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/RandyNorthrup/apfs_for_windows/blob/main/docs/USER_GUIDE.md" />
+    <Property Id="ARPURLUPDATEINFO" Value="https://github.com/RandyNorthrup/apfs_for_windows/releases" />
+    <Property Id="ARPCOMMENTS" Value="Native APFS volumes in Windows Explorer." />
+    <Property Id="DRIVERTESTSIGNED" Value="$(var.DriverTestSigned)" />
+
+    <!-- Launch conditions ===================================================== -->
+    <Launch Condition="VersionNT64"
+            Message="[ProductName] requires 64-bit Windows 11." />
+    <!-- Windows Installer reports 6.3 for every later Windows; read the real build. -->
+    <Property Id="WINDOWSBUILD">
+      <RegistrySearch Id="WindowsBuild" Root="HKLM" Bitness="always64"
+                      Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+                      Name="CurrentBuildNumber" Type="raw" />
+    </Property>
+    <Launch Condition="Installed OR WINDOWSBUILD >= 22000"
+            Message="[ProductName] requires Windows 11." />
+
+    <!-- A pre-MSI (script-based) installation owns the same service and driver. -->
+    <Property Id="LEGACYSCRIPTINSTALL">
+      <RegistrySearch Id="LegacyScriptInstall" Root="HKLM" Bitness="always64"
+                      Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\APFS for Windows"
+                      Name="DisplayName" Type="raw" />
+    </Property>
+    <Launch Condition="Installed OR NOT LEGACYSCRIPTINSTALL"
+            Message="An earlier script-based installation of APFS for Windows was found. Remove it first: in an elevated PowerShell run &quot;%ProgramFiles%\APFS for Windows\uninstall-apfs-for-windows.ps1&quot;, then run this installer again." />
+
+    <!-- The beta driver is WDK test-signed: Windows loads it only in Test Mode.
+         SystemStartOptions reflects the current boot. SKIPTESTSIGNINGCHECK=1
+         lets imaging pipelines stage the product before the Test Mode restart. -->
+    <Property Id="SYSTEMSTARTOPTIONS">
+      <RegistrySearch Id="SystemStartOptions" Root="HKLM" Bitness="always64"
+                      Key="SYSTEM\CurrentControlSet\Control"
+                      Name="SystemStartOptions" Type="raw" />
+    </Property>
+    <Launch Condition="Installed OR REMOVE OR DRIVERTESTSIGNED = &quot;0&quot; OR SKIPTESTSIGNINGCHECK = &quot;1&quot; OR SYSTEMSTARTOPTIONS ~&gt;&lt; &quot;TESTSIGNING&quot;"
+            Message="[ProductName] needs Windows Test Signing for its test-signed driver. Turn off Secure Boot, run &quot;bcdedit /set testsigning on&quot; as administrator, restart, then run setup again." />
+
+    <!-- UI ======================================================================== -->
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.AssetsDir)\License.rtf" />
+    <WixVariable Id="WixUIBannerBmp" Value="$(var.AssetsDir)\banner.bmp" />
+    <WixVariable Id="WixUIDialogBmp" Value="$(var.AssetsDir)\dialog.bmp" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Open APFS for Windows" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WixShellExecTarget" Value="[#ManagerExe]" />
+    <CustomAction Id="LaunchManager" DllEntry="WixShellExec" Impersonate="yes"
+                  BinaryRef="Wix4UtilCA_X64" />
+    <ui:WixUI Id="WixUI_Minimal" />
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchManager"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed AND NOT REMOVE" />
+    </UI>
+
+    <!-- Layout ==================================================================== -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="APFS for Windows">
+        <Directory Id="PlatformsFolder" Name="platforms" />
+        <Directory Id="StylesFolder" Name="styles" />
+        <Directory Id="ScriptLibFolder" Name="lib" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <Feature Id="Main" Title="APFS for Windows" Level="1" AllowAbsent="no">
+      <ComponentGroupRef Id="ServiceComponents" />
+      <ComponentGroupRef Id="ApplicationComponents" />
+      <ComponentGroupRef Id="RuntimeComponents" />
+      <ComponentGroupRef Id="DriverComponents" />
+      <ComponentGroupRef Id="DocumentComponents" />
+    </Feature>
+
+    <!-- Close running tray processes (all sessions) before files are replaced. -->
+    <util:CloseApplication Id="CloseTray" Target="apfs_mount_manager.exe"
+                           CloseMessage="yes" ElevatedCloseMessage="yes"
+                           RebootPrompt="no" TerminateProcess="0" Timeout="5" />
+
+    <!-- ProgramData policy and log data =========================================== -->
+    <SetProperty Id="APFSDATADIR" Value="[CommonAppDataFolder]APFS for Windows" Before="AppSearch"
+                 Sequence="both" />
+
+    <!-- Custom actions (deferred, LocalSystem, no impersonation) ================== -->
+    <SetProperty Id="RegisterDriver" Value="&quot;[#ServiceExe]&quot; --register-driver"
+                 Before="RegisterDriver" Sequence="execute" />
+    <CustomAction Id="RegisterDriver" DllEntry="WixQuietExec" BinaryRef="Wix4UtilCA_X64"
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <SetProperty Id="RollbackRegisterDriver" Value="&quot;[#ServiceExe]&quot; --unregister-driver"
+                 Before="RollbackRegisterDriver" Sequence="execute" />
+    <CustomAction Id="RollbackRegisterDriver" DllEntry="WixQuietExec" BinaryRef="Wix4UtilCA_X64"
+                  Execute="rollback" Impersonate="no" Return="ignore" />
+    <SetProperty Id="UnregisterDriver" Value="&quot;[#ServiceExe]&quot; --unregister-driver"
+                 Before="UnregisterDriver" Sequence="execute" />
+    <CustomAction Id="UnregisterDriver" DllEntry="WixQuietExec" BinaryRef="Wix4UtilCA_X64"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
+    <SetProperty Id="RollbackUnregisterDriver" Value="&quot;[#ServiceExe]&quot; --register-driver"
+                 Before="RollbackUnregisterDriver" Sequence="execute" />
+    <CustomAction Id="RollbackUnregisterDriver" DllEntry="WixQuietExec" BinaryRef="Wix4UtilCA_X64"
+                  Execute="rollback" Impersonate="no" Return="ignore" />
+    <!-- The service executable's install command applies the recovery policy (restart after
+         5 s, 30 s, 60 s; also on non-crash failures), its description, and the
+         ProgramData ACL. MSI's ServiceConfig tables are unreliable for this. -->
+    <SetProperty Id="ConfigureService" Value="&quot;[#ServiceExe]&quot; --install"
+                 Before="ConfigureService" Sequence="execute" />
+    <CustomAction Id="ConfigureService" DllEntry="WixQuietExec" BinaryRef="Wix4UtilCA_X64"
+                  Execute="deferred" Impersonate="no" Return="check" />
+
+    <InstallExecuteSequence>
+      <!-- Driver goes away only on a real uninstall: during a major upgrade the
+           new package re-registers the same service in place. -->
+      <Custom Action="RollbackUnregisterDriver" Before="UnregisterDriver"
+              Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="UnregisterDriver" Before="RemoveFiles"
+              Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <!-- Undo the registration only for a first install: a failed repair or
+           upgrade must leave the existing driver registration in place. -->
+      <Custom Action="RollbackRegisterDriver" After="InstallFiles"
+              Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED" />
+      <Custom Action="RegisterDriver" After="RollbackRegisterDriver" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="ConfigureService" After="InstallServices" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
+  </Package>
+
+  <!-- Service ===================================================================== -->
+  <Fragment>
+    <ComponentGroup Id="ServiceComponents" Directory="INSTALLFOLDER">
+      <Component Id="ServiceExeComponent" Bitness="always64">
+        <File Id="ServiceExe" Source="$(var.StageDir)\apfs_mount_service.exe" KeyPath="yes" />
+        <ServiceInstall Id="MountService"
+                        Name="ApfsForWindowsMountService"
+                        DisplayName="APFS for Windows Mount Service"
+                        Description="Discovers APFS devices, assigns drive letters, and supervises APFS for Windows file system workers. Stopping this service unmounts all APFS volumes."
+                        Type="ownProcess" Start="auto" ErrorControl="normal"
+                        Account="LocalSystem" Vital="yes" />
+        <ServiceControl Id="MountServiceControl" Name="ApfsForWindowsMountService"
+                        Start="install" Stop="both" Remove="uninstall" Wait="yes" />
+        <util:RemoveFolderEx On="uninstall" Property="APFSDATADIR"
+                             Condition="NOT UPGRADINGPRODUCTCODE" />
+      </Component>
+      <Component Id="WorkerExeComponent" Bitness="always64">
+        <File Id="WorkerExe" Source="$(var.StageDir)\apfs_winfs_worker.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="ProbeExeComponent" Bitness="always64">
+        <File Id="ProbeExe" Source="$(var.StageDir)\apfs_probe.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="BuildMetadataComponent" Bitness="always64">
+        <File Id="BuildMetadata" Source="$(var.StageDir)\apfs-build-metadata.json" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <!-- Tray and manager ============================================================ -->
+  <Fragment>
+    <ComponentGroup Id="ApplicationComponents" Directory="INSTALLFOLDER">
+      <Component Id="ManagerExeComponent" Bitness="always64">
+        <File Id="ManagerExe" Source="$(var.StageDir)\apfs_mount_manager.exe" KeyPath="yes">
+          <Shortcut Id="ManagerShortcut" Directory="ProgramMenuFolder"
+                    Name="APFS for Windows" Description="Manage APFS volumes"
+                    WorkingDirectory="INSTALLFOLDER" Icon="ProductIcon" Advertise="no" />
+        </File>
+      </Component>
+      <!-- Single autostart mechanism. Users can turn it off per account in
+           Settings > Apps > Startup or from the tray's Settings menu. -->
+      <Component Id="TrayAutostartComponent" Bitness="always64">
+        <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Run"
+                       Name="APFS for Windows Mount Manager"
+                       Value="&quot;[INSTALLFOLDER]apfs_mount_manager.exe&quot; --tray"
+                       Type="string" KeyPath="yes" />
+      </Component>
+      <Component Id="InstallInfoComponent" Bitness="always64">
+        <RegistryValue Root="HKLM" Key="Software\APFS for Windows" Name="InstallLocation"
+                       Value="[INSTALLFOLDER]" Type="string" KeyPath="yes" />
+        <RegistryValue Root="HKLM" Key="Software\APFS for Windows" Name="Version"
+                       Value="$(var.Version)" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\APFS for Windows" Name="DriverSigningMode"
+                       Value="[DRIVERSIGNINGMODE]" Type="string" />
+      </Component>
+    </ComponentGroup>
+<?if $(var.DriverTestSigned) = "1" ?>
+    <Property Id="DRIVERSIGNINGMODE" Value="test" />
+<?else?>
+    <Property Id="DRIVERSIGNINGMODE" Value="production" />
+<?endif?>
+  </Fragment>
+
+  <!-- Qt and Visual C++ runtime (app-local) ======================================= -->
+  <Fragment>
+    <ComponentGroup Id="RuntimeComponents" Directory="INSTALLFOLDER">
+      <Component Bitness="always64"><File Source="$(var.StageDir)\Qt6Core.dll" KeyPath="yes" /></Component>
+      <Component Bitness="always64"><File Source="$(var.StageDir)\Qt6Gui.dll" KeyPath="yes" /></Component>
+      <Component Bitness="always64"><File Source="$(var.StageDir)\Qt6Network.dll" KeyPath="yes" /></Component>
+      <Component Bitness="always64"><File Source="$(var.StageDir)\Qt6Widgets.dll" KeyPath="yes" /></Component>
+      <Component Bitness="always64"><File Source="$(var.StageDir)\msvcp140.dll" KeyPath="yes" /></Component>
+      <Component Bitness="always64"><File Source="$(var.StageDir)\msvcp140_1.dll" KeyPath="yes" /></Component>
+      <Component Bitness="always64"><File Source="$(var.StageDir)\msvcp140_2.dll" KeyPath="yes" /></Component>
+      <Component Bitness="always64"><File Source="$(var.StageDir)\vcruntime140.dll" KeyPath="yes" /></Component>
+      <Component Bitness="always64"><File Source="$(var.StageDir)\vcruntime140_1.dll" KeyPath="yes" /></Component>
+      <Component Directory="PlatformsFolder" Bitness="always64">
+        <File Source="$(var.StageDir)\platforms\qwindows.dll" KeyPath="yes" />
+      </Component>
+      <Component Directory="StylesFolder" Bitness="always64">
+        <File Source="$(var.StageDir)\styles\qmodernwindowsstyle.dll" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <!-- Dedicated WinFsp runtime ===================================================== -->
+  <Fragment>
+    <ComponentGroup Id="DriverComponents" Directory="INSTALLFOLDER">
+      <Component Bitness="always64"><File Id="WinFspDll" Source="$(var.StageDir)\winfsp-x64.dll" KeyPath="yes" /></Component>
+      <Component Bitness="always64"><File Id="WinFspSys" Source="$(var.StageDir)\winfsp-x64.sys" KeyPath="yes" /></Component>
+      <Component Bitness="always64"><File Id="WinFspSxs" Source="$(var.StageDir)\winfsp.sxs" KeyPath="yes" /></Component>
+      <Component Bitness="always64"><File Id="WinFspManifest" Source="$(var.StageDir)\winfsp-driver.json" KeyPath="yes" /></Component>
+<?if $(var.DriverTestSigned) = "1" ?>
+      <Component Bitness="always64"><File Id="WinFspTestCert" Source="$(var.StageDir)\winfsp-x64.cer" KeyPath="yes" /></Component>
+<?endif?>
+      <Component Bitness="always64"><File Source="$(var.StageDir)\configure-test-signing.ps1" KeyPath="yes" /></Component>
+      <Component Directory="ScriptLibFolder" Bitness="always64">
+        <File Source="$(var.StageDir)\lib\winfsp-runtime.ps1" KeyPath="yes" />
+      </Component>
+      <Component Directory="ScriptLibFolder" Bitness="always64">
+        <File Source="$(var.StageDir)\lib\project-version.ps1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <!-- Notices ====================================================================== -->
+  <Fragment>
+    <ComponentGroup Id="DocumentComponents" Directory="INSTALLFOLDER">
+      <Component Bitness="always64"><File Source="$(var.StageDir)\LICENSE" Name="LICENSE.txt" KeyPath="yes" /></Component>
+      <Component Bitness="always64"><File Source="$(var.StageDir)\THIRD_PARTY_LICENSES.md" KeyPath="yes" /></Component>
+      <Component Bitness="always64"><File Source="$(var.StageDir)\README.md" KeyPath="yes" /></Component>
+      <Component Bitness="always64"><File Source="$(var.StageDir)\SECURITY.md" KeyPath="yes" /></Component>
+      <Component Bitness="always64"><File Source="$(var.StageDir)\RELEASE_POLICY.json" KeyPath="yes" /></Component>
+    </ComponentGroup>
+  </Fragment>
+</Wix>

@@ -21,11 +21,14 @@ containment, parser memory safety, or crafted APFS metadata receive priority.
 
 ## Release boundary
 
-Application and package binaries intentionally remain unsigned under
-`RELEASE_POLICY.json`; SHA-256 manifests and deterministic archives provide
-integrity evidence, not publisher identity or Smart App Control reputation.
+Application binaries and the MSI installer are Authenticode-signed by
+`CN=Randy Northrup` through Azure Artifact Signing under `RELEASE_POLICY.json`.
+Verify the signature before installing; a missing or different publisher means
+the file did not come from this project. Signing confirms the publisher, not
+Smart App Control reputation. SHA-256 manifests remain as integrity evidence.
 The owner distribution uses a WDK test-signed kernel driver and persistent Windows
-Test Signing. Production driver signing is not planned, so this configuration must
+Test Signing. Production driver signing needs an EV certificate and Partner
+Center attestation, which the project does not have, so this configuration must
 never be represented as production-ready. `configure-test-signing.ps1` may only
 set or clear BCDEdit's `testsigning` element; it never changes Secure Boot,
 BitLocker, Memory Integrity/HVCI, kernel debugging, or `nointegritychecks` and never

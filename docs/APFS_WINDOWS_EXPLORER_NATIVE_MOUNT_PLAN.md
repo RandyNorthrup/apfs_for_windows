@@ -15,10 +15,10 @@ source remains outside this repository and is never modified by this project.
 
 Current release class is an owner-controlled, test-signed public beta:
 
-- application and package binaries are unsigned;
+- application binaries and the MSI are Authenticode-signed (Azure Artifact Signing);
 - the dedicated filesystem driver is WDK test-signed;
 - persistent Windows Test Signing is required;
-- production signing is not planned;
+- production driver signing needs an EV certificate and Microsoft attestation, which the owner does not hold;
 - physical surprise-unplug and power-loss recovery are unverified;
 - no production-ready claim is permitted.
 
@@ -77,10 +77,10 @@ with any stock WinFsp installation.
 | Alternate data streams | Transported through protected APFS xattr/data-stream storage |
 | Recovery | Copy-on-write checkpoint selection and deterministic old-or-new interruption behavior |
 | Service | Live configuration sync, target-loss handling, worker restart, device notifications, and bounded logs |
-| Manager | Accessible Qt UI, persistent stacked `AP`/`FS` tray, single instance, Open/Exit actions |
-| Installation | Test Signing helper, installer, repair, uninstall, Start menu, Apps & Features, and startup registration |
+| Manager | Accessible Qt UI; persistent stacked `AP`/`FS` tray with health badge, per-volume menus (open, read/write, automount, drive letter, unmount), device search, notifications, Start at sign-in; per-session single instance |
+| Installation | Signed per-machine MSI (WiX 5): service, dedicated driver, Start menu, Apps & Features, tray autostart, clean uninstall; Test Signing helper and legacy script installer |
 | Privacy | Local paths, private email metadata, networks, credentials, and machine evidence blocked from source and packages |
-| Release | Deterministic test-signed ZIP built and verified by GitHub Actions |
+| Release | Signed MSI and deterministic ZIP built, signed, and verified by GitHub Actions |
 
 ## Safety Policy
 

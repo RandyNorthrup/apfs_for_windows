@@ -38,6 +38,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #if APFS_HAVE_WINFSP
@@ -283,7 +284,10 @@ bool apfsVolumePolicySelfTest() {
 }
 
 QString normalizeApfsPath(const QString &input) {
-  QString path = input.trimmed();
+  // Do not trim: Win32 already strips trailing spaces and dots before a
+  // request reaches the file system, and APFS names may legitimately begin or
+  // end with other Unicode whitespace.
+  QString path = input;
   path.replace(QLatin1Char('\\'), QLatin1Char('/'));
   while (path.contains(QStringLiteral("//"))) {
     path.replace(QStringLiteral("//"), QStringLiteral("/"));
@@ -410,6 +414,28 @@ uint64_t alignAllocation(uint64_t size) {
 
 #if APFS_HAVE_WINFSP
 
+// The core caps listings at max_entries and only reports the cap as a
+// warning; ask for everything and fail closed if it still truncates.
+constexpr int kUnlimitedListing = std::numeric_limits<int>::max();
+
+bool listingTruncated(const sak::PartitionApfsFileReadResult &listing) {
+  return std::any_of(listing.warnings.cbegin(), listing.warnings.cend(),
+                     [](const QString &warning) {
+                       return warning.contains(QStringLiteral("truncated"),
+                                               Qt::CaseInsensitive);
+                     });
+}
+
+// Directory enumeration order: case-insensitive, ties broken by exact code
+// units. The resume marker must use the same comparator.
+bool directoryNameLess(const QString &left, const QString &right) {
+  const int folded = left.compare(right, Qt::CaseInsensitive);
+  if (folded != 0) {
+    return folded < 0;
+  }
+  return left < right;
+}
+
 QMutex gTraceMutex;
 
 bool processIsAlive(qint64 processId) {
@@ -452,7 +478,9 @@ void trace(const QString &message) {
 }
 
 std::atomic_bool gStopRequested{false};
-FSP_FILE_SYSTEM *gFileSystemForSignal{nullptr};
+HANDLE gShutdownComplete{nullptr};
+constexpr DWORD kConsoleCloseShutdownWaitMs = 4500;
+constexpr DWORD kStopPollIntervalMs = 250;
 
 BOOL WINAPI consoleHandler(DWORD controlType) {
   switch (controlType) {
@@ -460,9 +488,15 @@ BOOL WINAPI consoleHandler(DWORD controlType) {
   case CTRL_BREAK_EVENT:
   case CTRL_CLOSE_EVENT:
   case CTRL_SHUTDOWN_EVENT:
+    // Only request the stop; the main thread owns the orderly shutdown
+    // (flush, stop dispatcher, remove mount point, delete file system).
     gStopRequested = true;
-    if (gFileSystemForSignal) {
-      FspFileSystemStopDispatcher(gFileSystemForSignal);
+    if ((controlType == CTRL_CLOSE_EVENT ||
+         controlType == CTRL_SHUTDOWN_EVENT) &&
+        gShutdownComplete) {
+      // The process is terminated as soon as this handler returns for close
+      // and shutdown events, so give the main thread time to unmount.
+      WaitForSingleObject(gShutdownComplete, kConsoleCloseShutdownWaitMs);
     }
     return TRUE;
   default:
@@ -536,18 +570,82 @@ struct ResolvedEntry {
   uint16_t inodeMode{0};
 };
 
-struct FileContext {
-  uint64_t handleId{0};
+// Shared per-path state for every open handle of the same file name. WinFsp
+// keeps one kernel file node per name and posts Cleanup(Delete) only on the
+// last outstanding cleanup of that name, so the user-mode node mirrors that
+// identity. Every field except the atomics is guarded by `mutex`.
+struct FileNode {
+  FileNode() = default;
+  FileNode(const FileNode &) = delete;
+  FileNode &operator=(const FileNode &) = delete;
+  ~FileNode() {
+    if (stagedWriteFileBacked && !stagedWritePath.isEmpty()) {
+      QFile::remove(stagedWritePath);
+    }
+  }
+
+  QMutex mutex;
+  uint64_t nodeId{0};
+  QString key;
   ResolvedEntry entry;
-  bool createdByThisHandle{false};
+  // Handles that have been opened but not yet cleaned up.
+  int openHandles{0};
+  // Handles that have been opened but not yet closed.
+  int references{0};
+  // The node is no longer reachable by name (deleted or replaced).
+  bool detached{false};
+  bool createdByCreate{false};
   bool stagedWriteActive{false};
   bool stagedWriteDirty{false};
   bool deletePending{false};
-  bool closed{false};
   QByteArray stagedWriteData;
   QString stagedWritePath;
   bool stagedWriteFileBacked{false};
+  // Cross-node hard-link count propagation without taking a second node
+  // mutex: writers publish here, the owning node applies it under its lock.
+  std::atomic<uint64_t> publishedObjectId{0};
+  std::atomic<uint32_t> pendingHardLinks{0};
 };
+
+// Per-handle WinFsp file descriptor (UmFileContextIsUserContext2 = 1). Each
+// Open/Create returns a fresh FileContext, and WinFsp posts exactly one Close
+// for it.
+struct FileContext {
+  uint64_t handleId{0};
+  std::shared_ptr<FileNode> node;
+  bool cleanedUp{false};
+};
+
+// Locks a node for one WinFsp callback and keeps the lock-free hard-link
+// propagation fields in sync with the guarded entry.
+class NodeGuard {
+public:
+  explicit NodeGuard(FileNode *node) : node_(node) {
+    if (node_) {
+      node_->mutex.lock();
+      const uint32_t links = node_->pendingHardLinks.exchange(0);
+      if (links != 0) {
+        node_->entry.hardLinks = links;
+      }
+    }
+  }
+  ~NodeGuard() {
+    if (node_) {
+      node_->publishedObjectId = node_->entry.objectId;
+      node_->mutex.unlock();
+    }
+  }
+  NodeGuard(const NodeGuard &) = delete;
+  NodeGuard &operator=(const NodeGuard &) = delete;
+
+private:
+  FileNode *node_;
+};
+
+FileNode *nodeOf(PVOID fileContext) {
+  auto *context = reinterpret_cast<FileContext *>(fileContext);
+  return context ? context->node.get() : nullptr;
+}
 
 struct EaMutationCollectContext {
   QVector<sak::PartitionApfsXattrMutation> mutations;
@@ -657,8 +755,6 @@ public:
       return STATUS_UNRECOGNIZED_VOLUME;
     }
 
-    totalBytes_ = detection->total_bytes;
-    freeBytes_ = detection->free_bytes;
     targetContainerBytes_ =
         detection->total_bytes != 0 ? detection->total_bytes : size;
 
@@ -666,11 +762,16 @@ public:
         std::make_unique<sak::PartitionApfsFileSystemReaderSession>(
             device_.get());
     const auto root = readerSession_->listDirectory(QStringLiteral("/"), 1);
-    if (!root.volume_name.trimmed().isEmpty()) {
-      volumeLabel_ = root.volume_name.trimmed().left(32);
-    }
-    if (volumeLabel_.isEmpty()) {
-      volumeLabel_ = QStringLiteral("APFS");
+    {
+      QMutexLocker volumeLocker(&volumeInfoMutex_);
+      totalBytes_ = detection->total_bytes;
+      freeBytes_ = detection->free_bytes;
+      if (!root.volume_name.trimmed().isEmpty()) {
+        volumeLabel_ = root.volume_name.trimmed().left(32);
+      }
+      if (volumeLabel_.isEmpty()) {
+        volumeLabel_ = QStringLiteral("APFS");
+      }
     }
     if (!root.blockers.isEmpty()) {
       if (error) {
@@ -708,6 +809,7 @@ public:
   }
 
   NTSTATUS volumeInfo(FSP_FSCTL_VOLUME_INFO *info) const {
+    QMutexLocker locker(&volumeInfoMutex_);
     info->TotalSize = totalBytes_;
     info->FreeSize = freeBytes_;
     copyVolumeLabel(volumeLabel_, info);
@@ -720,21 +822,21 @@ public:
     return resolvePathNoLock(normalized, resolved);
   }
 
-  NTSTATUS readFile(const FileContext *context, uint64_t offset, ULONG length,
+  NTSTATUS readFile(const FileNode *node, uint64_t offset, ULONG length,
                     void *buffer, PULONG transferred) {
-    if (!context) {
+    if (!node) {
       return STATUS_INVALID_PARAMETER;
     }
-    const ResolvedEntry &entry = context->entry;
+    const ResolvedEntry &entry = node->entry;
     if (entry.directory) {
       return STATUS_INVALID_DEVICE_REQUEST;
     }
-    if (context->stagedWriteActive) {
-      if (context->stagedWriteFileBacked) {
-        return readHostFileBytes(context->stagedWritePath, offset, length,
+    if (node->stagedWriteActive) {
+      if (node->stagedWriteFileBacked) {
+        return readHostFileBytes(node->stagedWritePath, offset, length,
                                  buffer, transferred);
       }
-      return readBytes(context->stagedWriteData, offset, length, buffer,
+      return readBytes(node->stagedWriteData, offset, length, buffer,
                        transferred);
     }
     if (offset >= entry.sizeBytes) {
@@ -748,6 +850,10 @@ public:
     const uint64_t bytesNeeded = std::min<uint64_t>(length, available);
 
     QMutexLocker locker(&ioMutex_);
+    const NTSTATUS readerStatus = ensureReaderNoLock();
+    if (!NT_SUCCESS(readerStatus)) {
+      return readerStatus;
+    }
     const auto file =
         readerSession_->readFileRange(entry.path, offset, bytesNeeded);
     if (!file.ok || !file.blockers.isEmpty()) {
@@ -770,28 +876,34 @@ public:
     }
 
     QMutexLocker locker(&ioMutex_);
-    const auto listing = readerSession_->listDirectory(
-        directory.path, sak::kPartitionApfsDefaultBrowseEntryLimit);
+    const NTSTATUS readerStatus = ensureReaderNoLock();
+    if (!NT_SUCCESS(readerStatus)) {
+      return readerStatus;
+    }
+    const auto listing =
+        readerSession_->listDirectory(directory.path, kUnlimitedListing);
     if (!listing.blockers.isEmpty()) {
       return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+    if (listingTruncated(listing)) {
+      trace(QStringLiteral("directory listing truncated: %1")
+                .arg(directory.path));
+      return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     QVector<sak::PartitionApfsFileEntry> entries = listing.entries;
     std::sort(entries.begin(), entries.end(),
               [](const auto &left, const auto &right) {
-                const int ci =
-                    left.name.compare(right.name, Qt::CaseInsensitive);
-                if (ci != 0) {
-                  return ci < 0;
-                }
-                return left.name < right.name;
+                return directoryNameLess(left.name, right.name);
               });
 
     const QString markerName =
         marker ? QString::fromWCharArray(marker) : QString{};
     for (const auto &entry : entries) {
+      // Resume strictly after the marker using the exact sort order, so names
+      // that differ only by case are neither skipped nor repeated.
       if (!markerName.isEmpty() &&
-          entry.name.compare(markerName, Qt::CaseInsensitive) <= 0) {
+          !directoryNameLess(markerName, entry.name)) {
         continue;
       }
       ResolvedEntry resolved;
@@ -869,46 +981,192 @@ public:
     return serial == 0 ? 0x41504653U : serial;
   }
 
-  QString volumeLabel() const { return volumeLabel_; }
+  QString volumeLabel() const {
+    QMutexLocker locker(&volumeInfoMutex_);
+    return volumeLabel_;
+  }
   bool readOnly() const { return readOnly_; }
 
-  FileContext *openContext(const ResolvedEntry &entry,
-                           bool createdByThisHandle = false) {
+  // Opens one WinFsp handle on an already resolved entry. Handles of the same
+  // path share one FileNode (staged data, delete-pending, size); `fresh`
+  // forces a new node, used right after Create.
+  FileContext *openHandle(const ResolvedEntry &entry, bool createdByCreate,
+                          bool fresh, FSP_FSCTL_FILE_INFO *info) {
     std::unique_ptr<FileContext> context(new (std::nothrow) FileContext);
     if (!context) {
       return nullptr;
     }
-    context->entry = entry;
-    context->createdByThisHandle = createdByThisHandle;
+    const QString key = normalizeApfsPath(entry.path);
+    std::shared_ptr<FileNode> node;
+    bool joined = false;
+    {
+      QMutexLocker locker(&contextMutex_);
+      const auto found = nodes_.constFind(key);
+      if (!fresh && found != nodes_.cend() && *found && !(*found)->detached) {
+        node = *found;
+        joined = true;
+      } else {
+        node = std::shared_ptr<FileNode>(new (std::nothrow) FileNode);
+        if (!node) {
+          return nullptr;
+        }
+        node->nodeId = nextNodeId_++;
+        node->key = key;
+        node->entry = entry;
+        node->entry.path = key;
+        node->createdByCreate = createdByCreate;
+        node->publishedObjectId = entry.objectId;
+        if (found != nodes_.cend() && *found) {
+          (*found)->detached = true;
+        }
+        nodes_.insert(key, node);
+      }
+      ++node->openHandles;
+      ++node->references;
+      context->handleId = nextHandleId_++;
+      context->node = node;
+    }
+    FileContext *raw = context.get();
+    {
+      NodeGuard guard(node.get());
+      // A joined node keeps its staged view; otherwise refresh the metadata
+      // from the fresh lookup so another alias' changes become visible.
+      if (joined && !node->stagedWriteActive && node->entry.path == key) {
+        node->entry = entry;
+        node->entry.path = key;
+      }
+      if (info) {
+        fillFileInfo(node->entry, info);
+      }
+    }
     QMutexLocker locker(&contextMutex_);
-    context->handleId = nextHandleId_++;
-    auto *raw = context.get();
-    activeContexts_.push_back(std::move(context));
+    handles_.emplace(raw, std::move(context));
     return raw;
   }
 
-  void closeContext(FileContext *context) {
+  // WinFsp Cleanup. Caller must hold the node lock. Cleanup(Delete) is always
+  // the last outstanding cleanup of the name because POSIX unlink semantics
+  // are not enabled. Any other cleanup commits dirty staged data, so closing a
+  // writer's handle persists its writes even while readers keep the name
+  // open; the clean stage is kept for those readers and dropped on last Close.
+  void cleanupHandle(FileContext *context, ULONG flags) {
+    FileNode *node = context->node.get();
+    int remainingHandles = 0;
+    {
+      QMutexLocker locker(&contextMutex_);
+      if (!context->cleanedUp) {
+        context->cleanedUp = true;
+        --node->openHandles;
+      }
+      remainingHandles = node->openHandles;
+    }
+    if ((flags & FspCleanupDelete) != 0) {
+      node->deletePending = true;
+      const NTSTATUS status = deleteFile(node);
+      trace(QStringLiteral("CleanupDeleteDone status=0x%1")
+                .arg(static_cast<quint32>(status), 8, 16, QLatin1Char('0')));
+      if (NT_SUCCESS(status)) {
+        detachNode(node, node->entry.directory);
+      } else {
+        // The name still exists; do not suppress later flushes on it.
+        node->deletePending = false;
+      }
+      return;
+    }
+    if (node->stagedWriteDirty) {
+      const NTSTATUS status = flushFile(node, nullptr);
+      trace(QStringLiteral("CleanupFlushDone status=0x%1 remaining=%2")
+                .arg(static_cast<quint32>(status), 8, 16, QLatin1Char('0'))
+                .arg(remainingHandles));
+    }
+  }
+
+  // WinFsp Close: exactly one per handle. Frees the handle; the last close of
+  // a node commits any write that arrived after the last cleanup, then
+  // discards the staged data and forgets the node.
+  void closeHandle(FileContext *context) {
     if (!context) {
       return;
     }
-    QMutexLocker locker(&contextMutex_);
-    for (auto it = activeContexts_.begin(); it != activeContexts_.end(); ++it) {
-      if (it->get() == context) {
-        context->closed = true;
-        retiredContexts_.push_back(std::move(*it));
-        activeContexts_.erase(it);
-        pruneRetiredContextsNoLock();
-        return;
+    const std::shared_ptr<FileNode> node = context->node;
+    bool lastReference = false;
+    {
+      QMutexLocker locker(&contextMutex_);
+      if (node) {
+        if (!context->cleanedUp) {
+          context->cleanedUp = true;
+          --node->openHandles;
+        }
+        --node->references;
+        lastReference = node->references <= 0;
+      }
+      handles_.erase(context);
+    }
+    if (!node || !lastReference) {
+      return;
+    }
+    NodeGuard guard(node.get());
+    bool detached = false;
+    {
+      QMutexLocker locker(&contextMutex_);
+      detached = node->detached;
+    }
+    if (node->stagedWriteDirty && !node->deletePending && !detached) {
+      const NTSTATUS status = flushFile(node.get(), nullptr);
+      trace(QStringLiteral("CloseFlushDone %1 status=0x%2")
+                .arg(node->entry.path)
+                .arg(static_cast<quint32>(status), 8, 16, QLatin1Char('0')));
+    } else if (node->stagedWriteDirty) {
+      trace(QStringLiteral("CloseDiscardDirty %1 detached=%2 delete=%3")
+                .arg(node->entry.path)
+                .arg(detached)
+                .arg(node->deletePending));
+    }
+    bool forget = false;
+    {
+      QMutexLocker locker(&contextMutex_);
+      if (node->references <= 0) {
+        const auto found = nodes_.constFind(node->key);
+        if (found != nodes_.cend() && found->get() == node.get()) {
+          nodes_.erase(found);
+        }
+        node->detached = true;
+        forget = true;
       }
     }
-    context->closed = true;
+    if (forget) {
+      discardStagedWrite(node.get());
+    }
   }
 
-  QJsonObject contextStats() const {
-    QMutexLocker locker(&contextMutex_);
-    return QJsonObject{
-        {QStringLiteral("active"), static_cast<int>(activeContexts_.size())},
-        {QStringLiteral("retired"), static_cast<int>(retiredContexts_.size())}};
+  // Orderly shutdown: commit every dirty staged write still held by an open
+  // handle. Returns the number of nodes whose flush failed.
+  int flushAllNodes() {
+    std::vector<std::shared_ptr<FileNode>> nodes;
+    {
+      QMutexLocker locker(&contextMutex_);
+      nodes.reserve(static_cast<size_t>(nodes_.size()));
+      for (const auto &node : std::as_const(nodes_)) {
+        if (node && !node->detached) {
+          nodes.push_back(node);
+        }
+      }
+    }
+    int failures = 0;
+    for (const auto &node : nodes) {
+      NodeGuard guard(node.get());
+      if (!node->stagedWriteDirty || node->deletePending) {
+        continue;
+      }
+      const NTSTATUS status = flushFile(node.get(), nullptr);
+      trace(QStringLiteral("ShutdownFlush %1 status=0x%2")
+                .arg(node->entry.path)
+                .arg(static_cast<quint32>(status), 8, 16, QLatin1Char('0')));
+      if (!NT_SUCCESS(status)) {
+        ++failures;
+      }
+    }
+    return failures;
   }
 
   NTSTATUS createNode(const QString &path, bool directory,
@@ -928,8 +1186,12 @@ public:
     }
 
     ResolvedEntry existing;
-    if (resolvePath(normalized, &existing) == STATUS_SUCCESS) {
+    const NTSTATUS existingStatus = resolvePath(normalized, &existing);
+    if (existingStatus == STATUS_SUCCESS) {
       return STATUS_OBJECT_NAME_COLLISION;
+    }
+    if (existingStatus != STATUS_OBJECT_NAME_NOT_FOUND) {
+      return existingStatus;
     }
 
     ResolvedEntry created{.path = normalized,
@@ -945,40 +1207,40 @@ public:
       return status;
     }
 
-    auto *context = openContext(created, true);
+    auto *context = openHandle(created, true, true, info);
     if (!context) {
       return STATUS_INSUFFICIENT_RESOURCES;
     }
     *outContext = context;
-    fillFileInfo(created, info);
     return STATUS_SUCCESS;
   }
 
-  NTSTATUS overwriteFile(FileContext *context, FSP_FSCTL_FILE_INFO *info) {
+  NTSTATUS overwriteFile(FileNode *node, FSP_FSCTL_FILE_INFO *info) {
     if (readOnly_) {
       return STATUS_MEDIA_WRITE_PROTECTED;
     }
     QString directoryName;
     QString fileName;
-    if (!context || context->entry.directory ||
-        !splitMutableFilePath(context->entry.path, &directoryName, &fileName)) {
+    if (!node || node->entry.directory ||
+        !splitMutableFilePath(node->entry.path, &directoryName, &fileName)) {
       return STATUS_NOT_SUPPORTED;
     }
-    if (context->stagedWriteFileBacked && !context->stagedWritePath.isEmpty()) {
-      QFile::remove(context->stagedWritePath);
+    if (node->stagedWriteFileBacked && !node->stagedWritePath.isEmpty()) {
+      QFile::remove(node->stagedWritePath);
     }
-    context->stagedWriteActive = true;
-    context->stagedWriteDirty = context->entry.sizeBytes != 0;
-    context->stagedWriteData.clear();
-    context->stagedWritePath.clear();
-    context->stagedWriteFileBacked = false;
-    context->entry.sizeBytes = 0;
-    fillFileInfo(context->entry, info);
+    node->stagedWriteActive = true;
+    node->stagedWriteDirty = node->entry.sizeBytes != 0;
+    node->stagedWriteData.clear();
+    node->stagedWritePath.clear();
+    node->stagedWriteFileBacked = false;
+    node->entry.sizeBytes = 0;
+    fillFileInfo(node->entry, info);
     return STATUS_SUCCESS;
   }
 
-  NTSTATUS writeFile(FileContext *context, const void *buffer, uint64_t offset,
-                     ULONG length, BOOLEAN writeToEndOfFile, PULONG transferred,
+  NTSTATUS writeFile(FileNode *node, const void *buffer, uint64_t offset,
+                     ULONG length, BOOLEAN writeToEndOfFile,
+                     BOOLEAN constrainedIo, PULONG transferred,
                      FSP_FSCTL_FILE_INFO *info) {
     *transferred = 0;
     if (readOnly_) {
@@ -986,33 +1248,45 @@ public:
     }
     QString directoryName;
     QString fileName;
-    if (!context || context->entry.directory ||
-        !splitMutableFilePath(context->entry.path, &directoryName, &fileName)) {
+    if (!node || node->entry.directory ||
+        !splitMutableFilePath(node->entry.path, &directoryName, &fileName)) {
       return STATUS_NOT_SUPPORTED;
     }
+    if (constrainedIo) {
+      // Paging/constrained I/O must never change the file size: clip to the
+      // current end of file, and treat writes at or past it as no-ops.
+      const uint64_t currentSize = node->entry.sizeBytes;
+      if (offset >= currentSize) {
+        fillFileInfo(node->entry, info);
+        return STATUS_SUCCESS;
+      }
+      length = static_cast<ULONG>(
+          std::min<uint64_t>(length, currentSize - offset));
+      writeToEndOfFile = FALSE;
+    }
     if (length == 0) {
-      fillFileInfo(context->entry, info);
+      fillFileInfo(node->entry, info);
       return STATUS_SUCCESS;
     }
 
     QByteArray data;
     const bool staged =
-        context->createdByThisHandle || context->stagedWriteActive;
+        node->createdByCreate || node->stagedWriteActive;
     NTSTATUS status = STATUS_SUCCESS;
     if (staged) {
-      status = ensureStagedWriteData(context);
+      status = ensureStagedWriteData(node);
       if (!NT_SUCCESS(status)) {
         return status;
       }
-      data = context->stagedWriteData;
+      data = node->stagedWriteData;
     } else {
-      status = readMutableBytes(context->entry, &data);
+      status = readMutableBytes(node->entry, &data);
       if (!NT_SUCCESS(status)) {
         return status;
       }
     }
-    const uint64_t stagedSize = context->stagedWriteFileBacked
-                                    ? context->entry.sizeBytes
+    const uint64_t stagedSize = node->stagedWriteFileBacked
+                                    ? node->entry.sizeBytes
                                     : static_cast<uint64_t>(data.size());
     const uint64_t writeOffset = writeToEndOfFile ? stagedSize : offset;
     if (length > std::numeric_limits<uint64_t>::max() - writeOffset) {
@@ -1020,23 +1294,23 @@ public:
     }
     const uint64_t requiredSize = writeOffset + length;
     if (staged && rawTarget_ &&
-        (context->stagedWriteFileBacked ||
+        (node->stagedWriteFileBacked ||
          requiredSize > kDefaultMaxMutationBytes)) {
-      status = ensureFileBackedStage(context, data);
+      status = ensureFileBackedStage(node, data);
       if (!NT_SUCCESS(status)) {
         return status;
       }
       status =
-          writeStagedFile(context, buffer, writeOffset, length, requiredSize);
+          writeStagedFile(node, buffer, writeOffset, length, requiredSize);
       if (!NT_SUCCESS(status)) {
         return status;
       }
-      context->stagedWriteActive = true;
-      context->stagedWriteDirty = true;
-      context->entry.sizeBytes =
-          std::max<uint64_t>(context->entry.sizeBytes, requiredSize);
+      node->stagedWriteActive = true;
+      node->stagedWriteDirty = true;
+      node->entry.sizeBytes =
+          std::max<uint64_t>(node->entry.sizeBytes, requiredSize);
       *transferred = length;
-      fillFileInfo(context->entry, info);
+      fillFileInfo(node->entry, info);
       return STATUS_SUCCESS;
     }
     if (writeOffset > kDefaultMaxMutationBytes ||
@@ -1052,106 +1326,110 @@ public:
     std::memcpy(data.data() + writeOffset, buffer, length);
 
     if (staged) {
-      context->stagedWriteData = data;
-      context->stagedWriteActive = true;
-      context->stagedWriteDirty = true;
-      context->entry.sizeBytes = static_cast<uint64_t>(data.size());
+      node->stagedWriteData = data;
+      node->stagedWriteActive = true;
+      node->stagedWriteDirty = true;
+      node->entry.sizeBytes = static_cast<uint64_t>(data.size());
       *transferred = length;
-      fillFileInfo(context->entry, info);
+      fillFileInfo(node->entry, info);
       return STATUS_SUCCESS;
     }
 
-    status = commitFileWrite(context->entry.path, data, &context->entry);
+    status = commitFileWrite(node->entry.path, data, &node->entry);
     if (NT_SUCCESS(status)) {
       *transferred = length;
-      fillFileInfo(context->entry, info);
+      fillFileInfo(node->entry, info);
     }
     return status;
   }
 
-  NTSTATUS setFileSize(FileContext *context, uint64_t newSize,
+  NTSTATUS setFileSize(FileNode *node, uint64_t newSize,
                        BOOLEAN setAllocationSize, FSP_FSCTL_FILE_INFO *info) {
     if (readOnly_) {
       return STATUS_MEDIA_WRITE_PROTECTED;
     }
     QString directoryName;
     QString fileName;
-    if (!context || context->entry.directory ||
-        !splitMutableFilePath(context->entry.path, &directoryName, &fileName)) {
+    if (!node || node->entry.directory ||
+        !splitMutableFilePath(node->entry.path, &directoryName, &fileName)) {
       return STATUS_NOT_SUPPORTED;
     }
     const bool staged =
-        context->createdByThisHandle || context->stagedWriteActive;
+        node->createdByCreate || node->stagedWriteActive;
     if (newSize > kDefaultMaxMutationBytes && !(staged && rawTarget_)) {
       return STATUS_FILE_TOO_LARGE;
     }
-    if (setAllocationSize && newSize >= context->entry.sizeBytes) {
-      fillFileInfo(context->entry, info);
+    if (setAllocationSize && newSize >= node->entry.sizeBytes) {
+      fillFileInfo(node->entry, info);
       return STATUS_SUCCESS;
     }
 
     QByteArray data;
     NTSTATUS status = STATUS_SUCCESS;
     if (staged) {
-      status = ensureStagedWriteData(context);
+      status = ensureStagedWriteData(node);
       if (!NT_SUCCESS(status)) {
         return status;
       }
-      if (rawTarget_ && (context->stagedWriteFileBacked ||
+      if (rawTarget_ && (node->stagedWriteFileBacked ||
                          newSize > kDefaultMaxMutationBytes)) {
-        status = ensureFileBackedStage(context, context->stagedWriteData);
+        status = ensureFileBackedStage(node, node->stagedWriteData);
         if (!NT_SUCCESS(status)) {
           return status;
         }
-        QFile file(context->stagedWritePath);
+        QFile file(node->stagedWritePath);
         if (!file.open(QIODevice::ReadWrite) ||
             !file.resize(static_cast<qint64>(newSize))) {
           return STATUS_ACCESS_DENIED;
         }
-        context->stagedWriteActive = true;
-        context->stagedWriteDirty = true;
-        context->entry.sizeBytes = newSize;
-        fillFileInfo(context->entry, info);
+        node->stagedWriteActive = true;
+        node->stagedWriteDirty = true;
+        node->entry.sizeBytes = newSize;
+        fillFileInfo(node->entry, info);
         return STATUS_SUCCESS;
       }
-      data = context->stagedWriteData;
+      data = node->stagedWriteData;
     } else {
-      status = readMutableBytes(context->entry, &data);
+      status = readMutableBytes(node->entry, &data);
       if (!NT_SUCCESS(status)) {
         return status;
       }
     }
     data.resize(static_cast<qsizetype>(newSize));
     if (staged) {
-      context->stagedWriteData = data;
-      context->stagedWriteActive = true;
-      context->stagedWriteDirty = true;
-      context->entry.sizeBytes = static_cast<uint64_t>(data.size());
-      fillFileInfo(context->entry, info);
+      node->stagedWriteData = data;
+      node->stagedWriteActive = true;
+      node->stagedWriteDirty = true;
+      node->entry.sizeBytes = static_cast<uint64_t>(data.size());
+      fillFileInfo(node->entry, info);
       return STATUS_SUCCESS;
     }
-    status = commitFileWrite(context->entry.path, data, &context->entry);
+    status = commitFileWrite(node->entry.path, data, &node->entry);
     if (NT_SUCCESS(status)) {
-      fillFileInfo(context->entry, info);
+      fillFileInfo(node->entry, info);
     }
     return status;
   }
 
-  NTSTATUS canDelete(const FileContext *context) {
+  NTSTATUS canDelete(const FileNode *node) {
     if (readOnly_) {
       return STATUS_MEDIA_WRITE_PROTECTED;
     }
-    if (!context) {
+    if (!node) {
       return STATUS_NOT_SUPPORTED;
     }
-    if (context->entry.directory) {
+    if (node->entry.directory) {
       QString directoryName;
-      if (!splitMutableRootDirectoryPath(context->entry.path, &directoryName)) {
+      if (!splitMutableRootDirectoryPath(node->entry.path, &directoryName)) {
         return STATUS_NOT_SUPPORTED;
       }
       QMutexLocker locker(&ioMutex_);
+      const NTSTATUS readerStatus = ensureReaderNoLock();
+      if (!NT_SUCCESS(readerStatus)) {
+        return readerStatus;
+      }
       const auto listing =
-          readerSession_->listDirectory(context->entry.path, 1);
+          readerSession_->listDirectory(node->entry.path, 1);
       if (!listing.ok || !listing.blockers.isEmpty()) {
         return STATUS_ACCESS_DENIED;
       }
@@ -1160,59 +1438,59 @@ public:
     }
     QString directoryName;
     QString fileName;
-    if (!splitMutableFilePath(context->entry.path, &directoryName, &fileName)) {
+    if (!splitMutableFilePath(node->entry.path, &directoryName, &fileName)) {
       return STATUS_NOT_SUPPORTED;
     }
     return STATUS_SUCCESS;
   }
 
-  NTSTATUS deleteFile(FileContext *context) {
+  NTSTATUS deleteFile(FileNode *node) {
     if (readOnly_) {
       return STATUS_MEDIA_WRITE_PROTECTED;
     }
-    if (!context) {
+    if (!node) {
       return STATUS_NOT_SUPPORTED;
     }
     trace(QStringLiteral("Delete %1 directory=%2")
-              .arg(context->entry.path)
-              .arg(context->entry.directory));
-    if (!context->entry.directory) {
-      discardStagedWrite(context);
+              .arg(node->entry.path)
+              .arg(node->entry.directory));
+    if (!node->entry.directory) {
+      discardStagedWrite(node);
     }
-    if (context->entry.directory) {
+    if (node->entry.directory) {
       QString parentDirectoryPath;
       QString directoryName;
-      if (!splitDirectoryCreatePath(context->entry.path, &parentDirectoryPath,
+      if (!splitDirectoryCreatePath(node->entry.path, &parentDirectoryPath,
                                     &directoryName)) {
         return STATUS_NOT_SUPPORTED;
       }
-      return commitDirectoryDelete(context->entry.path);
+      return commitDirectoryDelete(node->entry.path);
     }
     QString directoryName;
     QString fileName;
-    if (!splitMutableFilePath(context->entry.path, &directoryName, &fileName)) {
+    if (!splitMutableFilePath(node->entry.path, &directoryName, &fileName)) {
       return STATUS_NOT_SUPPORTED;
     }
-    return commitFileDelete(context->entry.path);
+    return commitFileDelete(node->entry.path);
   }
 
-  NTSTATUS renameFile(FileContext *context, const QString &oldPath,
+  NTSTATUS renameFile(FileNode *node, const QString &oldPath,
                       const QString &newPath, bool replaceIfExists) {
     if (readOnly_) {
       return STATUS_MEDIA_WRITE_PROTECTED;
     }
     const QString normalizedOld = normalizeApfsPath(oldPath);
     const QString normalizedNew = normalizeApfsPath(newPath);
-    if (!context) {
+    if (!node) {
       return STATUS_NOT_SUPPORTED;
     }
-    if (context->stagedWriteDirty) {
-      const NTSTATUS flushStatus = flushFile(context, nullptr);
+    if (node->stagedWriteDirty) {
+      const NTSTATUS flushStatus = flushFile(node, nullptr);
       if (!NT_SUCCESS(flushStatus)) {
         return flushStatus;
       }
     }
-    if (context->entry.directory) {
+    if (node->entry.directory) {
       QString oldParentDirectoryPath;
       QString oldDirectoryName;
       QString newParentDirectoryPath;
@@ -1224,13 +1502,25 @@ public:
         return STATUS_NOT_SUPPORTED;
       }
       if (replaceIfExists) {
-        return STATUS_ACCESS_DENIED;
+        // MoveFileEx(MOVEFILE_REPLACE_EXISTING) sets this even when the
+        // target is absent; only an existing, different target is refused
+        // (replacing a directory is not supported).
+        ResolvedEntry existing;
+        const NTSTATUS existingStatus = resolvePath(normalizedNew, &existing);
+        if (NT_SUCCESS(existingStatus)) {
+          if (existing.objectId != node->entry.objectId) {
+            return STATUS_ACCESS_DENIED;
+          }
+        } else if (existingStatus != STATUS_OBJECT_NAME_NOT_FOUND) {
+          return existingStatus;
+        }
       }
       ResolvedEntry updated;
       NTSTATUS status =
           commitDirectoryRename(normalizedOld, normalizedNew, &updated);
       if (NT_SUCCESS(status)) {
-        context->entry = updated;
+        node->entry = updated;
+        rekeyNode(node, normalizedOld, normalizedNew, true);
       }
       return status;
     }
@@ -1249,11 +1539,8 @@ public:
         if (existing.directory) {
           return STATUS_ACCESS_DENIED;
         }
-        if (existing.objectId != context->entry.objectId) {
-          const NTSTATUS deleteStatus = commitFileDelete(normalizedNew);
-          if (!NT_SUCCESS(deleteStatus)) {
-            return deleteStatus;
-          }
+        if (existing.objectId != node->entry.objectId) {
+          return replaceFileByRename(node, normalizedOld, normalizedNew);
         }
       } else if (existingStatus != STATUS_OBJECT_NAME_NOT_FOUND) {
         return existingStatus;
@@ -1263,27 +1550,137 @@ public:
     ResolvedEntry updated;
     NTSTATUS status = commitFileRename(normalizedOld, normalizedNew, &updated);
     if (NT_SUCCESS(status)) {
-      context->entry = updated;
+      node->entry = updated;
+      rekeyNode(node, normalizedOld, normalizedNew, false);
     }
     return status;
   }
 
+  // Rename-over-existing without a core primitive for it. The target is first
+  // moved aside to a hidden unique name in its own directory, so a failure of
+  // the main rename can put it back instead of losing the user's file.
+  NTSTATUS replaceFileByRename(FileNode *node, const QString &normalizedOld,
+                               const QString &normalizedNew) {
+    const QString asidePath = normalizeApfsPath(
+        parentPath(normalizedNew) + QStringLiteral("/.apfs-replace-%1.tmp").arg(
+            QUuid::createUuid().toString(QUuid::Id128)));
+    ResolvedEntry aside;
+    NTSTATUS status = commitFileRename(normalizedNew, asidePath, &aside);
+    if (!NT_SUCCESS(status)) {
+      trace(QStringLiteral("replace: moving target aside failed %1 -> %2")
+                .arg(normalizedNew, asidePath));
+      return status;
+    }
+
+    ResolvedEntry updated;
+    status = commitFileRename(normalizedOld, normalizedNew, &updated);
+    if (!NT_SUCCESS(status)) {
+      ResolvedEntry restored;
+      const NTSTATUS restoreStatus =
+          commitFileRename(asidePath, normalizedNew, &restored);
+      if (!NT_SUCCESS(restoreStatus)) {
+        trace(QStringLiteral("replace: rename failed and restoring the "
+                             "original target failed; it is preserved at %1")
+                  .arg(asidePath));
+      }
+      return status;
+    }
+    node->entry = updated;
+    rekeyNode(node, normalizedOld, normalizedNew, false);
+
+    const NTSTATUS deleteStatus = commitFileDelete(asidePath);
+    if (!NT_SUCCESS(deleteStatus)) {
+      // The rename itself succeeded; only the replaced copy lingers.
+      trace(QStringLiteral("replace: removing replaced target %1 failed "
+                           "status=0x%2")
+                .arg(asidePath)
+                .arg(static_cast<quint32>(deleteStatus), 8, 16,
+                     QLatin1Char('0')));
+    }
+    return STATUS_SUCCESS;
+  }
+
+  // Moves a renamed node (and, for directories, any cached descendants) to its
+  // new key. A stale node already at the destination is detached so it can
+  // never be joined or flushed over the renamed file.
+  void rekeyNode(FileNode *node, const QString &oldPath, const QString &newPath,
+                 bool directory) {
+    QMutexLocker locker(&contextMutex_);
+    std::shared_ptr<FileNode> self;
+    const auto current = nodes_.constFind(node->key);
+    if (current != nodes_.cend() && current->get() == node) {
+      self = *current;
+      nodes_.erase(current);
+    }
+    const auto occupant = nodes_.constFind(newPath);
+    if (occupant != nodes_.cend()) {
+      if (*occupant && occupant->get() != node) {
+        (*occupant)->detached = true;
+      }
+      nodes_.erase(occupant);
+    }
+    if (directory) {
+      // WinFsp refuses to rename a directory with open descendants; any left
+      // here are cleaned-up handles awaiting Close. Detach them rather than
+      // touch their entries without their locks.
+      const QString prefix = oldPath + QLatin1Char('/');
+      for (auto it = nodes_.begin(); it != nodes_.end();) {
+        if (it.key().startsWith(prefix)) {
+          if (it.value()) {
+            it.value()->detached = true;
+          }
+          it = nodes_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+    node->key = newPath;
+    if (self && !self->detached) {
+      nodes_.insert(newPath, self);
+    }
+  }
+
+  // Forgets a deleted node so a later Create/Open of the same name starts
+  // from a fresh node.
+  void detachNode(FileNode *node, bool directory) {
+    QMutexLocker locker(&contextMutex_);
+    const auto found = nodes_.constFind(node->key);
+    if (found != nodes_.cend() && found->get() == node) {
+      nodes_.erase(found);
+    }
+    node->detached = true;
+    if (directory) {
+      const QString prefix = node->key + QLatin1Char('/');
+      for (auto it = nodes_.begin(); it != nodes_.end();) {
+        if (it.key().startsWith(prefix)) {
+          if (it.value()) {
+            it.value()->detached = true;
+          }
+          it = nodes_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+  }
+
 #if defined(FSP_FILE_SYSTEM_INTERFACE_HAS_CREATE_HARD_LINK)
-  NTSTATUS createHardLink(FileContext *context, const QString &newPath,
+  NTSTATUS createHardLink(FileNode *node, const QString &newPath,
                           bool replaceIfExists,
                           FSP_FSCTL_FILE_INFO *fileInfo) {
     if (readOnly_) {
       return STATUS_MEDIA_WRITE_PROTECTED;
     }
-    if (!context || context->entry.directory || !context->entry.regularFile ||
-        context->entry.symlink) {
+    if (!node || node->entry.directory || !node->entry.regularFile ||
+        node->entry.symlink) {
       return STATUS_NOT_SUPPORTED;
     }
     if (replaceIfExists) {
       return STATUS_NOT_SUPPORTED;
     }
-    if (context->stagedWriteDirty) {
-      const NTSTATUS flushStatus = flushFile(context, nullptr);
+    if (node->stagedWriteDirty) {
+      const NTSTATUS flushStatus = flushFile(node, nullptr);
       if (!NT_SUCCESS(flushStatus)) {
         return flushStatus;
       }
@@ -1291,88 +1688,85 @@ public:
 
     ResolvedEntry linked;
     const NTSTATUS status =
-        commitFileHardLink(context->entry.path, newPath, &linked);
+        commitFileHardLink(node->entry.path, newPath, &linked);
     if (!NT_SUCCESS(status)) {
       return status;
     }
-    context->entry.hardLinks = linked.hardLinks;
-    updateOpenContextHardLinks(context->entry.objectId, linked.hardLinks);
-    fillFileInfo(context->entry, fileInfo);
+    node->entry.hardLinks = linked.hardLinks;
+    updateOpenContextHardLinks(node, node->entry.objectId, linked.hardLinks);
+    fillFileInfo(node->entry, fileInfo);
     return STATUS_SUCCESS;
   }
 #endif
 
-  NTSTATUS flushFile(FileContext *context, FSP_FSCTL_FILE_INFO *info) {
-    if (!context) {
+  NTSTATUS flushFile(FileNode *node, FSP_FSCTL_FILE_INFO *info) {
+    if (!node) {
       return STATUS_INVALID_PARAMETER;
     }
-    if (!context->stagedWriteDirty) {
+    if (!node->stagedWriteDirty) {
       if (info) {
-        fillFileInfo(context->entry, info);
+        fillFileInfo(node->entry, info);
       }
       return STATUS_SUCCESS;
     }
     if (readOnly_) {
       return STATUS_MEDIA_WRITE_PROTECTED;
     }
-    if (context->entry.directory || context->deletePending) {
+    if (node->entry.directory || node->deletePending) {
       if (info) {
-        fillFileInfo(context->entry, info);
+        fillFileInfo(node->entry, info);
       }
       return STATUS_SUCCESS;
     }
     trace(QStringLiteral("StagedFlush %1 bytes=%2 file_backed=%3")
-              .arg(context->entry.path)
-              .arg(context->entry.sizeBytes)
-              .arg(context->stagedWriteFileBacked));
+              .arg(node->entry.path)
+              .arg(node->entry.sizeBytes)
+              .arg(node->stagedWriteFileBacked));
     NTSTATUS status =
-        context->stagedWriteFileBacked
-            ? commitFileWriteFromPath(context->entry.path,
-                                      context->stagedWritePath,
-                                      context->entry.sizeBytes, &context->entry)
-            : commitFileWrite(context->entry.path, context->stagedWriteData,
-                              &context->entry);
+        node->stagedWriteFileBacked
+            ? commitFileWriteFromPath(node->entry.path,
+                                      node->stagedWritePath,
+                                      node->entry.sizeBytes, &node->entry)
+            : commitFileWrite(node->entry.path, node->stagedWriteData,
+                              &node->entry);
     trace(QStringLiteral("StagedFlushDone status=0x%1")
               .arg(static_cast<quint32>(status), 8, 16, QLatin1Char('0')));
     if (NT_SUCCESS(status)) {
-      context->stagedWriteDirty = false;
-      context->stagedWriteActive = false;
-      if (context->stagedWriteFileBacked) {
-        QFile::remove(context->stagedWritePath);
-      }
-      context->stagedWritePath.clear();
-      context->stagedWriteFileBacked = false;
-      context->stagedWriteData.clear();
+      // Keep the (now clean) stage while handles remain open: other handles
+      // of this node keep reading and writing it without re-reading the file
+      // (which is impossible for large raw-target stages). The last Close
+      // discards it.
+      node->stagedWriteDirty = false;
       if (info) {
-        fillFileInfo(context->entry, info);
+        fillFileInfo(node->entry, info);
       }
     }
     return status;
   }
 
-  NTSTATUS setBasicInfoCallback(FileContext *context, UINT32 fileAttributes,
+  NTSTATUS setBasicInfoCallback(FileNode *node, UINT32 fileAttributes,
                                 UINT64 creationTime, UINT64 lastAccessTime,
                                 UINT64 lastWriteTime, UINT64 changeTime,
                                 FSP_FSCTL_FILE_INFO *fileInfo) {
-    return setBasicInfo(context, fileAttributes, creationTime, lastAccessTime,
+    return setBasicInfo(node, fileAttributes, creationTime, lastAccessTime,
                         lastWriteTime, changeTime, fileInfo);
   }
 
-  NTSTATUS setSecurityCallback(FileContext *context,
+  NTSTATUS setSecurityCallback(FileNode *node,
                                SECURITY_INFORMATION securityInformation,
                                PSECURITY_DESCRIPTOR modificationDescriptor) {
-    return setSecurity(context, securityInformation, modificationDescriptor);
+    return setSecurity(node, securityInformation, modificationDescriptor);
   }
 
-  NTSTATUS getEaCallback(FileContext *context, PFILE_FULL_EA_INFORMATION ea,
+  NTSTATUS getEaCallback(FileNode *node, PFILE_FULL_EA_INFORMATION ea,
                          ULONG eaLength, PULONG bytesTransferred) {
-    return getEa(context, ea, eaLength, bytesTransferred);
+    return getEa(node, ea, eaLength, bytesTransferred);
   }
 
-  NTSTATUS setEaCallback(FSP_FILE_SYSTEM *fileSystem, FileContext *context,
+  NTSTATUS setEaCallback(FSP_FILE_SYSTEM *fileSystem, FileNode *node,
                          PFILE_FULL_EA_INFORMATION ea, ULONG eaLength,
                          FSP_FSCTL_FILE_INFO *fileInfo) {
-    return setEa(fileSystem, context, ea, eaLength, fileInfo);
+    return setEa(fileSystem, node, ea, eaLength, fileInfo);
   }
 
   NTSTATUS getReparsePointByNameCallback(const QString &path, PVOID buffer,
@@ -1380,19 +1774,19 @@ public:
     return getReparsePointByName(path, buffer, size);
   }
 
-  NTSTATUS getReparsePointCallback(const FileContext *context, PVOID buffer,
+  NTSTATUS getReparsePointCallback(const FileNode *node, PVOID buffer,
                                    PSIZE_T size) {
-    return getReparsePoint(context, buffer, size);
+    return getReparsePoint(node, buffer, size);
   }
 
-  NTSTATUS setReparsePointCallback(FileContext *context, PVOID buffer,
+  NTSTATUS setReparsePointCallback(FileNode *node, PVOID buffer,
                                    SIZE_T size) {
-    return setReparsePoint(context, buffer, size);
+    return setReparsePoint(node, buffer, size);
   }
 
-  NTSTATUS deleteReparsePointCallback(FileContext *context, PVOID buffer,
+  NTSTATUS deleteReparsePointCallback(FileNode *node, PVOID buffer,
                                       SIZE_T size) {
-    return deleteReparsePoint(context, buffer, size);
+    return deleteReparsePoint(node, buffer, size);
   }
 
 private:
@@ -1440,28 +1834,28 @@ private:
     return STATUS_SUCCESS;
   }
 
-  QString stagedTempPath(const FileContext *context) const {
+  QString stagedTempPath(const FileNode *node) const {
     return QDir::temp().filePath(
         QStringLiteral("apfs-winfs-stage-%1-%2.tmp")
-            .arg(context ? context->handleId : 0)
+            .arg(node ? node->nodeId : 0)
             .arg(QUuid::createUuid().toString(QUuid::Id128)));
   }
 
-  NTSTATUS ensureFileBackedStage(FileContext *context,
+  NTSTATUS ensureFileBackedStage(FileNode *node,
                                  const QByteArray &initialData) const {
-    if (!context || context->entry.directory) {
+    if (!node || node->entry.directory) {
       return STATUS_NOT_SUPPORTED;
     }
-    if (context->stagedWriteFileBacked) {
+    if (node->stagedWriteFileBacked) {
       return STATUS_SUCCESS;
     }
     const uint64_t initialSize = static_cast<uint64_t>(initialData.size());
     const uint64_t targetSize =
-        std::max<uint64_t>(context->entry.sizeBytes, initialSize);
+        std::max<uint64_t>(node->entry.sizeBytes, initialSize);
     if (!fitsQint64(targetSize)) {
       return STATUS_FILE_TOO_LARGE;
     }
-    const QString path = stagedTempPath(context);
+    const QString path = stagedTempPath(node);
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly)) {
       return STATUS_ACCESS_DENIED;
@@ -1479,23 +1873,23 @@ private:
       return STATUS_ACCESS_DENIED;
     }
     file.close();
-    context->stagedWritePath = path;
-    context->stagedWriteFileBacked = true;
-    context->stagedWriteData.clear();
+    node->stagedWritePath = path;
+    node->stagedWriteFileBacked = true;
+    node->stagedWriteData.clear();
     return STATUS_SUCCESS;
   }
 
-  NTSTATUS writeStagedFile(FileContext *context, const void *buffer,
+  NTSTATUS writeStagedFile(FileNode *node, const void *buffer,
                            uint64_t offset, ULONG length,
                            uint64_t requiredSize) const {
-    if (!context || !context->stagedWriteFileBacked ||
-        context->stagedWritePath.isEmpty()) {
+    if (!node || !node->stagedWriteFileBacked ||
+        node->stagedWritePath.isEmpty()) {
       return STATUS_INVALID_PARAMETER;
     }
     if (!fitsQint64(offset) || !fitsQint64(requiredSize)) {
       return STATUS_FILE_TOO_LARGE;
     }
-    QFile file(context->stagedWritePath);
+    QFile file(node->stagedWritePath);
     if (!file.open(QIODevice::ReadWrite)) {
       return STATUS_ACCESS_DENIED;
     }
@@ -1518,50 +1912,47 @@ private:
     return STATUS_SUCCESS;
   }
 
-  NTSTATUS ensureStagedWriteData(FileContext *context) {
-    if (!context || context->entry.directory) {
+  NTSTATUS ensureStagedWriteData(FileNode *node) {
+    if (!node || node->entry.directory) {
       return STATUS_NOT_SUPPORTED;
     }
-    if (context->stagedWriteActive) {
+    if (node->stagedWriteActive) {
       return STATUS_SUCCESS;
     }
-    if (context->createdByThisHandle && context->entry.sizeBytes == 0) {
-      context->stagedWriteData.clear();
-      context->stagedWriteActive = true;
+    if (node->createdByCreate && node->entry.sizeBytes == 0) {
+      node->stagedWriteData.clear();
+      node->stagedWriteActive = true;
       return STATUS_SUCCESS;
     }
     NTSTATUS status =
-        readMutableBytes(context->entry, &context->stagedWriteData);
+        readMutableBytes(node->entry, &node->stagedWriteData);
     if (!NT_SUCCESS(status)) {
       return status;
     }
-    context->stagedWriteActive = true;
+    node->stagedWriteActive = true;
     return STATUS_SUCCESS;
   }
 
-  void discardStagedWrite(FileContext *context) const {
-    if (!context) {
+  void discardStagedWrite(FileNode *node) const {
+    if (!node) {
       return;
     }
-    if (context->stagedWriteFileBacked) {
-      QFile::remove(context->stagedWritePath);
+    if (node->stagedWriteFileBacked) {
+      QFile::remove(node->stagedWritePath);
     }
-    context->stagedWritePath.clear();
-    context->stagedWriteFileBacked = false;
-    context->stagedWriteData.clear();
-    context->stagedWriteActive = false;
-    context->stagedWriteDirty = false;
-  }
-
-  void pruneRetiredContextsNoLock() {
-    constexpr size_t kRetiredContextLimit = 4096;
-    while (retiredContexts_.size() > kRetiredContextLimit) {
-      retiredContexts_.erase(retiredContexts_.begin());
-    }
+    node->stagedWritePath.clear();
+    node->stagedWriteFileBacked = false;
+    node->stagedWriteData.clear();
+    node->stagedWriteActive = false;
+    node->stagedWriteDirty = false;
   }
 
   NTSTATUS resolvePathNoLock(const QString &normalized,
                              ResolvedEntry *resolved) {
+    const NTSTATUS readerStatus = ensureReaderNoLock();
+    if (!NT_SUCCESS(readerStatus)) {
+      return readerStatus;
+    }
     if (normalized == QStringLiteral("/")) {
       const auto root = readerSession_->debugFile(normalized);
       if (!root.ok || !root.blockers.isEmpty()) {
@@ -1592,10 +1983,15 @@ private:
       return STATUS_SUCCESS;
     }
 
-    const auto listing = readerSession_->listDirectory(
-        parentPath(normalized), sak::kPartitionApfsDefaultBrowseEntryLimit);
+    const auto listing =
+        readerSession_->listDirectory(parentPath(normalized), kUnlimitedListing);
     if (!listing.blockers.isEmpty()) {
       return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+    if (listingTruncated(listing)) {
+      trace(QStringLiteral("parent listing truncated while resolving %1")
+                .arg(normalized));
+      return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     const QString wanted = baseName(normalized);
@@ -1704,6 +2100,31 @@ private:
     }
   }
 
+  // Every reader use goes through this: a failed post-commit reload leaves
+  // readerSession_ null, and the next callback retries instead of crashing.
+  NTSTATUS ensureReaderNoLock() {
+    if (readerSession_) {
+      return STATUS_SUCCESS;
+    }
+    QString reloadError;
+    const NTSTATUS status = reloadTargetNoLock(&reloadError);
+    if (!NT_SUCCESS(status) || !readerSession_) {
+      trace(QStringLiteral("reader unavailable: %1").arg(reloadError));
+      return STATUS_DEVICE_NOT_READY;
+    }
+    return STATUS_SUCCESS;
+  }
+
+  void reloadAfterReplaceFailureNoLock() {
+    QString reloadError;
+    const NTSTATUS status = reloadTargetNoLock(&reloadError);
+    if (!NT_SUCCESS(status)) {
+      trace(QStringLiteral("reload after replace failure failed: %1; reader "
+                           "stays offline until the next successful reload")
+                .arg(reloadError));
+    }
+  }
+
   NTSTATUS reloadTargetNoLock(QString *error = nullptr) {
     QString openError;
     auto newDevice = sak::openFileOrRawDeviceReadOnly(target_, &openError);
@@ -1744,10 +2165,11 @@ private:
     readerSession_.reset();
     device_ = std::move(newDevice);
     readerSession_ = std::move(newReaderSession);
-    totalBytes_ = detection->total_bytes;
-    freeBytes_ = detection->free_bytes;
     targetContainerBytes_ =
         detection->total_bytes != 0 ? detection->total_bytes : size;
+    QMutexLocker volumeLocker(&volumeInfoMutex_);
+    totalBytes_ = detection->total_bytes;
+    freeBytes_ = detection->free_bytes;
     if (!root.volume_name.trimmed().isEmpty()) {
       volumeLabel_ = root.volume_name.trimmed().left(32);
     }
@@ -1807,7 +2229,7 @@ private:
     if (blockers.contains(QStringLiteral("exceeds"), Qt::CaseInsensitive)) {
       return STATUS_FILE_TOO_LARGE;
     }
-    if (blockers.contains(QStringLiteral("empty"), Qt::CaseInsensitive)) {
+    if (blockers.contains(QStringLiteral("not empty"), Qt::CaseInsensitive)) {
       return STATUS_DIRECTORY_NOT_EMPTY;
     }
     return STATUS_ACCESS_DENIED;
@@ -1855,7 +2277,7 @@ private:
         QString replaceError;
         if (!replaceTargetWithTempNoLock(tempPath, &replaceError)) {
           trace(QStringLiteral("write replace failed: %1").arg(replaceError));
-          reloadTargetNoLock();
+          reloadAfterReplaceFailureNoLock();
           return STATUS_ACCESS_DENIED;
         }
         maybeExitForTestFault(kTestFaultAfterImageReplace, normalized,
@@ -1969,7 +2391,7 @@ private:
         QString replaceError;
         if (!replaceTargetWithTempNoLock(tempPath, &replaceError)) {
           trace(QStringLiteral("delete replace failed: %1").arg(replaceError));
-          reloadTargetNoLock();
+          reloadAfterReplaceFailureNoLock();
           return STATUS_ACCESS_DENIED;
         }
       } else {
@@ -2025,7 +2447,7 @@ private:
         if (!replaceTargetWithTempNoLock(tempPath, &replaceError)) {
           trace(QStringLiteral("directory create replace failed: %1")
                     .arg(replaceError));
-          reloadTargetNoLock();
+          reloadAfterReplaceFailureNoLock();
           return STATUS_ACCESS_DENIED;
         }
       } else {
@@ -2085,7 +2507,7 @@ private:
         if (!replaceTargetWithTempNoLock(tempPath, &replaceError)) {
           trace(QStringLiteral("directory delete replace failed: %1")
                     .arg(replaceError));
-          reloadTargetNoLock();
+          reloadAfterReplaceFailureNoLock();
           return STATUS_ACCESS_DENIED;
         }
       } else {
@@ -2151,7 +2573,7 @@ private:
         if (!replaceTargetWithTempNoLock(tempPath, &replaceError)) {
           trace(QStringLiteral("directory rename replace failed: %1")
                     .arg(replaceError));
-          reloadTargetNoLock();
+          reloadAfterReplaceFailureNoLock();
           return STATUS_ACCESS_DENIED;
         }
       } else {
@@ -2239,7 +2661,7 @@ private:
         QString replaceError;
         if (!replaceTargetWithTempNoLock(tempPath, &replaceError)) {
           trace(QStringLiteral("rename replace failed: %1").arg(replaceError));
-          reloadTargetNoLock();
+          reloadAfterReplaceFailureNoLock();
           return STATUS_ACCESS_DENIED;
         }
       } else {
@@ -2308,7 +2730,7 @@ private:
         if (!replaceTargetWithTempNoLock(tempPath, &replaceError)) {
           trace(QStringLiteral("hard-link replace failed: %1")
                     .arg(replaceError));
-          reloadTargetNoLock();
+          reloadAfterReplaceFailureNoLock();
           return STATUS_ACCESS_DENIED;
         }
       } else {
@@ -2331,11 +2753,15 @@ private:
     return resolvePathNoLock(normalizedLink, updated);
   }
 
-  void updateOpenContextHardLinks(uint64_t objectId, uint32_t hardLinks) {
+  // Called with `self` locked. Other nodes are never locked here (that could
+  // deadlock against a concurrent link on another alias); they pick the new
+  // count up in NodeGuard on their next callback.
+  void updateOpenContextHardLinks(const FileNode *self, uint64_t objectId,
+                                  uint32_t hardLinks) {
     QMutexLocker locker(&contextMutex_);
-    for (const auto &context : activeContexts_) {
-      if (context && context->entry.objectId == objectId) {
-        context->entry.hardLinks = hardLinks;
+    for (const auto &node : std::as_const(nodes_)) {
+      if (node && node.get() != self && node->publishedObjectId == objectId) {
+        node->pendingHardLinks = hardLinks;
       }
     }
   }
@@ -2389,7 +2815,7 @@ private:
         if (!replaceTargetWithTempNoLock(tempPath, &replaceError)) {
           trace(
               QStringLiteral("metadata replace failed: %1").arg(replaceError));
-          reloadTargetNoLock();
+          reloadAfterReplaceFailureNoLock();
           return STATUS_ACCESS_DENIED;
         }
       } else {
@@ -2412,25 +2838,25 @@ private:
     return resolvePathNoLock(normalized, updated);
   }
 
-  NTSTATUS setBasicInfo(FileContext *context, UINT32 fileAttributes,
+  NTSTATUS setBasicInfo(FileNode *node, UINT32 fileAttributes,
                         UINT64 creationTime, UINT64 lastAccessTime,
                         UINT64 lastWriteTime, UINT64 changeTime,
                         FSP_FSCTL_FILE_INFO *fileInfo) {
     if (readOnly_) {
       return STATUS_MEDIA_WRITE_PROTECTED;
     }
-    if (!context) {
+    if (!node) {
       return STATUS_INVALID_PARAMETER;
     }
-    if (context->stagedWriteDirty) {
-      const NTSTATUS flushStatus = flushFile(context, nullptr);
+    if (node->stagedWriteDirty) {
+      const NTSTATUS flushStatus = flushFile(node, nullptr);
       if (!NT_SUCCESS(flushStatus)) {
         return flushStatus;
       }
     }
     sak::PartitionApfsInodeMetadataUpdate update;
     if (fileAttributes != INVALID_FILE_ATTRIBUTES) {
-      uint32_t bsdFlags = context->entry.bsdFlags;
+      uint32_t bsdFlags = node->entry.bsdFlags;
       const auto assignFlag = [&bsdFlags, fileAttributes](uint32_t windowsFlag,
                                                           uint32_t bsdFlag) {
         if ((fileAttributes & windowsFlag) != 0) {
@@ -2442,7 +2868,7 @@ private:
       assignFlag(FILE_ATTRIBUTE_READONLY, kBsdFlagUserImmutable);
       assignFlag(FILE_ATTRIBUTE_HIDDEN, kBsdFlagUserHidden);
       assignFlag(FILE_ATTRIBUTE_ARCHIVE, kBsdFlagUserArchive);
-      update.update_bsd_flags = bsdFlags != context->entry.bsdFlags;
+      update.update_bsd_flags = bsdFlags != node->entry.bsdFlags;
       update.bsd_flags = bsdFlags;
     }
     if (creationTime != 0) {
@@ -2467,29 +2893,52 @@ private:
         update.update_changed_time;
     if (changed) {
       const NTSTATUS status =
-          commitInodeMetadata(context->entry.path, context->entry.directory,
-                              update, &context->entry);
+          commitInodeMetadata(node->entry.path, node->entry.directory,
+                              update, &node->entry);
       if (!NT_SUCCESS(status)) {
         return status;
       }
     }
-    fillFileInfo(context->entry, fileInfo);
+    fillFileInfo(node->entry, fileInfo);
     return STATUS_SUCCESS;
   }
 
-  NTSTATUS setSecurity(FileContext *context,
+  NTSTATUS setSecurity(FileNode *node,
                        SECURITY_INFORMATION securityInformation,
                        PSECURITY_DESCRIPTOR modificationDescriptor) {
     if (readOnly_) {
       return STATUS_MEDIA_WRITE_PROTECTED;
     }
-    if (!context || !modificationDescriptor) {
+    if (!node || !modificationDescriptor) {
       return STATUS_INVALID_PARAMETER;
     }
+    const bool setOwner =
+        (securityInformation & OWNER_SECURITY_INFORMATION) != 0;
+    const bool setGroup =
+        (securityInformation & GROUP_SECURITY_INFORMATION) != 0;
+    const bool setMode = (securityInformation & DACL_SECURITY_INFORMATION) != 0;
+    if (!setOwner && !setGroup && !setMode) {
+      // SACL/label-only changes have no APFS representation.
+      return STATUS_SUCCESS;
+    }
+    // Merge against this inode's own POSIX-derived descriptor, so mode bits
+    // are computed relative to the inode's real owner and group. Fall back to
+    // the volume descriptor only if the mapping is unavailable.
+    PSECURITY_DESCRIPTOR inodeDescriptor = nullptr;
+    const NTSTATUS mapStatus = FspPosixMapPermissionsToSecurityDescriptor(
+        node->entry.ownerId, node->entry.groupId,
+        static_cast<UINT32>(node->entry.inodeMode & 07777U), &inodeDescriptor);
+    PSECURITY_DESCRIPTOR base =
+        NT_SUCCESS(mapStatus) && inodeDescriptor ? inodeDescriptor
+                                                 : securityDescriptor_;
     PSECURITY_DESCRIPTOR merged = nullptr;
-    NTSTATUS status =
-        FspSetSecurityDescriptor(securityDescriptor_, securityInformation,
-                                 modificationDescriptor, &merged);
+    NTSTATUS status = FspSetSecurityDescriptor(base, securityInformation,
+                                               modificationDescriptor, &merged);
+    if (inodeDescriptor) {
+      FspDeleteSecurityDescriptor(
+          inodeDescriptor,
+          (NTSTATUS(*)())FspPosixMapPermissionsToSecurityDescriptor);
+    }
     if (!NT_SUCCESS(status)) {
       return status;
     }
@@ -2504,27 +2953,27 @@ private:
       return status;
     }
     sak::PartitionApfsInodeMetadataUpdate update;
-    update.update_inode_mode = true;
+    update.update_inode_mode = setMode;
     update.inode_mode = static_cast<uint16_t>(mode);
-    update.update_owner_id = true;
+    update.update_owner_id = setOwner;
     update.owner_id = ownerId;
-    update.update_group_id = true;
+    update.update_group_id = setGroup;
     update.group_id = groupId;
     update.update_changed_time = true;
     update.changed_time_ns = unixNsFromFileTime(currentFileTime());
-    if (context->stagedWriteDirty) {
-      const NTSTATUS flushStatus = flushFile(context, nullptr);
+    if (node->stagedWriteDirty) {
+      const NTSTATUS flushStatus = flushFile(node, nullptr);
       if (!NT_SUCCESS(flushStatus)) {
         return flushStatus;
       }
     }
-    return commitInodeMetadata(context->entry.path, context->entry.directory,
-                               update, &context->entry);
+    return commitInodeMetadata(node->entry.path, node->entry.directory,
+                               update, &node->entry);
   }
 
-  NTSTATUS getEa(FileContext *context, PFILE_FULL_EA_INFORMATION ea,
+  NTSTATUS getEa(FileNode *node, PFILE_FULL_EA_INFORMATION ea,
                  ULONG eaLength, PULONG bytesTransferred) {
-    if (!context || !bytesTransferred) {
+    if (!node || !bytesTransferred) {
       return STATUS_INVALID_PARAMETER;
     }
     *bytesTransferred = 0;
@@ -2536,7 +2985,11 @@ private:
     QVector<QPair<QString, QByteArray>> apfsAttributes;
     {
       QMutexLocker locker(&ioMutex_);
-      const auto read = readerSession_->readXattrs(context->entry.path);
+      const NTSTATUS readerStatus = ensureReaderNoLock();
+      if (!NT_SUCCESS(readerStatus)) {
+        return readerStatus;
+      }
+      const auto read = readerSession_->readXattrs(node->entry.path);
       if (!read.ok || !read.blockers.isEmpty()) {
         trace(QStringLiteral("read EAs failed: %1")
                   .arg(read.blockers.join(QStringLiteral("; "))));
@@ -2599,13 +3052,13 @@ private:
     return STATUS_SUCCESS;
   }
 
-  NTSTATUS setEa(FSP_FILE_SYSTEM *fileSystem, FileContext *context,
+  NTSTATUS setEa(FSP_FILE_SYSTEM *fileSystem, FileNode *node,
                  PFILE_FULL_EA_INFORMATION ea, ULONG eaLength,
                  FSP_FSCTL_FILE_INFO *fileInfo) {
     if (readOnly_) {
       return STATUS_MEDIA_WRITE_PROTECTED;
     }
-    if (!context || !fileInfo || (eaLength != 0 && !ea)) {
+    if (!node || !fileInfo || (eaLength != 0 && !ea)) {
       return STATUS_INVALID_PARAMETER;
     }
     EaMutationCollectContext collected;
@@ -2615,8 +3068,8 @@ private:
       return parseStatus;
     }
     if (!collected.mutations.isEmpty()) {
-      if (context->stagedWriteDirty) {
-        const NTSTATUS flushStatus = flushFile(context, nullptr);
+      if (node->stagedWriteDirty) {
+        const NTSTATUS flushStatus = flushFile(node, nullptr);
         if (!NT_SUCCESS(flushStatus)) {
           return flushStatus;
         }
@@ -2625,7 +3078,11 @@ private:
       QVector<QString> existingNames;
       {
         QMutexLocker ioLocker(&ioMutex_);
-        const auto read = readerSession_->readXattrs(context->entry.path);
+        const NTSTATUS readerStatus = ensureReaderNoLock();
+        if (!NT_SUCCESS(readerStatus)) {
+          return readerStatus;
+        }
+        const auto read = readerSession_->readXattrs(node->entry.path);
         if (!read.ok || !read.blockers.isEmpty()) {
           trace(QStringLiteral("read EAs before mutation failed: %1")
                     .arg(read.blockers.join(QStringLiteral("; "))));
@@ -2645,13 +3102,13 @@ private:
       update.changed_time_ns = unixNsFromFileTime(currentFileTime());
       update.xattr_mutations = std::move(collected.mutations);
       const NTSTATUS status =
-          commitInodeMetadata(context->entry.path, context->entry.directory,
-                              update, &context->entry);
+          commitInodeMetadata(node->entry.path, node->entry.directory,
+                              update, &node->entry);
       if (!NT_SUCCESS(status)) {
         return status;
       }
     }
-    fillFileInfo(context->entry, fileInfo);
+    fillFileInfo(node->entry, fileInfo);
     return STATUS_SUCCESS;
   }
 
@@ -2660,6 +3117,10 @@ private:
       return STATUS_NOT_A_REPARSE_POINT;
     }
     QMutexLocker locker(&ioMutex_);
+    const NTSTATUS readerStatus = ensureReaderNoLock();
+    if (!NT_SUCCESS(readerStatus)) {
+      return readerStatus;
+    }
     const auto read = readerSession_->readXattrs(entry.path);
     if (!read.ok || !read.blockers.isEmpty()) {
       trace(QStringLiteral("read symbolic-link target failed: %1")
@@ -2765,13 +3226,13 @@ private:
     return STATUS_SUCCESS;
   }
 
-  NTSTATUS getReparsePoint(const FileContext *context, PVOID buffer,
+  NTSTATUS getReparsePoint(const FileNode *node, PVOID buffer,
                            PSIZE_T size) {
-    if (!context) {
+    if (!node) {
       return STATUS_INVALID_PARAMETER;
     }
     QByteArray data;
-    const NTSTATUS status = buildSymbolicLinkReparseData(context->entry, &data);
+    const NTSTATUS status = buildSymbolicLinkReparseData(node->entry, &data);
     if (!NT_SUCCESS(status)) {
       return status;
     }
@@ -2825,7 +3286,12 @@ private:
       while (mount.endsWith(QLatin1Char('\\'))) {
         mount.chop(1);
       }
-      if (mount.isEmpty() || !parsed.startsWith(mount, Qt::CaseInsensitive)) {
+      // Require a separator boundary so C:\mnt\apfsX is not mistaken for a
+      // path under the C:\mnt\apfs mount point.
+      if (mount.isEmpty() || !parsed.startsWith(mount, Qt::CaseInsensitive) ||
+          (parsed.size() > mount.size() &&
+           parsed.at(mount.size()) != QLatin1Char('\\') &&
+           parsed.at(mount.size()) != QLatin1Char('/'))) {
         return STATUS_IO_REPARSE_TAG_NOT_HANDLED;
       }
       parsed.remove(0, mount.size());
@@ -2842,16 +3308,16 @@ private:
     return STATUS_SUCCESS;
   }
 
-  NTSTATUS setReparsePoint(FileContext *context, PVOID buffer, SIZE_T size) {
+  NTSTATUS setReparsePoint(FileNode *node, PVOID buffer, SIZE_T size) {
     if (readOnly_) {
       return STATUS_MEDIA_WRITE_PROTECTED;
     }
-    if (!context || context->entry.directory || context->entry.sizeBytes != 0) {
+    if (!node || node->entry.directory || node->entry.sizeBytes != 0) {
       return STATUS_INVALID_PARAMETER;
     }
-    if (context->entry.symlink) {
+    if (node->entry.symlink) {
       QByteArray current;
-      NTSTATUS status = buildSymbolicLinkReparseData(context->entry, &current);
+      NTSTATUS status = buildSymbolicLinkReparseData(node->entry, &current);
       if (!NT_SUCCESS(status)) {
         return status;
       }
@@ -2871,19 +3337,19 @@ private:
     update.changed_time_ns = unixNsFromFileTime(currentFileTime());
     update.update_symbolic_link_target = true;
     update.symbolic_link_target = target;
-    return commitInodeMetadata(context->entry.path, false, update,
-                               &context->entry);
+    return commitInodeMetadata(node->entry.path, false, update,
+                               &node->entry);
   }
 
-  NTSTATUS deleteReparsePoint(FileContext *context, PVOID buffer, SIZE_T size) {
+  NTSTATUS deleteReparsePoint(FileNode *node, PVOID buffer, SIZE_T size) {
     if (readOnly_) {
       return STATUS_MEDIA_WRITE_PROTECTED;
     }
-    if (!context || !context->entry.symlink) {
+    if (!node || !node->entry.symlink) {
       return STATUS_NOT_A_REPARSE_POINT;
     }
     QByteArray current;
-    NTSTATUS status = buildSymbolicLinkReparseData(context->entry, &current);
+    NTSTATUS status = buildSymbolicLinkReparseData(node->entry, &current);
     if (!NT_SUCCESS(status)) {
       return status;
     }
@@ -2896,8 +3362,8 @@ private:
     update.update_changed_time = true;
     update.changed_time_ns = unixNsFromFileTime(currentFileTime());
     update.update_symbolic_link_target = true;
-    return commitInodeMetadata(context->entry.path, false, update,
-                               &context->entry);
+    return commitInodeMetadata(node->entry.path, false, update,
+                               &node->entry);
   }
 
   NTSTATUS readMutableBytes(const ResolvedEntry &entry, QByteArray *data) {
@@ -2909,6 +3375,10 @@ private:
       return STATUS_SUCCESS;
     }
     QMutexLocker locker(&ioMutex_);
+    const NTSTATUS readerStatus = ensureReaderNoLock();
+    if (!NT_SUCCESS(readerStatus)) {
+      return readerStatus;
+    }
     const auto file = readerSession_->readFile(entry.path, entry.sizeBytes);
     if (!file.ok || !file.blockers.isEmpty()) {
       trace(QStringLiteral("read for mutation failed: %1")
@@ -2968,10 +3438,15 @@ private:
   std::unique_ptr<sak::PartitionApfsFileSystemReaderSession> readerSession_;
   mutable QMutex ioMutex_;
   mutable QMutex eaMutationMutex_;
+  // Guards nodes_, handles_ and the id counters. Never acquire a node mutex
+  // while holding it.
   mutable QMutex contextMutex_;
-  std::vector<std::unique_ptr<FileContext>> activeContexts_;
-  std::vector<std::unique_ptr<FileContext>> retiredContexts_;
+  QHash<QString, std::shared_ptr<FileNode>> nodes_;
+  std::unordered_map<FileContext *, std::unique_ptr<FileContext>> handles_;
   uint64_t nextHandleId_{1};
+  uint64_t nextNodeId_{1};
+  // Guards totalBytes_, freeBytes_ and volumeLabel_.
+  mutable QMutex volumeInfoMutex_;
   uint64_t totalBytes_{0};
   uint64_t freeBytes_{0};
   uint64_t targetContainerBytes_{0};
@@ -3056,63 +3531,58 @@ NTSTATUS FsOpen(FSP_FILE_SYSTEM *fileSystem, PWSTR fileName, UINT32, UINT32,
   if (!NT_SUCCESS(status)) {
     return status;
   }
-  auto *context = stateOf(fileSystem)->openContext(entry);
+  auto *context =
+      stateOf(fileSystem)->openHandle(entry, false, false, fileInfo);
   if (!context) {
     return STATUS_INSUFFICIENT_RESOURCES;
   }
   *fileContext = context;
-  stateOf(fileSystem)->fillFileInfo(entry, fileInfo);
   return STATUS_SUCCESS;
 }
 
 NTSTATUS FsOverwrite(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext, UINT32,
                      BOOLEAN, UINT64, FSP_FSCTL_FILE_INFO *fileInfo) {
-  auto *context = reinterpret_cast<FileContext *>(fileContext);
+  FileNode *node = nodeOf(fileContext);
+  NodeGuard guard(node);
   trace(QStringLiteral("Overwrite %1")
-            .arg(context ? context->entry.path : QStringLiteral("<null>")));
-  return stateOf(fileSystem)->overwriteFile(context, fileInfo);
+            .arg(node ? node->entry.path : QStringLiteral("<null>")));
+  return stateOf(fileSystem)->overwriteFile(node, fileInfo);
 }
 
 VOID FsCleanup(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext, PWSTR,
                ULONG flags) {
   auto *context = reinterpret_cast<FileContext *>(fileContext);
-  trace(QStringLiteral("Cleanup %1 flags=0x%2")
-            .arg(context ? context->entry.path : QStringLiteral("<null>"))
-            .arg(flags, 8, 16, QLatin1Char('0')));
-  if (context && (flags & FspCleanupDelete) != 0) {
-    context->deletePending = true;
-    const NTSTATUS status = stateOf(fileSystem)->deleteFile(context);
-    trace(QStringLiteral("CleanupDeleteDone status=0x%1")
-              .arg(static_cast<quint32>(status), 8, 16, QLatin1Char('0')));
-  } else if (context) {
-    const NTSTATUS status = stateOf(fileSystem)->flushFile(context, nullptr);
-    trace(QStringLiteral("CleanupFlushDone status=0x%1")
-              .arg(static_cast<quint32>(status), 8, 16, QLatin1Char('0')));
+  FileNode *node = nodeOf(fileContext);
+  if (!context || !node) {
+    return;
   }
+  NodeGuard guard(node);
+  trace(QStringLiteral("Cleanup %1 flags=0x%2")
+            .arg(node->entry.path)
+            .arg(flags, 8, 16, QLatin1Char('0')));
+  stateOf(fileSystem)->cleanupHandle(context, flags);
 }
 
 VOID FsClose(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext) {
   auto *context = reinterpret_cast<FileContext *>(fileContext);
-  trace(QStringLiteral("Close %1 handle=%2")
-            .arg(context ? context->entry.path : QStringLiteral("<null>"))
-            .arg(context ? context->handleId : 0));
-  stateOf(fileSystem)->closeContext(context);
+  trace(QStringLiteral("Close handle=%1").arg(context ? context->handleId : 0));
+  stateOf(fileSystem)->closeHandle(context);
 }
 
 NTSTATUS FsRead(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext, PVOID buffer,
                 UINT64 offset, ULONG length, PULONG transferred) {
   *transferred = 0;
-  const auto *context = reinterpret_cast<FileContext *>(fileContext);
-  trace(QStringLiteral("Read %1 offset=%2 length=%3")
-            .arg(context ? context->entry.path : QStringLiteral("<null>"))
-            .arg(offset)
-            .arg(length));
-  if (!context) {
+  FileNode *node = nodeOf(fileContext);
+  if (!node) {
     return STATUS_INVALID_PARAMETER;
   }
+  NodeGuard guard(node);
+  trace(QStringLiteral("Read %1 offset=%2 length=%3")
+            .arg(node->entry.path)
+            .arg(offset)
+            .arg(length));
   const NTSTATUS status =
-      stateOf(fileSystem)
-          ->readFile(context, offset, length, buffer, transferred);
+      stateOf(fileSystem)->readFile(node, offset, length, buffer, transferred);
   trace(QStringLiteral("ReadDone status=0x%1 transferred=%2")
             .arg(static_cast<quint32>(status), 8, 16, QLatin1Char('0'))
             .arg(*transferred));
@@ -3120,18 +3590,22 @@ NTSTATUS FsRead(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext, PVOID buffer,
 }
 
 NTSTATUS FsWrite(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext, PVOID buffer,
-                 UINT64 offset, ULONG length, BOOLEAN writeToEndOfFile, BOOLEAN,
-                 PULONG transferred, FSP_FSCTL_FILE_INFO *fileInfo) {
-  auto *context = reinterpret_cast<FileContext *>(fileContext);
-  trace(QStringLiteral("Write %1 offset=%2 length=%3 eof=%4")
-            .arg(context ? context->entry.path : QStringLiteral("<null>"))
+                 UINT64 offset, ULONG length, BOOLEAN writeToEndOfFile,
+                 BOOLEAN constrainedIo, PULONG transferred,
+                 FSP_FSCTL_FILE_INFO *fileInfo) {
+  *transferred = 0;
+  FileNode *node = nodeOf(fileContext);
+  NodeGuard guard(node);
+  trace(QStringLiteral("Write %1 offset=%2 length=%3 eof=%4 constrained=%5")
+            .arg(node ? node->entry.path : QStringLiteral("<null>"))
             .arg(offset)
             .arg(length)
-            .arg(writeToEndOfFile));
+            .arg(writeToEndOfFile)
+            .arg(constrainedIo));
   const NTSTATUS status =
       stateOf(fileSystem)
-          ->writeFile(context, buffer, offset, length, writeToEndOfFile,
-                      transferred, fileInfo);
+          ->writeFile(node, buffer, offset, length, writeToEndOfFile,
+                      constrainedIo, transferred, fileInfo);
   trace(QStringLiteral("WriteDone status=0x%1 transferred=%2")
             .arg(static_cast<quint32>(status), 8, 16, QLatin1Char('0'))
             .arg(*transferred));
@@ -3140,13 +3614,14 @@ NTSTATUS FsWrite(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext, PVOID buffer,
 
 NTSTATUS FsFlush(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext,
                  FSP_FSCTL_FILE_INFO *fileInfo) {
-  auto *context = reinterpret_cast<FileContext *>(fileContext);
-  trace(QStringLiteral("Flush %1")
-            .arg(context ? context->entry.path : QStringLiteral("<null>")));
-  if (!context) {
+  FileNode *node = nodeOf(fileContext);
+  if (!node) {
+    // Volume flush: nothing is cached outside per-file staging.
     return STATUS_SUCCESS;
   }
-  const NTSTATUS status = stateOf(fileSystem)->flushFile(context, fileInfo);
+  NodeGuard guard(node);
+  trace(QStringLiteral("Flush %1").arg(node->entry.path));
+  const NTSTATUS status = stateOf(fileSystem)->flushFile(node, fileInfo);
   trace(QStringLiteral("FlushDone status=0x%1")
             .arg(static_cast<quint32>(status), 8, 16, QLatin1Char('0')));
   return status;
@@ -3154,13 +3629,13 @@ NTSTATUS FsFlush(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext,
 
 NTSTATUS FsGetFileInfo(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext,
                        FSP_FSCTL_FILE_INFO *fileInfo) {
-  const auto *context = reinterpret_cast<FileContext *>(fileContext);
-  trace(QStringLiteral("GetFileInfo %1")
-            .arg(context ? context->entry.path : QStringLiteral("<null>")));
-  if (!context) {
+  FileNode *node = nodeOf(fileContext);
+  if (!node) {
     return STATUS_INVALID_PARAMETER;
   }
-  stateOf(fileSystem)->fillFileInfo(context->entry, fileInfo);
+  NodeGuard guard(node);
+  trace(QStringLiteral("GetFileInfo %1").arg(node->entry.path));
+  stateOf(fileSystem)->fillFileInfo(node->entry, fileInfo);
   return STATUS_SUCCESS;
 }
 
@@ -3168,11 +3643,12 @@ NTSTATUS FsSetBasicInfo(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext,
                         UINT32 fileAttributes, UINT64 creationTime,
                         UINT64 lastAccessTime, UINT64 lastWriteTime,
                         UINT64 changeTime, FSP_FSCTL_FILE_INFO *fileInfo) {
-  auto *context = reinterpret_cast<FileContext *>(fileContext);
+  FileNode *node = nodeOf(fileContext);
+  NodeGuard guard(node);
   trace(QStringLiteral("SetBasicInfo %1")
-            .arg(context ? context->entry.path : QStringLiteral("<null>")));
+            .arg(node ? node->entry.path : QStringLiteral("<null>")));
   return stateOf(fileSystem)
-      ->setBasicInfoCallback(context, fileAttributes, creationTime,
+      ->setBasicInfoCallback(node, fileAttributes, creationTime,
                              lastAccessTime, lastWriteTime, changeTime,
                              fileInfo);
 }
@@ -3180,20 +3656,22 @@ NTSTATUS FsSetBasicInfo(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext,
 NTSTATUS FsSetFileSize(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext,
                        UINT64 newSize, BOOLEAN setAllocationSize,
                        FSP_FSCTL_FILE_INFO *fileInfo) {
-  auto *context = reinterpret_cast<FileContext *>(fileContext);
+  FileNode *node = nodeOf(fileContext);
+  NodeGuard guard(node);
   trace(QStringLiteral("SetFileSize %1 size=%2 allocation=%3")
-            .arg(context ? context->entry.path : QStringLiteral("<null>"))
+            .arg(node ? node->entry.path : QStringLiteral("<null>"))
             .arg(newSize)
             .arg(setAllocationSize));
   return stateOf(fileSystem)
-      ->setFileSize(context, newSize, setAllocationSize, fileInfo);
+      ->setFileSize(node, newSize, setAllocationSize, fileInfo);
 }
 
 NTSTATUS FsCanDelete(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext, PWSTR) {
-  const auto *context = reinterpret_cast<FileContext *>(fileContext);
+  FileNode *node = nodeOf(fileContext);
+  NodeGuard guard(node);
   trace(QStringLiteral("CanDelete %1")
-            .arg(context ? context->entry.path : QStringLiteral("<null>")));
-  const NTSTATUS status = stateOf(fileSystem)->canDelete(context);
+            .arg(node ? node->entry.path : QStringLiteral("<null>")));
+  const NTSTATUS status = stateOf(fileSystem)->canDelete(node);
   trace(QStringLiteral("CanDeleteDone status=0x%1")
             .arg(static_cast<quint32>(status), 8, 16, QLatin1Char('0')));
   return status;
@@ -3201,12 +3679,13 @@ NTSTATUS FsCanDelete(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext, PWSTR) {
 
 NTSTATUS FsRename(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext,
                   PWSTR fileName, PWSTR newFileName, BOOLEAN replaceIfExists) {
-  auto *context = reinterpret_cast<FileContext *>(fileContext);
+  FileNode *node = nodeOf(fileContext);
+  NodeGuard guard(node);
   trace(QStringLiteral("Rename %1 -> %2 replace=%3")
             .arg(fromWide(fileName), fromWide(newFileName))
             .arg(replaceIfExists));
   return stateOf(fileSystem)
-      ->renameFile(context, fromWide(fileName), fromWide(newFileName),
+      ->renameFile(node, fromWide(fileName), fromWide(newFileName),
                    replaceIfExists != FALSE);
 }
 
@@ -3215,45 +3694,50 @@ NTSTATUS FsCreateHardLink(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext,
                           PWSTR fileName, PWSTR newFileName,
                           BOOLEAN replaceIfExists,
                           FSP_FSCTL_FILE_INFO *fileInfo) {
-  auto *context = reinterpret_cast<FileContext *>(fileContext);
+  FileNode *node = nodeOf(fileContext);
+  NodeGuard guard(node);
   trace(QStringLiteral("CreateHardLink %1 -> %2 replace=%3")
             .arg(fromWide(fileName), fromWide(newFileName))
             .arg(replaceIfExists));
   return stateOf(fileSystem)
-      ->createHardLink(context, fromWide(newFileName),
-                       replaceIfExists != FALSE, fileInfo);
+      ->createHardLink(node, fromWide(newFileName), replaceIfExists != FALSE,
+                       fileInfo);
 }
 #endif
 
 NTSTATUS FsGetSecurity(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext,
                        PSECURITY_DESCRIPTOR descriptor,
                        SIZE_T *descriptorSize) {
-  const auto *context = reinterpret_cast<FileContext *>(fileContext);
-  if (!context) {
+  FileNode *node = nodeOf(fileContext);
+  if (!node) {
     return STATUS_INVALID_PARAMETER;
   }
+  NodeGuard guard(node);
   return stateOf(fileSystem)
-      ->copySecurity(context->entry, descriptor, descriptorSize);
+      ->copySecurity(node->entry, descriptor, descriptorSize);
 }
 
 NTSTATUS FsSetSecurity(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext,
                        SECURITY_INFORMATION securityInformation,
                        PSECURITY_DESCRIPTOR modificationDescriptor) {
-  auto *context = reinterpret_cast<FileContext *>(fileContext);
-  trace(QStringLiteral("SetSecurity %1")
-            .arg(context ? context->entry.path : QStringLiteral("<null>")));
+  FileNode *node = nodeOf(fileContext);
+  NodeGuard guard(node);
+  trace(QStringLiteral("SetSecurity %1 info=0x%2")
+            .arg(node ? node->entry.path : QStringLiteral("<null>"))
+            .arg(static_cast<quint32>(securityInformation), 8, 16,
+                 QLatin1Char('0')));
   return stateOf(fileSystem)
-      ->setSecurityCallback(context, securityInformation,
-                            modificationDescriptor);
+      ->setSecurityCallback(node, securityInformation, modificationDescriptor);
 }
 
 NTSTATUS FsGetEa(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext,
                  PFILE_FULL_EA_INFORMATION ea, ULONG eaLength,
                  PULONG bytesTransferred) {
-  const NTSTATUS status =
-      stateOf(fileSystem)
-          ->getEaCallback(reinterpret_cast<FileContext *>(fileContext), ea,
-                          eaLength, bytesTransferred);
+  FileNode *node = nodeOf(fileContext);
+  NodeGuard guard(node);
+  const NTSTATUS status = stateOf(fileSystem)
+                              ->getEaCallback(node, ea, eaLength,
+                                              bytesTransferred);
   trace(QStringLiteral("GetEa status=0x%1 bytes=%2")
             .arg(static_cast<quint32>(status), 8, 16, QLatin1Char('0'))
             .arg(bytesTransferred ? *bytesTransferred : 0));
@@ -3263,11 +3747,11 @@ NTSTATUS FsGetEa(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext,
 NTSTATUS FsSetEa(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext,
                  PFILE_FULL_EA_INFORMATION ea, ULONG eaLength,
                  FSP_FSCTL_FILE_INFO *fileInfo) {
+  FileNode *node = nodeOf(fileContext);
+  NodeGuard guard(node);
   const NTSTATUS status =
       stateOf(fileSystem)
-          ->setEaCallback(fileSystem,
-                          reinterpret_cast<FileContext *>(fileContext), ea,
-                          eaLength, fileInfo);
+          ->setEaCallback(fileSystem, node, ea, eaLength, fileInfo);
   trace(QStringLiteral("SetEa status=0x%1")
             .arg(static_cast<quint32>(status), 8, 16, QLatin1Char('0')));
   return status;
@@ -3291,10 +3775,10 @@ NTSTATUS FsResolveReparsePoints(FSP_FILE_SYSTEM *fileSystem, PWSTR fileName,
 
 NTSTATUS FsGetReparsePoint(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext,
                            PWSTR, PVOID buffer, PSIZE_T size) {
+  FileNode *node = nodeOf(fileContext);
+  NodeGuard guard(node);
   const NTSTATUS status =
-      stateOf(fileSystem)
-          ->getReparsePointCallback(
-              reinterpret_cast<FileContext *>(fileContext), buffer, size);
+      stateOf(fileSystem)->getReparsePointCallback(node, buffer, size);
   trace(QStringLiteral("GetReparsePoint status=0x%1")
             .arg(static_cast<quint32>(status), 8, 16, QLatin1Char('0')));
   return status;
@@ -3302,10 +3786,10 @@ NTSTATUS FsGetReparsePoint(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext,
 
 NTSTATUS FsSetReparsePoint(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext,
                            PWSTR, PVOID buffer, SIZE_T size) {
+  FileNode *node = nodeOf(fileContext);
+  NodeGuard guard(node);
   const NTSTATUS status =
-      stateOf(fileSystem)
-          ->setReparsePointCallback(
-              reinterpret_cast<FileContext *>(fileContext), buffer, size);
+      stateOf(fileSystem)->setReparsePointCallback(node, buffer, size);
   trace(QStringLiteral("SetReparsePoint status=0x%1")
             .arg(static_cast<quint32>(status), 8, 16, QLatin1Char('0')));
   return status;
@@ -3313,10 +3797,10 @@ NTSTATUS FsSetReparsePoint(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext,
 
 NTSTATUS FsDeleteReparsePoint(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext,
                               PWSTR, PVOID buffer, SIZE_T size) {
+  FileNode *node = nodeOf(fileContext);
+  NodeGuard guard(node);
   const NTSTATUS status =
-      stateOf(fileSystem)
-          ->deleteReparsePointCallback(
-              reinterpret_cast<FileContext *>(fileContext), buffer, size);
+      stateOf(fileSystem)->deleteReparsePointCallback(node, buffer, size);
   trace(QStringLiteral("DeleteReparsePoint status=0x%1")
             .arg(static_cast<quint32>(status), 8, 16, QLatin1Char('0')));
   return status;
@@ -3326,18 +3810,23 @@ NTSTATUS FsReadDirectory(FSP_FILE_SYSTEM *fileSystem, PVOID fileContext, PWSTR,
                          PWSTR marker, PVOID buffer, ULONG length,
                          PULONG transferred) {
   *transferred = 0;
-  const auto *context = reinterpret_cast<FileContext *>(fileContext);
+  FileNode *node = nodeOf(fileContext);
+  if (!node) {
+    return STATUS_INVALID_PARAMETER;
+  }
+  ResolvedEntry directory;
+  {
+    NodeGuard guard(node);
+    directory = node->entry;
+  }
   trace(QStringLiteral("ReadDirectory %1 marker=%2 length=%3")
-            .arg(context ? context->entry.path : QStringLiteral("<null>"))
+            .arg(directory.path)
             .arg(marker ? QString::fromWCharArray(marker)
                         : QStringLiteral("<null>"))
             .arg(length));
-  if (!context) {
-    return STATUS_INVALID_PARAMETER;
-  }
   const NTSTATUS status =
       stateOf(fileSystem)
-          ->listDirectory(context->entry, marker, buffer, length, transferred);
+          ->listDirectory(directory, marker, buffer, length, transferred);
   trace(QStringLiteral("ReadDirectoryDone status=0x%1 transferred=%2")
             .arg(static_cast<quint32>(status), 8, 16, QLatin1Char('0'))
             .arg(*transferred));
@@ -3384,7 +3873,7 @@ FSP_FILE_SYSTEM_INTERFACE *apfsInterface() {
 NTSTATUS runMount(const QString &target, const QString &mountPoint,
                   uint64_t maxFileReadBytes, bool readOnly, bool allowRawWrites,
                   const QString &testFaultExitPhase,
-                  const QString &testFaultPath) {
+                  const QString &testFaultPath, HANDLE stopEvent) {
   ApfsMountState state;
   QString error;
   NTSTATUS status =
@@ -3407,6 +3896,9 @@ NTSTATUS runMount(const QString &target, const QString &mountPoint,
   // pathname. Disable that cache so link-count changes stay coherent across
   // every alias after create or delete.
   params.FileInfoTimeout = 0;
+  // FileContext is a per-handle descriptor (one Close per Open/Create), not a
+  // per-name node; shared per-name state lives in ApfsMountState::nodes_.
+  params.UmFileContextIsUserContext2 = 1;
   params.CaseSensitiveSearch = 1;
   params.CasePreservedNames = 1;
   params.UnicodeOnDisk = 1;
@@ -3445,25 +3937,57 @@ NTSTATUS runMount(const QString &target, const QString &mountPoint,
     return status;
   }
 
+  gShutdownComplete = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   SetConsoleCtrlHandler(consoleHandler, TRUE);
   status = FspFileSystemStartDispatcher(fileSystem, 0);
   if (!NT_SUCCESS(status)) {
     QTextStream(stderr) << "FspFileSystemStartDispatcher failed: 0x" << Qt::hex
                         << status << Qt::endl;
     FspFileSystemDelete(fileSystem);
+    if (gShutdownComplete) {
+      SetEvent(gShutdownComplete);
+    }
     return status;
   }
 
-  gFileSystemForSignal = fileSystem;
   QTextStream(stdout) << "mounted " << mountPoint << " as "
                       << (readOnly ? "read-only" : "read-write")
                       << " APFS volume " << state.volumeLabel() << Qt::endl;
+  QString stopReason = QStringLiteral("console control");
   while (!gStopRequested) {
-    Sleep(250);
+    if (!stopEvent) {
+      Sleep(kStopPollIntervalMs);
+      continue;
+    }
+    const DWORD wait = WaitForSingleObject(stopEvent, kStopPollIntervalMs);
+    if (wait == WAIT_OBJECT_0) {
+      stopReason = QStringLiteral("stop event");
+      break;
+    }
+    if (wait == WAIT_FAILED) {
+      trace(QStringLiteral("stop event wait failed: Win32 error %1")
+                .arg(GetLastError()));
+      Sleep(kStopPollIntervalMs);
+    }
   }
-  FspFileSystemRemoveMountPoint(fileSystem);
+  trace(QStringLiteral("Shutdown requested by %1").arg(stopReason));
+
+  // Orderly unmount: commit staged writes while the volume is still live,
+  // stop the dispatcher so no new callbacks arrive, commit anything that
+  // raced in, then remove the mount point and delete the file system.
+  int flushFailures = state.flushAllNodes();
   FspFileSystemStopDispatcher(fileSystem);
+  flushFailures += state.flushAllNodes();
+  FspFileSystemRemoveMountPoint(fileSystem);
   FspFileSystemDelete(fileSystem);
+  if (flushFailures != 0) {
+    QTextStream(stderr) << "unmount: " << flushFailures
+                        << " staged write(s) failed to commit" << Qt::endl;
+  }
+  QTextStream(stdout) << "unmounted " << mountPoint << Qt::endl;
+  if (gShutdownComplete) {
+    SetEvent(gShutdownComplete);
+  }
   return STATUS_SUCCESS;
 }
 
@@ -3546,6 +4070,11 @@ int main(int argc, char *argv[]) {
       {QStringLiteral("test-fault-path")},
       QStringLiteral("Test only: exact APFS path that triggers process exit."),
       QStringLiteral("path")};
+  QCommandLineOption stopEventOption{
+      {QStringLiteral("stop-event")},
+      QStringLiteral("Name of an existing event; when it is signaled the worker "
+                     "flushes, unmounts and exits 0."),
+      QStringLiteral("name")};
   parser.addOption(statusOption);
   parser.addOption(targetOption);
   parser.addOption(mountOption);
@@ -3554,6 +4083,7 @@ int main(int argc, char *argv[]) {
   parser.addOption(allowRawWritesOption);
   parser.addOption(testFaultExitPhaseOption);
   parser.addOption(testFaultPathOption);
+  parser.addOption(stopEventOption);
   parser.process(app);
 
   if (parser.isSet(statusOption) ||
@@ -3600,9 +4130,27 @@ int main(int argc, char *argv[]) {
         << Qt::endl;
     return 2;
   }
+  HANDLE stopEvent = nullptr;
+  if (parser.isSet(stopEventOption)) {
+    const QString stopEventName = parser.value(stopEventOption);
+    if (stopEventName.isEmpty()) {
+      QTextStream(stderr) << "--stop-event requires an event name" << Qt::endl;
+      return 2;
+    }
+    const std::wstring stopEventWide = wide(stopEventName);
+    stopEvent = OpenEventW(SYNCHRONIZE, FALSE, stopEventWide.c_str());
+    if (!stopEvent) {
+      QTextStream(stderr) << "cannot open stop event \"" << stopEventName
+                          << "\": Win32 error " << GetLastError() << Qt::endl;
+      return 6;
+    }
+  }
   const NTSTATUS status =
       runMount(target, mount, maxRead, readOnly, allowRawWrites,
-               testFaultExitPhase, testFaultPath);
+               testFaultExitPhase, testFaultPath, stopEvent);
+  if (stopEvent) {
+    CloseHandle(stopEvent);
+  }
   if (NT_SUCCESS(status)) {
     return 0;
   }

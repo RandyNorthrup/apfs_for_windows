@@ -230,27 +230,30 @@ function Get-ApfsWinFspServiceRuntimeRoot {
     Split-Path -Parent (Resolve-ApfsWinFspDriverPath -PathName ([string]$service.PathName))
 }
 
-function Invoke-ApfsWinFspRegsvr32 {
+function Invoke-ApfsDriverRegistration {
+    # Registers only the dedicated side-by-side driver service through the
+    # product's own service executable. Registering through the WinFsp DLL
+    # would also rewrite the WinFsp.Np network provider and event-log keys that
+    # a stock WinFsp install owns.
     param(
-        [Parameter(Mandatory = $true)][string]$DllPath,
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
         [switch]$Unregister,
         [int]$TimeoutSeconds = 30
     )
 
-    $regsvr32 = Join-Path $env:SystemRoot "System32\regsvr32.exe"
-    $arguments = if ($Unregister) {
-        "/u /s `"$DllPath`""
-    } else {
-        "/s `"$DllPath`""
+    $serviceExe = Join-Path $RuntimeRoot "apfs_mount_service.exe"
+    if (-not (Test-Path -LiteralPath $serviceExe -PathType Leaf)) {
+        throw "Cannot register the WinFsp driver: $serviceExe is missing."
     }
-    $process = Start-Process -FilePath $regsvr32 -ArgumentList $arguments `
+    $verb = if ($Unregister) { "--unregister-driver" } else { "--register-driver" }
+    $process = Start-Process -FilePath $serviceExe -ArgumentList $verb `
         -WindowStyle Hidden -PassThru
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
         throw "WinFsp driver registration timed out after $TimeoutSeconds seconds."
     }
     if ($process.ExitCode -ne 0) {
-        throw "WinFsp driver registration failed with exit code $($process.ExitCode)."
+        throw "WinFsp driver registration ($verb) failed with exit code $($process.ExitCode)."
     }
 }
 
@@ -261,8 +264,7 @@ function Register-ApfsWinFspRuntime {
     )
 
     $resolvedRoot = [IO.Path]::GetFullPath($RuntimeRoot)
-    $dllPath = Join-Path $resolvedRoot "winfsp-x64.dll"
-    Invoke-ApfsWinFspRegsvr32 -DllPath $dllPath -TimeoutSeconds $TimeoutSeconds
+    Invoke-ApfsDriverRegistration -RuntimeRoot $resolvedRoot -TimeoutSeconds $TimeoutSeconds
     $service = Get-ApfsWinFspDriverService
     if (-not $service) {
         throw "WinFsp registration did not create $script:ApfsWinFspServiceName."
@@ -304,12 +306,11 @@ function Unregister-ApfsWinFspRuntime {
             $resolvedRoot, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Refusing to unregister APFS WinFsp from unexpected path: $registeredRoot"
     }
-    $dllPath = Join-Path $resolvedRoot "winfsp-x64.dll"
-    if (-not (Test-Path -LiteralPath $dllPath -PathType Leaf)) {
-        throw "Cannot safely unload WinFsp because its runtime DLL is missing: $dllPath"
+    $serviceExe = Join-Path $resolvedRoot "apfs_mount_service.exe"
+    if (-not (Test-Path -LiteralPath $serviceExe -PathType Leaf)) {
+        throw "Cannot safely unregister WinFsp because $serviceExe is missing."
     }
-    Invoke-ApfsWinFspRegsvr32 -DllPath $dllPath -Unregister `
-        -TimeoutSeconds $TimeoutSeconds
+    Invoke-ApfsDriverRegistration -RuntimeRoot $resolvedRoot -Unregister -TimeoutSeconds $TimeoutSeconds
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {

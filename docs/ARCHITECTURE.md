@@ -52,13 +52,22 @@ is allowed.
 
 1. Pass repository privacy, hygiene, source-boundary, license, build, and CTest gates.
 2. Build from an explicit coherent WinFsp root and emit build metadata.
-3. Build the dedicated WDK test-signed kernel driver. Project application/package
-   binaries remain unsigned, and owner distribution requires persistent Windows
-   Test Signing. Production signing is not planned.
-4. Build deterministic package, generate hashes, embed release policy, remove
-   absolute dependency paths, and verify package-local payloads and privacy.
-5. Run exact-package lifecycle and destructive-media certification in isolated
+3. Build the dedicated WDK test-signed kernel driver. Owner distribution
+   requires persistent Windows Test Signing until the driver can be
+   attestation-signed, which needs an EV certificate and Partner Center access.
+4. Stage the package and Authenticode-sign the product executables and WinFsp
+   runtime DLL with Azure Artifact Signing (`CN=Randy Northrup`, GitHub OIDC in
+   CI). Qt and Visual C++ runtime files keep their upstream signatures. Signing
+   happens before any hash is computed.
+5. Generate hashes, embed release policy, remove absolute dependency paths, build
+   the deterministic ZIP, and verify package-local payloads, signatures
+   (`-RequireSigned`), and privacy.
+6. Build the WiX v5 MSI from the verified stage and sign it. The MSI registers
+   the service and side-by-side driver through `apfs_mount_service.exe`
+   (`--install`, `--register-driver`, `--unregister-driver`). It never changes
+   boot settings.
+7. Run exact-package lifecycle and destructive-media certification in isolated
    test systems.
-6. Publish a GitHub release only when owner-readiness has no blockers. Physical
-   fault recovery remains an explicit untested risk; no public `production-ready`
-   claim is made.
+8. Publish a GitHub release (MSI, ZIP, and `SHA256SUMS.txt`) only when
+   owner-readiness has no blockers. Physical fault recovery remains an explicit
+   untested risk; no public `production-ready` claim is made.

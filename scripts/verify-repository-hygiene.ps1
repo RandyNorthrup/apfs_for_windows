@@ -105,7 +105,7 @@ $sensitiveTracked = @($projectFiles | Where-Object {
 
 $allowedTopLevel = @(
     ".editorconfig", ".gitattributes", ".github", ".gitignore", ".gitmodules",
-    "cmake", "CMakeLists.txt", "CONTRIBUTING.md", "docs", "LICENSE",
+    "cmake", "CMakeLists.txt", "CONTRIBUTING.md", "docs", "installer", "LICENSE",
     "README.md", "RELEASE_POLICY.json", "scripts", "SECURITY.md", "src", "THIRD_PARTY_LICENSES.md",
     "third_party", "VERSION", "dependencies"
 )

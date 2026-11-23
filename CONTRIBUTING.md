@@ -43,5 +43,5 @@ read-only state. VM or host reboot tests are never implied by normal checks.
 - Never commit local paths, personal email metadata, private network details,
   credentials, device identifiers, or raw machine evidence.
 - Do not describe a build as production-ready. Current owner policy disables that
-  public claim, intentionally omits app/package signing, and accepts physical fault
-  testing as an unverified residual risk. Never imply kernel-driver trust is waived.
+  public claim, signs application binaries and the MSI with Azure Artifact Signing,
+  and accepts physical fault testing as an unverified residual risk. Never imply kernel-driver trust is waived.

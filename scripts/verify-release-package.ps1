@@ -7,7 +7,11 @@ param(
     [string]$OutputPath = "artifacts\package\verify-release-package.json",
     [ValidateSet("Production", "Test")]
     [string]$DriverSigningMode = "Test",
-    [switch]$AllowTestSignedDriver
+    [switch]$AllowTestSignedDriver,
+    # Release gate: require Azure Artifact Signing in the manifest and a valid,
+    # timestamped CN=Randy Northrup signature on every product binary.
+    [switch]$RequireSigned,
+    [string]$ExpectedPublisher = "CN=Randy Northrup"
 )
 
 $ErrorActionPreference = "Stop"
@@ -218,6 +222,59 @@ function Test-DeterministicArchive {
     }
 }
 
+function Get-ProductSignatureReport {
+    param(
+        [Parameter(Mandatory = $true)][string]$StageRoot,
+        [Parameter(Mandatory = $true)][string]$ExpectedPublisher
+    )
+
+    # Project binaries must carry the project signature. Official Qt binaries
+    # already ship validly signed by The Qt Company, and sign-files.ps1 keeps a
+    # valid third-party signature, so Qt files accept either publisher.
+    $qtPublisher = "CN=The QT Company Oy,"
+    $groups = @(
+        [ordered]@{ patterns = @("*.exe", "winfsp-x64.dll"); publishers = @($ExpectedPublisher) },
+        [ordered]@{ patterns = @("Qt6*.dll", "platforms\*.dll", "styles\*.dll");
+            publishers = @($ExpectedPublisher, $qtPublisher) }
+    )
+    $reports = @()
+    $seen = @{}
+    foreach ($group in $groups) {
+        foreach ($pattern in $group.patterns) {
+            foreach ($file in @(Get-ChildItem -Path (Join-Path $StageRoot $pattern) -File -ErrorAction SilentlyContinue |
+                    Sort-Object FullName)) {
+                if ($seen.ContainsKey($file.FullName)) { continue }
+                $seen[$file.FullName] = $true
+                $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
+                $subject = if ($signature.SignerCertificate) { [string]$signature.SignerCertificate.Subject } else { $null }
+                $timestamped = [bool]$signature.TimeStamperCertificate
+                $publisherOk = [bool]($subject -and @($group.publishers | Where-Object {
+                    $subject.StartsWith($_, [StringComparison]::OrdinalIgnoreCase)
+                }).Count -gt 0)
+                $reports += [ordered]@{
+                    relative_path = $file.FullName.Substring($StageRoot.Length + 1).Replace("\", "/")
+                    status = [string]$signature.Status
+                    signer = $subject
+                    accepted_publishers = @($group.publishers)
+                    timestamped = $timestamped
+                    ok = [bool]([string]$signature.Status -ceq "Valid" -and $publisherOk -and $timestamped)
+                }
+            }
+        }
+    }
+    $projectSigned = @($reports | Where-Object {
+        $_.ok -and ([string]$_.signer).StartsWith($ExpectedPublisher, [StringComparison]::Ordinal)
+    }).Count
+    [ordered]@{
+        ok = [bool]($reports.Count -gt 0 -and $projectSigned -gt 0 -and
+            @($reports | Where-Object { -not $_.ok }).Count -eq 0)
+        expected_publisher = $ExpectedPublisher
+        file_count = $reports.Count
+        project_signed_count = $projectSigned
+        files = $reports
+    }
+}
+
 $resolvedPackageRoot = Resolve-RepoPath $PackageRoot
 $resolvedOutput = Resolve-RepoPath $OutputPath
 if ($DriverSigningMode -eq "Test" -and -not $AllowTestSignedDriver) {
@@ -238,6 +295,12 @@ $requiredFiles = @(
     "Qt6Network.dll",
     "Qt6Widgets.dll",
     "platforms\qwindows.dll",
+    "styles\qmodernwindowsstyle.dll",
+    "msvcp140.dll",
+    "msvcp140_1.dll",
+    "msvcp140_2.dll",
+    "vcruntime140.dll",
+    "vcruntime140_1.dll",
     "configure-test-signing.ps1",
     "install-apfs-for-windows.ps1",
     "repair-apfs-for-windows-install.ps1",
@@ -338,13 +401,14 @@ $releasePolicyPath = Join-Path $stageRoot "RELEASE_POLICY.json"
 $releasePolicy = if (Test-Path -LiteralPath $releasePolicyPath -PathType Leaf) {
     Get-Content -LiteralPath $releasePolicyPath -Raw | ConvertFrom-Json
 } else { $null }
-$releasePolicyOk = $releasePolicy -and [int]$releasePolicy.schema_version -eq 2 -and
+$releasePolicyOk = $releasePolicy -and [int]$releasePolicy.schema_version -eq 3 -and
     [string]$releasePolicy.release_model -ceq
-        "owner_controlled_unsigned_test_mode_distribution" -and
-    $releasePolicy.application_signing.required -eq $false -and
-    [string]$releasePolicy.application_signing.status -ceq
-        "intentionally_unsigned_by_owner_decision" -and
-    $releasePolicy.package_signing.required -eq $false -and
+        "owner_controlled_signed_test_mode_distribution" -and
+    $releasePolicy.application_signing.required -eq $true -and
+    [string]$releasePolicy.application_signing.status -ceq "azure_artifact_signing" -and
+    $releasePolicy.package_signing.required -eq $true -and
+    [string]$releasePolicy.package_signing.status -ceq "azure_artifact_signing" -and
+    [string]$releasePolicy.installer.format -ceq "msi" -and
     [string]$releasePolicy.kernel_driver_trust.distribution_mode -ceq
         "persistent_windows_test_signing" -and
     $releasePolicy.kernel_driver_trust.production_signing_planned -eq $false -and
@@ -370,18 +434,34 @@ $testSigningSelfTest = Invoke-TestSigningHelperSelfTest `
     -ScriptPath (Join-Path $stageRoot "configure-test-signing.ps1")
 $uninstallSelfTest = Invoke-UninstallSelfTest `
     -ScriptPath (Join-Path $stageRoot "uninstall-apfs-for-windows.ps1")
+$signedStatus = "azure_artifact_signing"
+$unsignedStatus = "unsigned_development_build"
+$manifestApplicationSigning = if ($releaseManifest) { [string]$releaseManifest.application_signing } else { $null }
+$manifestPackageSigning = if ($releaseManifest) { [string]$releaseManifest.package_signing } else { $null }
+$manifestSigned = [bool]($manifestApplicationSigning -ceq $signedStatus -and
+    $manifestPackageSigning -ceq $signedStatus)
+$manifestSigningOk = if ($RequireSigned) {
+    $manifestSigned
+} else {
+    [bool]($manifestSigned -or
+        ($manifestApplicationSigning -ceq $unsignedStatus -and
+            $manifestPackageSigning -ceq $unsignedStatus))
+}
+$signatureReport = if (Test-Path -LiteralPath $stageRoot -PathType Container) {
+    Get-ProductSignatureReport -StageRoot $stageRoot -ExpectedPublisher $ExpectedPublisher
+} else {
+    [ordered]@{ ok = $false; expected_publisher = $ExpectedPublisher; file_count = 0; files = @() }
+}
+$signaturesOk = (-not $RequireSigned) -or $signatureReport.ok
 $expectedOwnerReleaseCandidate = [bool]($DriverSigningMode -eq "Test" -and
-    $releasePolicyOk -and
+    $manifestSigned -and $releasePolicyOk -and
     $releasePolicy.kernel_driver_trust.owner_test_mode_distribution_permitted -eq $true)
 $ok = $zipExists -and $archiveReport.ok -and ($missing.Count -eq 0) -and $releaseManifest -and
     ($manifestMismatches.Count -eq 0) -and $buildMetadataOk -and
     $sourceProvenanceOk -and $releasePolicyOk -and
     [int]$releaseManifest.schema_version -eq 2 -and
     ([string]$releaseManifest.driver_signing_mode -ceq $DriverSigningMode.ToLowerInvariant()) -and
-    ([string]$releaseManifest.application_signing -ceq
-        "intentionally_unsigned_by_owner_decision") -and
-    ([string]$releaseManifest.package_signing -ceq
-        "intentionally_unsigned_by_owner_decision") -and
+    $manifestSigningOk -and $signaturesOk -and
     ([string]$releaseManifest.physical_fault_recovery -ceq
         "not_physically_tested_owner_accepted") -and
     $releaseManifest.production_ready -eq $false -and
@@ -409,6 +489,12 @@ $result = [ordered]@{
     source_provenance_ok = [bool]$sourceProvenanceOk
     release_policy_ok = [bool]$releasePolicyOk
     release_policy = $releasePolicy
+    require_signed = [bool]$RequireSigned
+    manifest_application_signing = $manifestApplicationSigning
+    manifest_package_signing = $manifestPackageSigning
+    manifest_signing_ok = [bool]$manifestSigningOk
+    product_signatures_ok = [bool]$signatureReport.ok
+    product_signatures = $signatureReport
     build_metadata = $buildMetadata
     install_payload = $installPayload
     repair_payload = $repairPayload
