@@ -1,3 +1,6 @@
+# Copyright and license notice
+
+```
 GNU AFFERO GENERAL PUBLIC LICENSE
 Version 3, 19 November 2007
 
@@ -15,3 +18,6 @@ GNU Affero General Public License for more details.
 
 You should have received a copy of the GNU Affero General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
+```
+
+The full license text is in [LICENSE](../LICENSE).
