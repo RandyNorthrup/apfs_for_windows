@@ -34,7 +34,10 @@ $branches = @(& git -C $repoRoot for-each-ref --format="%(refname:short)" refs/h
 $branchCommandOk = $LASTEXITCODE -eq 0
 $remoteBranches = @(& git -C $repoRoot for-each-ref --format="%(refname)" refs/remotes 2>$null |
     Where-Object { $_ -and $_ -notmatch '/HEAD$' } |
-    ForEach-Object { $_ -replace '^refs/remotes/', '' })
+    ForEach-Object { $_ -replace '^refs/remotes/', '' } |
+    # A pull_request checkout in GitHub Actions fetches the transient merge ref
+    # of the PR being checked; it is not a long-lived branch.
+    Where-Object { -not ($env:GITHUB_ACTIONS -eq "true" -and $_ -match '^pull/\d+/(merge|head)$') })
 $remoteBranchCommandOk = $LASTEXITCODE -eq 0
 $detachedCiCheckout = $env:GITHUB_ACTIONS -eq "true" -and
     [string]::IsNullOrWhiteSpace($currentBranch)
